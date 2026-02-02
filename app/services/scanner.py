@@ -1,10 +1,25 @@
+from datetime import datetime
+
 def run_scan():
-    # V1: stubbed data
+    """
+    V1 scanner:
+    - Returns a small, deterministic list
+    - No external APIs yet
+    - Shape is FINAL (important)
+    """
+
+    now = datetime.utcnow().isoformat()
+
     return [
         {
             "symbol": "TEST",
-            "velocity": 320,
-            "volume_delta": 2.1,
-            "liquidity": 180000
+            "chain": "sol",
+            "reason": "stub_signal",
+            "observed_at": now,
+            "metrics": {
+                "social_velocity": 0,
+                "volume_delta": 0,
+                "liquidity_usd": 0
+            }
         }
     ]
