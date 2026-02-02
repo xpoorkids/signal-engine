@@ -1,9 +1,8 @@
-from fastapi import APIRouter
+# app/routes/scan.py
 from app.services.scanner import run_scan
 
-router = APIRouter()
-
 @router.post("/scan")
-def scan():
-    results = run_scan()
-    return {"candidates": results}
+async def scan(...):
+    ...
+    candidates = run_scan()
+    return { "status": "ok", "candidates": candidates }
