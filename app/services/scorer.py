@@ -76,6 +76,22 @@ def score_token(payload: dict):
         score += 10
         reasons.append("clean_setup")
 
+# --- Rug risk cap ---
+    if rug_risk >= 5:
+    return {
+        "status": "FAIL",
+        "reason": "rug_risk_high",
+        "score": score,
+        "rug_risk": rug_risk,
+        "rug_flags": rug_flags,
+        "candidate": candidate
+    }
+
+    if rug_risk >= 3:
+    # Cannot PASS, force WATCH
+        reasons.extend(rug_flags)
+
+
     # --- Final decision ---
     if score >= 80:
         status = "PASS"
