@@ -39,7 +39,7 @@ def score_token(payload: dict):
         score += 10
         reasons.append("clean_setup")
 
-   if score >= 80:
+    if score >= 80:
     status = "PASS"
 elif score >= 60:
     status = "WATCH"
