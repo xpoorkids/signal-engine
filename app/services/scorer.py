@@ -8,7 +8,7 @@ def score_token(payload: dict):
     volume_delta = candidate.get("volume_delta", 0)
     social_velocity = candidate.get("social_velocity", 0)
 
-    # --- Liquidity ---
+    # --- Liquidity (hard gate) ---
     if liquidity < 100_000:
         return {
             "status": "FAIL",
@@ -39,12 +39,13 @@ def score_token(payload: dict):
         score += 10
         reasons.append("clean_setup")
 
+    # --- Final decision ---
     if score >= 80:
-    status = "PASS"
-elif score >= 60:
-    status = "WATCH"
-else:
-    status = "FAIL"
+        status = "PASS"
+    elif score >= 60:
+        status = "WATCH"
+    else:
+        status = "FAIL"
 
     return {
         "status": status,
