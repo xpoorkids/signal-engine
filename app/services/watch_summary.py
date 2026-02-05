@@ -1,31 +1,37 @@
-import json
-from datetime import datetime, timedelta, timezone
 from collections import Counter
 from typing import Dict, List
-
-WATCH_LOG_PATH = "/data/watch_events.jsonl"
+from app.services.watch_store import load_recent_watch_events as _load_recent_watch_events
 
 def load_recent_watch_events(hours: int = 24) -> List[Dict]:
-    events = []
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    """
+    Load WATCH events from a JSONL log within a lookback window.
 
-    try:
-        with open(WATCH_LOG_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    event = json.loads(line)
-                    ts = datetime.fromisoformat(event["timestamp"])
-                    if ts >= cutoff:
-                        events.append(event)
-                except Exception:
-                    continue
-    except FileNotFoundError:
-        return []
+    Inputs:
+    - hours: lookback window size in hours (relative to current UTC time)
 
-    return events
+    Outputs:
+    - list of event dicts whose ISO 8601 timestamps are >= cutoff
+
+    Invariants and edge cases:
+    - Uses UTC "now" for cutoff calculation
+    - Skips malformed JSON lines or events with invalid/missing timestamps
+    - Returns [] if the log file does not exist
+    - Includes events exactly at the cutoff boundary
+    """
+    return _load_recent_watch_events(hours)
 
 
 def build_watch_summary(hours: int = 24) -> Dict:
+    """
+    Build a summary of recent WATCH activity within the lookback window.
+
+    Outputs:
+    - window_hours: the window size in hours
+    - total_watch_events: count of events in the window
+    - unique_tokens: number of distinct token identifiers
+    - top_tokens: top 10 tokens by event count
+    - reason_breakdown: frequency of reason strings across events
+    """
     events = load_recent_watch_events(hours)
 
     if not events:
