@@ -1,5 +1,6 @@
 fastapi
 uvicorn
 pydantic
+pydantic-settings>=2.0
 requests
 python-dotenv
