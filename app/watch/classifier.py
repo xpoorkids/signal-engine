@@ -7,6 +7,7 @@ def classify_watch_stage(signals: Dict[str, Any]) -> StageDecision:
     reasons: list[str] = []
     score = 0
 
+    # --- Extract signals ---
     lp = signals.get("lp_usd")
     vol5 = signals.get("vol_5m")
     tx5 = signals.get("tx_5m")
@@ -14,7 +15,7 @@ def classify_watch_stage(signals: Dict[str, Any]) -> StageDecision:
     top10 = signals.get("top10_pct")
     rug_bad = bool(signals.get("rug_bad", False))
 
-        # --- Solana stage thresholds (config-driven) ---
+    # --- Solana stage thresholds (config-driven) ---
     lp_min = T["lp_usd"]["min"]
     lp_mid = T["lp_usd"]["mid"]
     lp_high = T["lp_usd"]["high"]
@@ -38,8 +39,7 @@ def classify_watch_stage(signals: Dict[str, Any]) -> StageDecision:
     build_cutoff = T["stage_cutoffs"]["building"]
     pass_cutoff = T["stage_cutoffs"]["near_pass"]
 
-
-    # Hard kill (non-negotiable)
+    # --- Hard kill ---
     if rug_bad:
         return StageDecision(
             stage="early",
@@ -49,77 +49,77 @@ def classify_watch_stage(signals: Dict[str, Any]) -> StageDecision:
         )
 
     # ---------------------------
-    # 1️⃣ Liquidity (Solana reality)
+    # 1️⃣ Liquidity
     # ---------------------------
     if isinstance(lp, (int, float)):
-       if lp >= lp_high:
-              score += 3; reasons.append("LP >= high")
-       elif lp >= lp_mid:
-              score += 2; reasons.append("LP >= mid")
-       elif lp >= lp_min:
-              score += 1; reasons.append("LP >= min")
-       else:
-              score -= 2; reasons.append("LP < min")
+        if lp >= lp_high:
+            score += 3; reasons.append("LP >= high")
+        elif lp >= lp_mid:
+            score += 2; reasons.append("LP >= mid")
+        elif lp >= lp_min:
+            score += 1; reasons.append("LP >= min")
+        else:
+            score -= 2; reasons.append("LP < min")
 
     # ---------------------------
     # 2️⃣ Volume velocity (5m)
     # ---------------------------
     if isinstance(vol5, (int, float)):
         if vol5 >= vol_high:
-             score += 4; reasons.append("Vol5m >= high")
+            score += 4; reasons.append("Vol5m >= high")
         elif vol5 >= vol_mid:
-             score += 3; reasons.append("Vol5m >= mid")
+            score += 3; reasons.append("Vol5m >= mid")
         elif vol5 >= vol_low:
-             score += 1; reasons.append("Vol5m >= low")
+            score += 1; reasons.append("Vol5m >= low")
         else:
-             score -= 1; reasons.append("Vol5m weak")
-
+            score -= 1; reasons.append("Vol5m weak")
 
     # ---------------------------
     # 3️⃣ Transaction density
     # ---------------------------
     if isinstance(tx5, (int, float)):
-        if tx5 >= 120:
-            score += 3; reasons.append("Tx5m >= 120 (broad participation)")
-        elif tx5 >= 50:
-            score += 2; reasons.append("Tx5m >= 50")
-        elif tx5 >= 18:
-            score += 1; reasons.append("Tx5m >= 18")
+        if tx5 >= tx_high:
+            score += 3; reasons.append("Tx5m >= high")
+        elif tx5 >= tx_mid:
+            score += 2; reasons.append("Tx5m >= mid")
+        elif tx5 >= tx_low:
+            score += 1; reasons.append("Tx5m >= low")
         else:
             score -= 1; reasons.append("Tx5m sparse")
 
     # ---------------------------
-    # 4️⃣ Holder expansion (MOST IMPORTANT)
+    # 4️⃣ Holder expansion
     # ---------------------------
     if isinstance(h_delta, (int, float)):
         if h_delta >= h_high:
-             score += 4; reasons.append("Holders >= high")
+            score += 4; reasons.append("Holders >= high")
         elif h_delta >= h_mid:
-             score += 3; reasons.append("Holders >= mid")
+            score += 3; reasons.append("Holders >= mid")
         elif h_delta >= h_low:
-             score += 1; reasons.append("Holders >= low")
+            score += 1; reasons.append("Holders >= low")
         else:
-             score -= 1; reasons.append("Holder growth weak")
+            score -= 1; reasons.append("Holder growth weak")
 
     # ---------------------------
     # 5️⃣ Concentration penalty
     # ---------------------------
     if isinstance(top10, (int, float)):
-        if top10 >= 65:
-            score -= 3; reasons.append("Top10 >= 65% (control risk)")
-        elif top10 >= 50:
-            score -= 2; reasons.append("Top10 >= 50%")
-        elif top10 >= 40:
-            score -= 1; reasons.append("Top10 >= 40%")
+        if top10 >= top10_severe:
+            score -= 3; reasons.append("Top10 >= severe")
+        elif top10 >= top10_bad:
+            score -= 2; reasons.append("Top10 >= bad")
+        elif top10 >= top10_warn:
+            score -= 1; reasons.append("Top10 >= warn")
 
     # ---------------------------
-    # Final stage mapping (Solana tuned)
+    # Final stage mapping
     # ---------------------------
-   if score >= pass_cutoff:
-    stage: WatchStage = "near_pass"
-        elif score >= build_cutoff:
-    stage = "building"
-        else:
-    stage = "early"
+    if score >= pass_cutoff:
+        stage: WatchStage = "near_pass"
+    elif score >= build_cutoff:
+        stage = "building"
+    else:
+        stage = "early"
 
     return StageDecision(stage, score, reasons, signals)
+
