@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any, Dict
 from .stages import StageDecision, WatchStage
+from .stage_config import SOL_STAGE_THRESHOLDS as T
 
 def classify_watch_stage(signals: Dict[str, Any]) -> StageDecision:
     reasons: list[str] = []
