@@ -8,34 +8,36 @@ import requests
 from .stages import WatchStage
 from app.services.watch_store import append_watch_event
 
+_N8N_NEAR_PASS_TRANSITION_URL = "https://justsomekids.app.n8n.cloud/webhook/near-pass-transition"
+_N8N_NEAR_PASS_DEMOTION_URL = "https://justsomekids.app.n8n.cloud/webhook/near-pass-demotion"
+
 
 class _TransitionState(TypedDict):
     stage: WatchStage
     entered_at: datetime
 
 
-# Process-local, ephemeral state.
-# This provides deterministic behavior within a single process only.
 _STATE: Dict[str, _TransitionState] = {}
 
 
-N8N_WEBHOOK_URL = "https://justsomekids.app.n8n.cloud/webhook/near-pass-transition"
-
-
-def emit_stage_transition_to_n8n(event: dict) -> None:
-    """
-    Best-effort notification to n8n.
-    Failures must never impact scoring or persistence.
-    """
+def _post_webhook(url: str, event: Dict[str, object]) -> None:
     try:
-        requests.post(
-            N8N_WEBHOOK_URL,
-            json=event,
-            timeout=3,
-        )
+        requests.post(url, json=event, timeout=5)
     except Exception:
-        # Alerts must never break scoring
         pass
+
+
+def _emit_transition_webhook(event: Dict[str, object]) -> None:
+    url = None
+    if event.get("to_stage") == "near_pass":
+        url = _N8N_NEAR_PASS_TRANSITION_URL
+    elif event.get("from_stage") == "near_pass" and event.get("to_stage") != "near_pass":
+        url = _N8N_NEAR_PASS_DEMOTION_URL
+
+    if not url:
+        return
+
+    _post_webhook(url, event)
 
 
 def record_stage_transition(
@@ -45,22 +47,17 @@ def record_stage_transition(
     score: int,
     reasons: List[str],
 ) -> None:
-    """
-    Record a stage transition if and only if the stage has changed.
-    Emits an append-only log event and notifies n8n.
-    """
     now = datetime.now(timezone.utc)
 
     prev = _STATE.get(token)
-
-    # No transition if stage is unchanged
     if prev and prev["stage"] == stage:
         return
 
-    # Compute duration in previous stage (if known)
     duration_seconds: int | None = None
     if prev:
-        duration_seconds = int((now - prev["entered_at"]).total_seconds())
+        entered_at = prev["entered_at"]
+        exited_at = now
+        duration_seconds = int((exited_at - entered_at).total_seconds())
 
     event = {
         "event": "stage_transition",
@@ -76,4 +73,10 @@ def record_stage_transition(
         "timestamp": now.isoformat(),
     }
 
-    # 1️⃣ Persist first (source of truth)
+    append_watch_event(event)
+    _emit_transition_webhook(event)
+
+    _STATE[token] = {
+        "stage": stage,
+        "entered_at": now,
+    }
