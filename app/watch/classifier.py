@@ -14,6 +14,31 @@ def classify_watch_stage(signals: Dict[str, Any]) -> StageDecision:
     top10 = signals.get("top10_pct")
     rug_bad = bool(signals.get("rug_bad", False))
 
+        # --- Solana stage thresholds (config-driven) ---
+    lp_min = T["lp_usd"]["min"]
+    lp_mid = T["lp_usd"]["mid"]
+    lp_high = T["lp_usd"]["high"]
+
+    vol_low = T["vol_5m"]["low"]
+    vol_mid = T["vol_5m"]["mid"]
+    vol_high = T["vol_5m"]["high"]
+
+    tx_low = T["tx_5m"]["low"]
+    tx_mid = T["tx_5m"]["mid"]
+    tx_high = T["tx_5m"]["high"]
+
+    h_low = T["holders_delta_15m"]["low"]
+    h_mid = T["holders_delta_15m"]["mid"]
+    h_high = T["holders_delta_15m"]["high"]
+
+    top10_warn = T["top10_pct"]["warn"]
+    top10_bad = T["top10_pct"]["bad"]
+    top10_severe = T["top10_pct"]["severe"]
+
+    build_cutoff = T["stage_cutoffs"]["building"]
+    pass_cutoff = T["stage_cutoffs"]["near_pass"]
+
+
     # Hard kill (non-negotiable)
     if rug_bad:
         return StageDecision(
@@ -27,27 +52,28 @@ def classify_watch_stage(signals: Dict[str, Any]) -> StageDecision:
     # 1️⃣ Liquidity (Solana reality)
     # ---------------------------
     if isinstance(lp, (int, float)):
-        if lp >= 60_000:
-            score += 3; reasons.append("LP >= 60k (strong exit depth)")
-        elif lp >= 30_000:
-            score += 2; reasons.append("LP >= 30k")
-        elif lp >= 12_000:
-            score += 1; reasons.append("LP >= 12k")
-        else:
-            score -= 2; reasons.append("LP < 12k (exit risk)")
+       if lp >= lp_high:
+              score += 3; reasons.append("LP >= high")
+       elif lp >= lp_mid:
+              score += 2; reasons.append("LP >= mid")
+       elif lp >= lp_min:
+              score += 1; reasons.append("LP >= min")
+       else:
+              score -= 2; reasons.append("LP < min")
 
     # ---------------------------
     # 2️⃣ Volume velocity (5m)
     # ---------------------------
     if isinstance(vol5, (int, float)):
-        if vol5 >= 25_000:
-            score += 4; reasons.append("Vol5m >= 25k (momentum ignition)")
-        elif vol5 >= 10_000:
-            score += 3; reasons.append("Vol5m >= 10k")
-        elif vol5 >= 3_000:
-            score += 1; reasons.append("Vol5m >= 3k")
+        if vol5 >= vol_high:
+             score += 4; reasons.append("Vol5m >= high")
+        elif vol5 >= vol_mid:
+             score += 3; reasons.append("Vol5m >= mid")
+        elif vol5 >= vol_low:
+             score += 1; reasons.append("Vol5m >= low")
         else:
-            score -= 1; reasons.append("Vol5m weak")
+             score -= 1; reasons.append("Vol5m weak")
+
 
     # ---------------------------
     # 3️⃣ Transaction density
@@ -66,14 +92,14 @@ def classify_watch_stage(signals: Dict[str, Any]) -> StageDecision:
     # 4️⃣ Holder expansion (MOST IMPORTANT)
     # ---------------------------
     if isinstance(h_delta, (int, float)):
-        if h_delta >= 120:
-            score += 4; reasons.append("Holders +120/15m (distribution expanding)")
-        elif h_delta >= 50:
-            score += 3; reasons.append("Holders +50/15m")
-        elif h_delta >= 20:
-            score += 1; reasons.append("Holders +20/15m")
+        if h_delta >= h_high:
+             score += 4; reasons.append("Holders >= high")
+        elif h_delta >= h_mid:
+             score += 3; reasons.append("Holders >= mid")
+        elif h_delta >= h_low:
+             score += 1; reasons.append("Holders >= low")
         else:
-            score -= 1; reasons.append("Holder growth weak")
+             score -= 1; reasons.append("Holder growth weak")
 
     # ---------------------------
     # 5️⃣ Concentration penalty
@@ -89,11 +115,11 @@ def classify_watch_stage(signals: Dict[str, Any]) -> StageDecision:
     # ---------------------------
     # Final stage mapping (Solana tuned)
     # ---------------------------
-    if score >= 10:
-        stage: WatchStage = "near_pass"
-    elif score >= 5:
-        stage = "building"
-    else:
-        stage = "early"
+   if score >= pass_cutoff:
+    stage: WatchStage = "near_pass"
+        elif score >= build_cutoff:
+    stage = "building"
+        else:
+    stage = "early"
 
     return StageDecision(stage, score, reasons, signals)
