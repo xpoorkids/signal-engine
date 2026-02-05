@@ -1,4 +1,8 @@
-from pydantic_settings import BaseSettings
+class Settings(BaseSettings):
+    WATCH_LOG_PATH: str = "/data/watch.log"
+
+    class Config:
+        env_file = ".env"
 
 class Settings(BaseSettings):
     ENV: str = "prod"
