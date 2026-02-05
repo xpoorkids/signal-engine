@@ -1,125 +1,100 @@
-from __future__ import annotations
-from typing import Any, Dict
-from .stages import StageDecision, WatchStage
-from .stage_config import SOL_STAGE_THRESHOLDS as T
+ from __future__ import annotations
+ from typing import Any, Dict
+ from .stages import StageDecision, WatchStage
+ from .stage_config import SOL_STAGE_THRESHOLDS as T
+ 
+ def classify_watch_stage(signals: Dict[str, Any]) -> StageDecision:
+     reasons: list[str] = []
+     score = 0
+ 
++    def apply_tiers(
++        value: Any,
++        metric_key: str,
++        label: str,
++        tiers: list[tuple[str, int]],
++        below_score: int,
++        below_reason: str,
++    ) -> None:
++        nonlocal score
++        if not isinstance(value, (int, float)):
++            return
++        thresholds = T[metric_key]
++        for tier_key, tier_score in tiers:
++            if value >= thresholds[tier_key]:
++                score += tier_score
++                reasons.append(f"{label} >= {tier_key}")
++                return
++        score += below_score
++        reasons.append(below_reason)
++
++    def apply_penalty(
++        value: Any,
++        metric_key: str,
++        label: str,
++        tiers: list[tuple[str, int]],
++    ) -> None:
++        nonlocal score
++        if not isinstance(value, (int, float)):
++            return
++        thresholds = T[metric_key]
++        for tier_key, tier_score in tiers:
++            if value >= thresholds[tier_key]:
++                score += tier_score
++                reasons.append(f"{label} >= {tier_key}")
++                return
++
++    if bool(signals.get("rug_bad", False)):
+         return StageDecision(
+             stage="early",
+             score=-999,
+             reasons=["rug / critical risk flag"],
+             signals=signals,
+         )
+ 
+ apply_tiers(
+        signals.get("lp_usd"),
+        "lp_usd",
+        "LP",
+        [("high", 3), ("mid", 2), ("min", 1)],
+        -2,
+        "LP < min",
+    )
+    apply_tiers(
+        signals.get("vol_5m"),
+        "vol_5m",
+        "Vol5m",
+        [("high", 4), ("mid", 3), ("low", 1)],
+        -1,
+        "Vol5m weak",
+    )
+    apply_tiers(
+        signals.get("tx_5m"),
+        "tx_5m",
+        "Tx5m",
+        [("high", 3), ("mid", 2), ("low", 1)],
+        -1,
+        "Tx5m sparse",
+    )
+    apply_tiers(
+        signals.get("holders_delta_15m"),
+        "holders_delta_15m",
+        "Holders",
+        [("high", 4), ("mid", 3), ("low", 1)],
+        -1,
+        "Holder growth weak",
+    )
+    apply_penalty(
+        signals.get("top10_pct"),
+        "top10_pct",
+        "Top10",
+        [("severe", -3), ("bad", -2), ("warn", -1)],
+    )
 
-def classify_watch_stage(signals: Dict[str, Any]) -> StageDecision:
-    reasons: list[str] = []
-    score = 0
-
-    # --- Extract signals ---
-    lp = signals.get("lp_usd")
-    vol5 = signals.get("vol_5m")
-    tx5 = signals.get("tx_5m")
-    h_delta = signals.get("holders_delta_15m")
-    top10 = signals.get("top10_pct")
-    rug_bad = bool(signals.get("rug_bad", False))
-
-    # --- Solana stage thresholds (config-driven) ---
-    lp_min = T["lp_usd"]["min"]
-    lp_mid = T["lp_usd"]["mid"]
-    lp_high = T["lp_usd"]["high"]
-
-    vol_low = T["vol_5m"]["low"]
-    vol_mid = T["vol_5m"]["mid"]
-    vol_high = T["vol_5m"]["high"]
-
-    tx_low = T["tx_5m"]["low"]
-    tx_mid = T["tx_5m"]["mid"]
-    tx_high = T["tx_5m"]["high"]
-
-    h_low = T["holders_delta_15m"]["low"]
-    h_mid = T["holders_delta_15m"]["mid"]
-    h_high = T["holders_delta_15m"]["high"]
-
-    top10_warn = T["top10_pct"]["warn"]
-    top10_bad = T["top10_pct"]["bad"]
-    top10_severe = T["top10_pct"]["severe"]
-
-    build_cutoff = T["stage_cutoffs"]["building"]
-    pass_cutoff = T["stage_cutoffs"]["near_pass"]
-
-    # --- Hard kill ---
-    if rug_bad:
-        return StageDecision(
-            stage="early",
-            score=-999,
-            reasons=["rug / critical risk flag"],
-            signals=signals,
-        )
-
-    # ---------------------------
-    # 1️⃣ Liquidity
-    # ---------------------------
-    if isinstance(lp, (int, float)):
-        if lp >= lp_high:
-            score += 3; reasons.append("LP >= high")
-        elif lp >= lp_mid:
-            score += 2; reasons.append("LP >= mid")
-        elif lp >= lp_min:
-            score += 1; reasons.append("LP >= min")
-        else:
-            score -= 2; reasons.append("LP < min")
-
-    # ---------------------------
-    # 2️⃣ Volume velocity (5m)
-    # ---------------------------
-    if isinstance(vol5, (int, float)):
-        if vol5 >= vol_high:
-            score += 4; reasons.append("Vol5m >= high")
-        elif vol5 >= vol_mid:
-            score += 3; reasons.append("Vol5m >= mid")
-        elif vol5 >= vol_low:
-            score += 1; reasons.append("Vol5m >= low")
-        else:
-            score -= 1; reasons.append("Vol5m weak")
-
-    # ---------------------------
-    # 3️⃣ Transaction density
-    # ---------------------------
-    if isinstance(tx5, (int, float)):
-        if tx5 >= tx_high:
-            score += 3; reasons.append("Tx5m >= high")
-        elif tx5 >= tx_mid:
-            score += 2; reasons.append("Tx5m >= mid")
-        elif tx5 >= tx_low:
-            score += 1; reasons.append("Tx5m >= low")
-        else:
-            score -= 1; reasons.append("Tx5m sparse")
-
-    # ---------------------------
-    # 4️⃣ Holder expansion
-    # ---------------------------
-    if isinstance(h_delta, (int, float)):
-        if h_delta >= h_high:
-            score += 4; reasons.append("Holders >= high")
-        elif h_delta >= h_mid:
-            score += 3; reasons.append("Holders >= mid")
-        elif h_delta >= h_low:
-            score += 1; reasons.append("Holders >= low")
-        else:
-            score -= 1; reasons.append("Holder growth weak")
-
-    # ---------------------------
-    # 5️⃣ Concentration penalty
-    # ---------------------------
-    if isinstance(top10, (int, float)):
-        if top10 >= top10_severe:
-            score -= 3; reasons.append("Top10 >= severe")
-        elif top10 >= top10_bad:
-            score -= 2; reasons.append("Top10 >= bad")
-        elif top10 >= top10_warn:
-            score -= 1; reasons.append("Top10 >= warn")
-
-    # ---------------------------
-    # Final stage mapping
-    # ---------------------------
-    if score >= pass_cutoff:
-        stage: WatchStage = "near_pass"
-    elif score >= build_cutoff:
-        stage = "building"
-    else:
-        stage = "early"
-
-    return StageDecision(stage, score, reasons, signals)
-
+     if score >= T["stage_cutoffs"]["near_pass"]:
+         stage: WatchStage = "near_pass"
++    elif score >= T["stage_cutoffs"]["building"]:
+         stage = "building"
+     else:
+         stage = "early"
+ 
+     return StageDecision(stage, score, reasons, signals)
