@@ -9,3 +9,5 @@ state/engine.db
 # OS
 .DS_Store
 Thumbs.db
+.github/
+tests/
