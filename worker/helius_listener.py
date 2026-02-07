@@ -44,28 +44,47 @@ async def listen(on_new_pool):
             tx = result.get("transaction", {})
             message = tx.get("message", {})
             instructions = message.get("instructions", [])
+            account_keys = message.get("accountKeys", [])
+
+            # 1) Look for InitializeMint (Pump.fun pattern)
+            mint = None
+            ix_program_id = None
 
             for ix in instructions:
-                program_id = ix.get("programId")
-                if program_id not in PROGRAM_IDS:
-                    continue
-
                 parsed = ix.get("parsed")
                 if not parsed:
                     continue
 
-                info = parsed.get("info", {})
-                mint = info.get("mint") or info.get("baseMint") or info.get("tokenMint")
-                if not mint:
-                    continue
+                if parsed.get("type") == "initializeMint":
+                    info = parsed.get("info", {})
+                    mint = info.get("mint")
+                    ix_program_id = ix.get("programId")
+                    if mint:
+                        break
 
-                event = {
-                    "source": "helius",
-                    "type": "new_pool",
-                    "token": mint,
-                    "program": program_id,
-                    "signature": result.get("signature"),
-                    "observed_at": datetime.now(timezone.utc).isoformat(),
-                }
+            # 2) Fallback: use accountKeys (common for Pump.fun)
+            if not mint:
+                for key in account_keys:
+                    if isinstance(key, dict):
+                        pubkey = key.get("pubkey")
+                    else:
+                        pubkey = key
 
-                await on_new_pool(event)
+                    # Pump.fun mints are brand new - never seen before
+                    if pubkey and len(pubkey) >= 32:
+                        mint = pubkey
+                        break
+
+            if not mint:
+                continue
+
+            event = {
+                "source": "helius_pumpfun",
+                "type": "new_mint",
+                "token": mint,
+                "program": ix_program_id,
+                "signature": result.get("signature"),
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+            await on_new_pool(event)
