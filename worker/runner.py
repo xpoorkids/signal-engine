@@ -1,7 +1,7 @@
 import asyncio
 
 from worker.helius_listener import listen
-from worker.scanner import process_early_candidate, run
+import worker.scanner as scanner
 
 
 def process_early_candidate(event: dict) -> None:
@@ -26,13 +26,13 @@ async def handle_new_pool(event: dict) -> None:
         "signature": event.get("signature"),
     }
 
-    process_early_candidate(candidate)
+    scanner.process_early_candidate(candidate)
 
 
 async def main() -> None:
     await asyncio.gather(
         listen(handle_new_pool),
-        asyncio.to_thread(run),
+        asyncio.to_thread(scanner.run),
     )
 
 
