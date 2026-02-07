@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Request, HTTPException
 import os
-from app.services.scan_service import handle_scan_request, ScanRequestError
+from app.services.scan_service import process_scan_payload, ScanRequestError
 
 """
 Scan ingestion endpoint for automation-driven token discovery.
@@ -39,6 +39,6 @@ async def scan(request: Request):
     signature = request.headers.get("X-N8N-Signature")
     raw_body = await request.body()
     try:
-        return handle_scan_request(raw_body, signature, N8N_SHARED_SECRET)
+        return process_scan_payload(raw_body, signature, N8N_SHARED_SECRET)
     except ScanRequestError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
