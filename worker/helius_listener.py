@@ -71,9 +71,19 @@ async def listen(on_new_pool):
             value = msg.get("params", {}).get("result", {}).get("value", {})
             logs = value.get("logs", [])
 
+            print(
+                f"[helius] logs received ({len(logs)} lines)",
+                flush=True,
+            )
+
             parsed = parse_helius_logs(logs, PROGRAM_IDS)
             if not parsed:
                 continue
+
+            print(
+                f"[helius] parsed new pool token={parsed['token']}",
+                flush=True,
+            )
 
             event = {
                 "source": "helius_pumpfun" if PUMP_FUN_PROGRAM_ID in PROGRAM_IDS else "helius",
