@@ -68,6 +68,7 @@ async def listen(on_new_pool):
 
         while True:
             msg = json.loads(await ws.recv())
+            print("[helius] ws message received", flush=True)
             value = msg.get("params", {}).get("result", {}).get("value", {})
             logs = value.get("logs", [])
 
