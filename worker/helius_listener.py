@@ -8,17 +8,22 @@ from datetime import datetime, timezone
 HELIUS_KEY = os.getenv("HELIUS_API_KEY")
 HELIUS_WS = f"wss://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}"
 
-# Raydium + Orca program IDs
+# Pump.fun program ID (mainnet)
+PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+
+# Raydium + Orca + Pump.fun program IDs
 PROGRAM_IDS = [
     "RVKd61ztZW9L5GxF3XH9RZy5D3R1xYbC5nZ5qZpZr2D",  # Raydium AMM (example)
     "whirLb8k1ZrZg2KqYF9rXy2rZpZqv2X6kz5n",          # Orca Whirlpool (example)
+    PUMP_FUN_PROGRAM_ID,
 ]
 
 MINT_RE = re.compile(r"(base_mint|mint|token)=([A-Za-z0-9]{32,44})", re.IGNORECASE)
 POOL_RE = re.compile(r"(pool|amm|whirlpool)=([A-Za-z0-9]{32,44})", re.IGNORECASE)
+GENERIC_PUBKEY_RE = re.compile(r"\b[A-Za-z0-9]{32,44}\b")
 
 
-def parse_helius_logs(logs: list[str]) -> dict | None:
+def parse_helius_logs(logs: list[str], program_ids: list[str]) -> dict | None:
     base_mint = None
     pool = None
 
@@ -30,6 +35,14 @@ def parse_helius_logs(logs: list[str]) -> dict | None:
         p = POOL_RE.search(line)
         if p and not pool:
             pool = p.group(2)
+
+    if not base_mint:
+        for line in logs:
+            for match in GENERIC_PUBKEY_RE.findall(line):
+                base_mint = match
+                break
+            if base_mint:
+                break
 
     if not base_mint:
         return None
@@ -58,12 +71,12 @@ async def listen(on_new_pool):
             value = msg.get("params", {}).get("result", {}).get("value", {})
             logs = value.get("logs", [])
 
-            parsed = parse_helius_logs(logs)
+            parsed = parse_helius_logs(logs, PROGRAM_IDS)
             if not parsed:
                 continue
 
             event = {
-                "source": "helius",
+                "source": "helius_pumpfun" if PUMP_FUN_PROGRAM_ID in PROGRAM_IDS else "helius",
                 "type": "new_pool",
                 "token": parsed["token"],
                 "pool": parsed.get("pool"),
