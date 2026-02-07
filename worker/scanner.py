@@ -1,6 +1,7 @@
 import os
 import time
 from datetime import datetime, timezone
+print(f"[version] commit={os.getenv('RENDER_GIT_COMMIT', 'unknown')}", flush=True)
 try:
     from zoneinfo import ZoneInfo
     LOCAL_TZ = ZoneInfo("America/Chicago")
