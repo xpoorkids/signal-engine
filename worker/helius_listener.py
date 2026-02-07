@@ -19,8 +19,7 @@ PROGRAM_IDS = [
 
 def extract_mint_from_inner_instructions(tx: dict) -> str | None:
     """
-    Extract mint address from Pump.fun CPI initializeMint
-    using innerInstructions + accountKeys mapping.
+    Extract Pump.fun mint by resolving account index from InitializeMint CPI.
     """
     message = tx.get("transaction", {}).get("message", {})
     meta = tx.get("meta", {})
@@ -34,20 +33,20 @@ def extract_mint_from_inner_instructions(tx: dict) -> str | None:
             if not parsed:
                 continue
 
+            # Token Program mint initialization
             if parsed.get("type") == "initializeMint":
-                info = parsed.get("info", {})
-                mint = info.get("mint")
-                if mint:
-                    return mint
+                accounts = ix.get("accounts", [])
+                if not accounts:
+                    continue
 
-            accounts = ix.get("accounts", [])
-            for acct_index in accounts:
+                # FIRST account is the mint for InitializeMint
+                mint_index = accounts[0]
+
                 try:
-                    key = account_keys[acct_index]
+                    key = account_keys[mint_index]
                     if isinstance(key, dict):
-                        key = key.get("pubkey")
-                    if key and len(key) >= 32:
-                        return key
+                        return key.get("pubkey")
+                    return key
                 except Exception:
                     continue
 
