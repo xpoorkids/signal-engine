@@ -109,9 +109,22 @@ def send_daily_digest():
         send_text(msg, mode="digest", fanout=False)
 
 
-def _process_candidate(c: dict) -> None:
+def passes_near_pass(c: dict) -> bool:
+    metrics = c.get("metrics") or {}
+    liq = float(metrics.get("liquidity") or 0)
+    vol5m = float(metrics.get("volume_5m") or 0)
+    chg5m = float(metrics.get("price_change_5m") or 0)
+    age = float(metrics.get("age_minutes") or 0)
+    return age <= 0.5 and liq >= 800 and vol5m >= 20 and chg5m >= -10
+
+
+def _process_candidate(c: dict, bypass_metrics: bool = False) -> None:
+    metrics = c.get("metrics") or {}
+    if not bypass_metrics:
+        if not passes_near_pass(c):
+            return
+
     token = c["token"]
-    metrics = c.get("metrics", {})
     upsert_seen(token, metrics)
 
     if WALLET_SCORE_ENABLED:
@@ -178,11 +191,14 @@ def _process_candidate(c: dict) -> None:
 def process_early_candidate(candidate: dict) -> None:
     """
     Early candidate from Helius WS.
-    Uses the same downstream pipeline as polling candidates.
+    These bypass metric gates and enter as early stage.
     """
     candidate["source"] = "helius"
-    candidate["early"] = True
-    _process_candidate(candidate)
+    candidate["stage"] = "early_ws"
+    metrics = candidate.get("metrics") or {}
+    metrics["age_minutes"] = 0.0
+    candidate["metrics"] = metrics
+    _process_candidate(candidate, bypass_metrics=True)
 
 
 def process_candidate(candidate: dict) -> None:
