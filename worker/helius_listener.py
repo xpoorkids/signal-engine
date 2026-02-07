@@ -17,6 +17,42 @@ PROGRAM_IDS = [
     PUMP_FUN_PROGRAM_ID,
 ]
 
+def extract_mint_from_inner_instructions(tx: dict) -> str | None:
+    """
+    Extract mint address from Pump.fun CPI initializeMint
+    using innerInstructions + accountKeys mapping.
+    """
+    message = tx.get("transaction", {}).get("message", {})
+    meta = tx.get("meta", {})
+
+    account_keys = message.get("accountKeys", [])
+    inner_ixs = meta.get("innerInstructions", [])
+
+    for inner in inner_ixs:
+        for ix in inner.get("instructions", []):
+            parsed = ix.get("parsed")
+            if not parsed:
+                continue
+
+            if parsed.get("type") == "initializeMint":
+                info = parsed.get("info", {})
+                mint = info.get("mint")
+                if mint:
+                    return mint
+
+            accounts = ix.get("accounts", [])
+            for acct_index in accounts:
+                try:
+                    key = account_keys[acct_index]
+                    if isinstance(key, dict):
+                        key = key.get("pubkey")
+                    if key and len(key) >= 32:
+                        return key
+                except Exception:
+                    continue
+
+    return None
+
 async def listen(on_new_pool):
     async with websockets.connect(HELIUS_WS) as ws:
         sub = {
@@ -41,39 +77,16 @@ async def listen(on_new_pool):
             print("[helius] tx message received", flush=True)
 
             result = msg.get("params", {}).get("result", {})
-            tx = result.get("transaction", {})
-            message = tx.get("message", {})
-            instructions = message.get("instructions", [])
-            account_keys = message.get("accountKeys", [])
+            tx = result.get("transaction")
+            meta = result.get("meta")
 
-            # 1) Look for InitializeMint (Pump.fun pattern)
-            mint = None
-            ix_program_id = None
+            if not tx or not meta:
+                continue
 
-            for ix in instructions:
-                parsed = ix.get("parsed")
-                if not parsed:
-                    continue
-
-                if parsed.get("type") == "initializeMint":
-                    info = parsed.get("info", {})
-                    mint = info.get("mint")
-                    ix_program_id = ix.get("programId")
-                    if mint:
-                        break
-
-            # 2) Fallback: use accountKeys (common for Pump.fun)
-            if not mint:
-                for key in account_keys:
-                    if isinstance(key, dict):
-                        pubkey = key.get("pubkey")
-                    else:
-                        pubkey = key
-
-                    # Pump.fun mints are brand new - never seen before
-                    if pubkey and len(pubkey) >= 32:
-                        mint = pubkey
-                        break
+            mint = extract_mint_from_inner_instructions({
+                "transaction": tx,
+                "meta": meta
+            })
 
             if not mint:
                 continue
@@ -82,7 +95,6 @@ async def listen(on_new_pool):
                 "source": "helius_pumpfun",
                 "type": "new_mint",
                 "token": mint,
-                "program": ix_program_id,
                 "signature": result.get("signature"),
                 "observed_at": datetime.now(timezone.utc).isoformat(),
             }
