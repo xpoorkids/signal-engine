@@ -53,6 +53,7 @@ WALLET_SCORE_ENABLED = os.getenv(
 ).lower() in ("1", "true", "yes")
 
 HEARTBEAT_EVERY = 10  # cycles
+EARLY_COUNT = 0
 
 
 def log(m: str):
@@ -193,11 +194,18 @@ def process_early_candidate(candidate: dict) -> None:
     Early candidate from Helius WS.
     These bypass metric gates and enter as early stage.
     """
+    global EARLY_COUNT
+    EARLY_COUNT += 1
+
     candidate["source"] = "helius"
     candidate["stage"] = "early_ws"
     metrics = candidate.get("metrics") or {}
     metrics["age_minutes"] = 0.0
     candidate["metrics"] = metrics
+    print(
+        f"[early] received token={candidate['token']} total_early={EARLY_COUNT}",
+        flush=True,
+    )
     _process_candidate(candidate, bypass_metrics=True)
 
 
@@ -229,7 +237,10 @@ def run():
             hits = []
             if DEX_ENABLED:
                 hits = process_scan()
-                log(f"[worker] candidates={len(hits)}")
+                print(
+                    f"[worker] candidates={len(hits)} early={EARLY_COUNT}",
+                    flush=True,
+                )
 
                 for c in hits:
                     _process_candidate(c)
