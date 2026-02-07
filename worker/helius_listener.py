@@ -1,7 +1,6 @@
 import os
 import json
 import asyncio
-import re
 import websockets
 from datetime import datetime, timezone
 
@@ -18,82 +17,55 @@ PROGRAM_IDS = [
     PUMP_FUN_PROGRAM_ID,
 ]
 
-MINT_RE = re.compile(r"(base_mint|mint|token)=([A-Za-z0-9]{32,44})", re.IGNORECASE)
-POOL_RE = re.compile(r"(pool|amm|whirlpool)=([A-Za-z0-9]{32,44})", re.IGNORECASE)
-GENERIC_PUBKEY_RE = re.compile(r"\b[A-Za-z0-9]{32,44}\b")
-
-
-def parse_helius_logs(logs: list[str], program_ids: list[str]) -> dict | None:
-    base_mint = None
-    pool = None
-
-    for line in logs:
-        m = MINT_RE.search(line)
-        if m and not base_mint:
-            base_mint = m.group(2)
-
-        p = POOL_RE.search(line)
-        if p and not pool:
-            pool = p.group(2)
-
-    if not base_mint:
-        for line in logs:
-            for match in GENERIC_PUBKEY_RE.findall(line):
-                base_mint = match
-                break
-            if base_mint:
-                break
-
-    if not base_mint:
-        return None
-
-    return {
-        "token": base_mint,
-        "pool": pool,
-    }
-
-
 async def listen(on_new_pool):
     async with websockets.connect(HELIUS_WS) as ws:
         sub = {
             "jsonrpc": "2.0",
             "id": 1,
-            "method": "logsSubscribe",
+            "method": "transactionSubscribe",
             "params": [
-                {"mentions": PROGRAM_IDS},
-                {"commitment": "confirmed"},
+                {"accountInclude": PROGRAM_IDS},
+                {
+                    "commitment": "confirmed",
+                    "encoding": "jsonParsed",
+                    "transactionDetails": "full",
+                    "showRewards": False,
+                    "maxSupportedTransactionVersion": 0,
+                },
             ],
         }
         await ws.send(json.dumps(sub))
 
         while True:
             msg = json.loads(await ws.recv())
-            print("[helius] ws message received", flush=True)
-            value = msg.get("params", {}).get("result", {}).get("value", {})
-            logs = value.get("logs", [])
+            print("[helius] tx message received", flush=True)
 
-            print(
-                f"[helius] logs received ({len(logs)} lines)",
-                flush=True,
-            )
+            result = msg.get("params", {}).get("result", {})
+            tx = result.get("transaction", {})
+            message = tx.get("message", {})
+            instructions = message.get("instructions", [])
 
-            parsed = parse_helius_logs(logs, PROGRAM_IDS)
-            if not parsed:
-                continue
+            for ix in instructions:
+                program_id = ix.get("programId")
+                if program_id not in PROGRAM_IDS:
+                    continue
 
-            print(
-                f"[helius] parsed new pool token={parsed['token']}",
-                flush=True,
-            )
+                parsed = ix.get("parsed")
+                if not parsed:
+                    continue
 
-            event = {
-                "source": "helius_pumpfun" if PUMP_FUN_PROGRAM_ID in PROGRAM_IDS else "helius",
-                "type": "new_pool",
-                "token": parsed["token"],
-                "pool": parsed.get("pool"),
-                "signature": value.get("signature"),
-                "observed_at": datetime.now(timezone.utc).isoformat(),
-                "logs": logs,
-            }
+                info = parsed.get("info", {})
+                mint = info.get("mint") or info.get("baseMint") or info.get("tokenMint")
+                if not mint:
+                    continue
 
-            await on_new_pool(event)
+                event = {
+                    "source": "helius",
+                    "type": "new_pool",
+                    "token": mint,
+                    "program": program_id,
+                    "signature": result.get("signature"),
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                }
+
+                await on_new_pool(event)
