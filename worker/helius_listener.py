@@ -52,6 +52,26 @@ def extract_mint_from_inner_instructions(tx: dict) -> str | None:
 
     return None
 
+
+def extract_new_mints_from_token_balances(tx: dict) -> list[str]:
+    """
+    Detect newly created mints by comparing pre/post token balances.
+    Pump.fun mints always appear here first.
+    """
+    meta = tx.get("meta", {})
+    pre = meta.get("preTokenBalances", []) or []
+    post = meta.get("postTokenBalances", []) or []
+
+    pre_mints = {b.get("mint") for b in pre if b.get("mint")}
+    new_mints = []
+
+    for b in post:
+        mint = b.get("mint")
+        if mint and mint not in pre_mints:
+            new_mints.append(mint)
+
+    return new_mints
+
 async def listen(on_new_pool):
     async with websockets.connect(HELIUS_WS) as ws:
         sub = {
@@ -76,26 +96,19 @@ async def listen(on_new_pool):
             print("[helius] tx message received", flush=True)
 
             result = msg.get("params", {}).get("result", {})
-            tx = result.get("transaction")
-            meta = result.get("meta")
-
-            if not tx or not meta:
-                continue
-
-            mint = extract_mint_from_inner_instructions({
-                "transaction": tx,
-                "meta": meta
-            })
-
-            if not mint:
-                continue
-
-            event = {
-                "source": "helius_pumpfun",
-                "type": "new_mint",
-                "token": mint,
-                "signature": result.get("signature"),
-                "observed_at": datetime.now(timezone.utc).isoformat(),
+            tx = {
+                "transaction": result.get("transaction"),
+                "meta": result.get("meta"),
             }
 
-            await on_new_pool(event)
+            new_mints = extract_new_mints_from_token_balances(tx)
+
+            for mint in new_mints:
+                event = {
+                    "source": "helius_pumpfun",
+                    "type": "new_mint",
+                    "token": mint,
+                    "signature": result.get("signature"),
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                }
+                await on_new_pool(event)
