@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 from worker.helius_listener import listen
 import worker.scanner as scanner
@@ -30,10 +31,12 @@ async def handle_new_pool(event: dict) -> None:
 
 
 async def main() -> None:
-    await asyncio.gather(
-        listen(handle_new_pool),
-        asyncio.to_thread(scanner.run),
-    )
+    enable_ws = os.getenv("ENABLE_WS", "true").lower() in ("1", "true", "yes")
+    tasks = [asyncio.to_thread(scanner.run)]
+    if enable_ws:
+        tasks.append(listen(handle_new_pool))
+
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
