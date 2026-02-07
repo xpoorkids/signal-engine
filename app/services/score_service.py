@@ -16,7 +16,7 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
 
             age = (now_ms - created) / 60000
 
-            if liq >= 1500 and vol5m >= 250 and chg5m >= -2 and age <= 360:
+            if liq >= 1500 and vol5m >= 600 and chg5m >= -2 and age <= 360:
                 out.append(
                     {
                         "token": p["baseToken"]["address"],
