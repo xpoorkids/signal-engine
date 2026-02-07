@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import re
 import websockets
 from datetime import datetime, timezone
 
@@ -12,6 +13,31 @@ PROGRAM_IDS = [
     "RVKd61ztZW9L5GxF3XH9RZy5D3R1xYbC5nZ5qZpZr2D",  # Raydium AMM (example)
     "whirLb8k1ZrZg2KqYF9rXy2rZpZqv2X6kz5n",          # Orca Whirlpool (example)
 ]
+
+MINT_RE = re.compile(r"(base_mint|mint|token)=([A-Za-z0-9]{32,44})", re.IGNORECASE)
+POOL_RE = re.compile(r"(pool|amm|whirlpool)=([A-Za-z0-9]{32,44})", re.IGNORECASE)
+
+
+def parse_helius_logs(logs: list[str]) -> dict | None:
+    base_mint = None
+    pool = None
+
+    for line in logs:
+        m = MINT_RE.search(line)
+        if m and not base_mint:
+            base_mint = m.group(2)
+
+        p = POOL_RE.search(line)
+        if p and not pool:
+            pool = p.group(2)
+
+    if not base_mint:
+        return None
+
+    return {
+        "token": base_mint,
+        "pool": pool,
+    }
 
 
 async def listen(on_new_pool):
@@ -29,19 +55,21 @@ async def listen(on_new_pool):
 
         while True:
             msg = json.loads(await ws.recv())
-            logs = (
-                msg.get("params", {})
-                .get("result", {})
-                .get("value", {})
-                .get("logs", [])
-            )
+            value = msg.get("params", {}).get("result", {}).get("value", {})
+            logs = value.get("logs", [])
 
-            for line in logs:
-                if "initialize" in line.lower():
-                    event = {
-                        "source": "helius",
-                        "type": "new_pool",
-                        "raw_log": line,
-                        "observed_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                    await on_new_pool(event)
+            parsed = parse_helius_logs(logs)
+            if not parsed:
+                continue
+
+            event = {
+                "source": "helius",
+                "type": "new_pool",
+                "token": parsed["token"],
+                "pool": parsed.get("pool"),
+                "signature": value.get("signature"),
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "logs": logs,
+            }
+
+            await on_new_pool(event)
