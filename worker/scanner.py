@@ -22,12 +22,13 @@ from app.services.state_service import (
     record_repeat,
 )
 from app.services.discord_service import send_candidate, send_text, send_collapsed_repeat
+from worker.config import DRY_RUN, ENABLE_DEX
 from app.services.explain_service import one_sentence_explanation
 from app.services.wallet_service import wallet_risk_score
 
-DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 DISCORD_ENABLED = os.getenv("ENABLE_DISCORD", "true").lower() in ("1", "true", "yes")
 DEX_ENABLED = os.getenv("ENABLE_DEX", "true").lower() in ("1", "true", "yes")
+LEGACY_ALERTS_ENABLED = False
 
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_SECONDS", "30"))
 BASE_COOLDOWN = int(os.getenv("BASE_COOLDOWN_SECONDS", "900"))
@@ -54,10 +55,15 @@ WALLET_SCORE_ENABLED = os.getenv(
 
 HEARTBEAT_EVERY = 10  # cycles
 EARLY_COUNT = 0
+SEEN_SIGNATURES = set()
 
 
 def log(m: str):
     print(m, flush=True)
+
+
+def emit_legacy_alert(*_args, **_kwargs) -> None:
+    print("[legacy_scanner] alerts disabled (event pipeline owns alerts)", flush=True)
 
 
 def should_send_collapsed_repeat(stats: dict) -> bool:
@@ -106,8 +112,10 @@ def send_daily_digest():
         )
 
     msg = "\n".join(lines)
-    if not DRY_RUN and DISCORD_ENABLED:
+    if not DRY_RUN and DISCORD_ENABLED and LEGACY_ALERTS_ENABLED:
         send_text(msg, mode="digest", fanout=False)
+    elif not LEGACY_ALERTS_ENABLED:
+        emit_legacy_alert()
 
 
 def passes_near_pass(c: dict) -> bool:
@@ -166,15 +174,19 @@ def _process_candidate(c: dict, bypass_metrics: bool = False) -> None:
 
     if mode == "pass":
         explanation = one_sentence_explanation(c, mode)
-        if not DRY_RUN and DISCORD_ENABLED:
+        if not DRY_RUN and DISCORD_ENABLED and LEGACY_ALERTS_ENABLED:
             send_candidate(c, mode=mode, explanation=explanation)
+        elif not LEGACY_ALERTS_ENABLED:
+            emit_legacy_alert()
         record_alert(token, mode)
         return
 
     if allow_alert(token, BASE_COOLDOWN):
         explanation = one_sentence_explanation(c, mode)
-        if not DRY_RUN and DISCORD_ENABLED:
+        if not DRY_RUN and DISCORD_ENABLED and LEGACY_ALERTS_ENABLED:
             send_candidate(c, mode=mode, explanation=explanation)
+        elif not LEGACY_ALERTS_ENABLED:
+            emit_legacy_alert()
         record_alert(token, mode)
     else:
         stats = record_repeat(token, mode)
@@ -185,8 +197,10 @@ def _process_candidate(c: dict, bypass_metrics: bool = False) -> None:
                 f"count={stats.get('repeat_count')} "
                 f"{'HEATING_UP' if heating else ''}"
             )
-            if not DRY_RUN and DISCORD_ENABLED:
+            if not DRY_RUN and DISCORD_ENABLED and LEGACY_ALERTS_ENABLED:
                 send_collapsed_repeat(c, mode=mode, stats=stats, heating_up=heating)
+            elif not LEGACY_ALERTS_ENABLED:
+                emit_legacy_alert()
 
 
 def process_early_candidate(candidate: dict) -> None:
@@ -195,17 +209,27 @@ def process_early_candidate(candidate: dict) -> None:
     These bypass metric gates and enter as early stage.
     """
     global EARLY_COUNT
+    global SEEN_SIGNATURES
     EARLY_COUNT += 1
 
-    candidate["source"] = "helius"
+    candidate.setdefault("source", "helius")
     candidate["stage"] = "early_ws"
     metrics = candidate.get("metrics") or {}
     metrics["age_minutes"] = 0.0
     candidate["metrics"] = metrics
-    print(
-        f"[early] received token={candidate['token']} total_early={EARLY_COUNT}",
-        flush=True,
-    )
+    sig = candidate.get("signature")
+    if sig:
+        if sig in SEEN_SIGNATURES:
+            return
+        SEEN_SIGNATURES.add(sig)
+
+    token = candidate.get("token")
+    if not token:
+        if candidate.get("source") == "logs":
+            candidate["stage"] = "early_logs"
+        print(f"[early] received token=None total_early={EARLY_COUNT}", flush=True)
+        return
+    print(f"[early] received token={token} total_early={EARLY_COUNT}", flush=True)
     _process_candidate(candidate, bypass_metrics=True)
 
 
@@ -227,8 +251,10 @@ def run():
                     f"cycle={cycle} DRY_RUN={DRY_RUN}"
                 )
                 log(hb)
-                if not DRY_RUN and DISCORD_ENABLED:
+                if not DRY_RUN and DISCORD_ENABLED and LEGACY_ALERTS_ENABLED:
                     send_text(hb, mode="logs", fanout=False)
+                elif not LEGACY_ALERTS_ENABLED:
+                    emit_legacy_alert()
 
             if should_send_digest_now():
                 log("[digest] sending daily digest")

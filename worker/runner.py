@@ -1,44 +1,49 @@
 import asyncio
-import os
 import time
 import traceback
 
-from worker.helius_listener import listen
+from worker.config import (
+    ENABLE_WS,
+    ENABLE_DEX,
+    EARLY_DEDUPE_TTL_SEC,
+    ALERT_COOLDOWN_SEC,
+)
+from worker.state import EngineState, is_sig_new, can_alert
+from worker.events import Event
+from worker.promote import process_event
+from worker.discord import send_discord
+from worker.helius_listener import start_helius_listeners
 import worker.scanner as scanner
 
 
-def process_early_candidate(event: dict) -> None:
-    """
-    Placeholder for early candidate injection.
-    """
-    _ = event
+async def event_loop(q: asyncio.Queue) -> None:
+    state = EngineState()
+    while True:
+        e: Event = await q.get()
+        if not is_sig_new(state, e.signature, EARLY_DEDUPE_TTL_SEC):
+            q.task_done()
+            continue
 
+        derived = await process_event(state, e)
+        for de in derived:
+            if de.type in ("heating_up", "promoted"):
+                if de.token and can_alert(state, de.token, ALERT_COOLDOWN_SEC):
+                    send_discord(de)
 
-async def handle_new_pool(event: dict) -> None:
-    candidate = {
-        "token": event["token"],
-        "symbol": "NEW",
-        "reason": "helius_new_pool",
-        "metrics": {
-            "liquidity": 0,
-            "volume_5m": 0,
-            "price_change_5m": 0,
-            "age_minutes": 0,
-        },
-        "pool": event.get("pool"),
-        "signature": event.get("signature"),
-    }
-
-    scanner.process_early_candidate(candidate)
+        q.task_done()
 
 
 async def run_worker() -> None:
-    enable_ws = os.getenv("ENABLE_WS", "true").lower() in ("1", "true", "yes")
-    tasks = [asyncio.to_thread(scanner.run)]
-    if enable_ws:
-        tasks.append(listen(handle_new_pool))
+    tasks = []
+    q: asyncio.Queue = asyncio.Queue(maxsize=2000)
 
-    await asyncio.gather(*tasks)
+    tasks.append(asyncio.create_task(event_loop(q)))
+    if ENABLE_WS:
+        tasks.append(asyncio.create_task(start_helius_listeners(q)))
+    if ENABLE_DEX:
+        tasks.append(asyncio.to_thread(scanner.run))
+
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def main() -> None:

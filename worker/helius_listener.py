@@ -4,9 +4,15 @@ import asyncio
 import websockets
 from collections import deque
 from datetime import datetime, timezone
+from worker.config import ENABLE_LOGS_SUB, HELIUS_API_KEY, HELIUS_WS_URL
+from worker.events import Event
 
-HELIUS_KEY = os.getenv("HELIUS_API_KEY")
-HELIUS_WS = f"wss://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}"
+HELIUS_KEY = HELIUS_API_KEY or os.getenv("HELIUS_API_KEY")
+HELIUS_WS = (
+    HELIUS_WS_URL
+    or os.getenv("HELIUS_WS_URL")
+    or f"wss://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}"
+)
 
 # Pump.fun program ID (mainnet)
 PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
@@ -106,7 +112,7 @@ def extract_new_mints_from_token_balances(tx: dict) -> list[str]:
 
     return new_mints
 
-async def listen(on_new_pool):
+async def listen(q: asyncio.Queue) -> None:
     tx_sub = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -136,6 +142,7 @@ async def listen(on_new_pool):
     early_count = 0
     log_count = 0
     recent_logs = deque(maxlen=50)
+    pending_log_signatures = set()
 
     while True:
         try:
@@ -147,8 +154,9 @@ async def listen(on_new_pool):
             ) as ws:
                 print("[helius] connected", flush=True)
                 await ws.send(json.dumps(tx_sub))
-                await ws.send(json.dumps(logs_sub))
-                print("[logs] subscribed to ALL logs (processed)", flush=True)
+                if ENABLE_LOGS_SUB:
+                    await ws.send(json.dumps(logs_sub))
+                    print("[logs] subscribed to ALL logs (processed)", flush=True)
 
                 async for raw in ws:
                     try:
@@ -158,11 +166,11 @@ async def listen(on_new_pool):
                         print("[helius] recv/parse failed:", e, flush=True)
                         continue
 
-                    async def emit_early(payload: dict) -> None:
+                    async def emit_event(e: Event) -> None:
                         try:
-                            await on_new_pool(payload)
-                        except Exception as e:
-                            print("[pump-logs] emit failed:", e, flush=True)
+                            await q.put(e)
+                        except Exception as e2:
+                            print("[pump-logs] emit failed:", e2, flush=True)
 
                     method = msg.get("method")
 
@@ -185,13 +193,16 @@ async def listen(on_new_pool):
                                         print(f"[early] +1 via logs total={early_count}", flush=True)
                                         print("[FORCE] InitializeMint seen in logs", flush=True)
                                         print("[FORCE] logs InitializeMint EARLY emitted", flush=True)
-                                        await emit_early(
-                                            {
-                                                "source": "logs",
-                                                "type": "initialize_mint",
-                                                "signature": sig,
-                                                "confidence": 0.4,
-                                            }
+                                        if sig:
+                                            pending_log_signatures.add(sig)
+                                        await emit_event(
+                                            Event(
+                                                type="early_logs_initialize_mint",
+                                                source="logs",
+                                                signature=sig,
+                                                confidence=0.4,
+                                                reasons=["InitializeMint_in_logs"],
+                                            )
                                         )
                                         break
                         except Exception as e:
@@ -275,34 +286,62 @@ async def listen(on_new_pool):
                     # Temporarily widen the net (WS-only proof): emit when pump program is seen
                     if is_pump_program:
                         try:
-                            event = {
-                                "source": "helius_pumpfun",
-                                "type": "ws_pump_observed",
-                                "token": mint,
-                                "signature": result.get("signature"),
-                                "observed_at": datetime.now(timezone.utc).isoformat(),
-                                "has_token_balance_diff": has_token_balance_diff,
-                            }
-                            await on_new_pool(event)
+                            sig = result.get("signature")
+                            await emit_event(
+                                Event(
+                                    type="early_tx_pump_observed",
+                                    source="tx",
+                                    signature=sig,
+                                    program=PUMP_FUN_PROGRAM_ID,
+                                    token=mint,
+                                    confidence=0.35,
+                                    reasons=["pump_program_seen_in_tx"],
+                                    extra={
+                                        "has_token_balance_diff": has_token_balance_diff,
+                                        "observed_at": datetime.now(timezone.utc).isoformat(),
+                                    },
+                                )
+                            )
                         except Exception as e:
                             print("[pump] ws-only emit failed:", e, flush=True)
 
+                    # Promote logs EARLY when token resolves on tx
+                    try:
+                        sig = result.get("signature")
+                        if sig and sig in pending_log_signatures and mint:
+                            pending_log_signatures.discard(sig)
+                            await emit_event(
+                                Event(
+                                    type="token_resolved",
+                                    source="tx",
+                                    signature=sig,
+                                    token=mint,
+                                    confidence=0.55,
+                                    reasons=["mint_resolved_from_tx"],
+                                )
+                            )
+                    except Exception as e:
+                        print("[pump] logs promotion failed:", e, flush=True)
+
                     for mint in new_mints:
                         try:
-                            event = {
-                                "source": "helius_pumpfun",
-                                "type": "new_mint",
-                                "token": mint,
-                                "signature": result.get("signature"),
-                                "observed_at": datetime.now(timezone.utc).isoformat(),
-                            }
-                        except Exception as e:
-                            print("[pump] event build failed:", e, flush=True)
-                            continue
-                        try:
-                            await on_new_pool(event)
+                            sig = result.get("signature")
+                            await emit_event(
+                                Event(
+                                    type="token_resolved",
+                                    source="tx",
+                                    signature=sig,
+                                    token=mint,
+                                    confidence=0.55,
+                                    reasons=["mint_resolved_from_tx"],
+                                )
+                            )
                         except Exception as e:
                             print("[pump] handler failed:", e, flush=True)
+
+
+async def start_helius_listeners(q: asyncio.Queue) -> None:
+    await listen(q)
         except Exception as e:
             print("[helius] ws error, reconnecting:", e, flush=True)
             await asyncio.sleep(15)
