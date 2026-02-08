@@ -1,5 +1,7 @@
 import asyncio
 import os
+import time
+import traceback
 
 from worker.helius_listener import listen
 import worker.scanner as scanner
@@ -30,7 +32,7 @@ async def handle_new_pool(event: dict) -> None:
     scanner.process_early_candidate(candidate)
 
 
-async def main() -> None:
+async def run_worker() -> None:
     enable_ws = os.getenv("ENABLE_WS", "true").lower() in ("1", "true", "yes")
     tasks = [asyncio.to_thread(scanner.run)]
     if enable_ws:
@@ -39,5 +41,18 @@ async def main() -> None:
     await asyncio.gather(*tasks)
 
 
+def main() -> None:
+    try:
+        asyncio.run(run_worker())
+    except Exception as e:
+        print("[fatal] worker crashed:", e)
+        traceback.print_exc()
+
+    # CRITICAL: never exit
+    while True:
+        print("[worker] crashed but holding process open")
+        time.sleep(60)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
