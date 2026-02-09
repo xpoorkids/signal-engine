@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 import traceback
 
@@ -34,6 +35,7 @@ async def event_loop(q: asyncio.Queue) -> None:
 
 
 async def run_worker() -> None:
+    print(f"[worker] deploy_sha={os.getenv('RENDER_GIT_COMMIT', 'unknown')}", flush=True)
     tasks = []
     q: asyncio.Queue = asyncio.Queue(maxsize=2000)
 
