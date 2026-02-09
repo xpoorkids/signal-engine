@@ -13,7 +13,7 @@ from worker.config import (
 from worker.state import EngineState, is_sig_new, can_alert
 from worker.events import Event
 from worker.promote import process_event
-from worker.discord import send_discord
+from worker.discord import send_discord, send_candidate_discord
 from worker.helius_listener import start_helius_listeners
 import worker.scanner as scanner
 
@@ -31,6 +31,8 @@ async def event_loop(q: asyncio.Queue) -> None:
             if de.type in ("heating_up", "promoted"):
                 if de.token and can_alert(state, de.token, ALERT_COOLDOWN_SEC):
                     send_discord(de)
+            elif de.type == "candidate":
+                send_candidate_discord(de)
 
         q.task_done()
 

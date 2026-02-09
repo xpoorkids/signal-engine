@@ -1,6 +1,11 @@
 import json
 import requests
-from worker.config import ENABLE_DISCORD, DISCORD_WEBHOOK_URL, DRY_RUN
+from worker.config import (
+    ENABLE_DISCORD,
+    DISCORD_WEBHOOK_URL,
+    DISCORD_CANDIDATE_WEBHOOK,
+    DRY_RUN,
+)
 from worker.events import Event
 
 
@@ -79,3 +84,44 @@ def send_discord(e: Event) -> None:
             print("[discord] send failed", r.status_code, r.text[:200])
     except Exception as ex:
         print("[discord] send exception", ex)
+
+
+def send_candidate_discord(e: Event) -> None:
+    if not ENABLE_DISCORD:
+        return
+    if not DISCORD_CANDIDATE_WEBHOOK:
+        print("[discord] missing DISCORD_CANDIDATE_WEBHOOK")
+        return
+    if e.type != "candidate":
+        return
+
+    token = e.token or "unknown"
+    attention_score = 0.0
+    risk_score = 0.0
+    reasons = []
+    if isinstance(e.extra, dict):
+        attention_score = float(e.extra.get("attention_score") or 0.0)
+        risk_score = float(e.extra.get("risk_score") or 0.0)
+        reasons = e.extra.get("attention_reasons") or []
+
+    lines = [
+        "**WATCH ONLY / HIGH RISK**",
+        f"Token: `{token}`",
+        f"Attention: `{attention_score:.2f}`",
+        f"Risk: `{risk_score:.2f}`",
+    ]
+    if reasons:
+        lines.append(f"Attention reasons: {', '.join(reasons[:3])}")
+
+    payload = {"content": "\n".join(lines)}
+
+    if DRY_RUN:
+        print("[DRY_RUN] suppressed Candidate Discord send", json.dumps(payload)[:400])
+        return
+
+    try:
+        r = requests.post(DISCORD_CANDIDATE_WEBHOOK, json=payload, timeout=8)
+        if r.status_code >= 300:
+            print("[discord] candidate send failed", r.status_code, r.text[:200])
+    except Exception as ex:
+        print("[discord] candidate send exception", ex)
