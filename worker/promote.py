@@ -1,4 +1,5 @@
 from typing import Dict, Any
+import logging
 from worker.events import Event
 from worker.state import EngineState, bump_token
 from worker.config import ENABLE_DEX, ENABLE_WALLET
@@ -6,6 +7,7 @@ from worker.confidence import CONF_WEIGHTS, CAPS, bump
 from worker.wallet_risk import score_wallet_risk
 from worker.dex import dex_enrich_token
 
+logger = logging.getLogger(__name__)
 
 async def process_event(state: EngineState, e: Event) -> list[Event]:
     out: list[Event] = []
@@ -22,6 +24,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
 
     # Token present: update state and decide promotion
     if e.token:
+        logger.info("[score] evaluating token=%s", e.token)
         ts = bump_token(
             state,
             e.token,
@@ -57,6 +60,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             e.reasons.append(f"repeat_{ts.signals}")
 
         ts.confidence = max(ts.confidence, e.confidence)
+        logger.info("[score] computed token=%s score=%.3f", e.token, e.confidence)
 
         if 0.55 <= e.confidence < 0.80:
             out.append(
@@ -73,6 +77,12 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             )
 
         if e.confidence >= 0.80 and e.token and not ts.is_promoted:
+            logger.info(
+                "[promoted] token=%s score=%.3f threshold=%.3f",
+                e.token,
+                e.confidence,
+                0.80,
+            )
             ts.is_promoted = True
             out.append(
                 Event(
