@@ -40,6 +40,9 @@ class EngineState:
     def unique_buyers_5m(self, token: Optional[str]) -> int:
         return 0
 
+    def has_basic_liquidity(self, token: Optional[str]) -> bool:
+        return True
+
 
 def ttl_prune(seen: Dict[str, float], ttl_sec: int) -> None:
     now = time.time()

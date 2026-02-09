@@ -11,10 +11,12 @@ from worker.config import (
     ENABLE_EXECUTION,
     ENABLE_RISK_VETO,
     ENABLE_ATTENTION_BONUS,
+    ENABLE_ATTENTION_CANDIDATE,
     RISK_VETO_THRESHOLD,
     ATTENTION_BONUS_CAP,
     ATTENTION_MIN_FOR_WINDOW,
     ATTENTION_WINDOW_MINUTES,
+    ATTENTION_CANDIDATE_THRESHOLD,
     EXECUTION_BONUS_CAP,
     MIN_EDGE_BPS,
 )
@@ -109,6 +111,34 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 RISK_VETO_THRESHOLD,
             )
             return [e]
+
+        # ------------------------------------------------------------
+        # Attention-driven candidate emission (Phase 1)
+        # ------------------------------------------------------------
+        if ENABLE_ATTENTION_CANDIDATE:
+            # Candidate is an EARLY-WATCHLIST signal, not a promotion.
+            # It is driven by coordination/attention, not market cap.
+            if (
+                attention_score >= ATTENTION_CANDIDATE_THRESHOLD
+                and risk_score < RISK_VETO_THRESHOLD
+                and state.has_basic_liquidity(e.token)
+            ):
+                logger.info(
+                    "[candidate-attention] token=%s attention=%.2f risk=%.2f attn_reasons=%s",
+                    e.token,
+                    attention_score,
+                    risk_score,
+                    attn_reasons,
+                )
+
+                out.append(
+                    Event(
+                        type="candidate",
+                        source="engine",
+                        token=e.token,
+                        extra=dict(e.extra),
+                    )
+                )
 
         if e.type == "token_resolved":
             e.confidence = bump(e.confidence, CONF_WEIGHTS["token_resolved"], CAPS["heating"])
