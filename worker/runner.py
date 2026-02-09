@@ -2,6 +2,7 @@ import asyncio
 import os
 import time
 import traceback
+import logging
 
 from worker.config import (
     ENABLE_WS,
@@ -34,12 +35,22 @@ async def event_loop(q: asyncio.Queue) -> None:
         q.task_done()
 
 
+async def heartbeat_loop() -> None:
+    last_heartbeat = 0.0
+    while True:
+        if time.time() - last_heartbeat > 30:
+            logger.info("[heartbeat] worker alive")
+            last_heartbeat = time.time()
+        await asyncio.sleep(1)
+
+
 async def run_worker() -> None:
     print(f"[worker] deploy_sha={os.getenv('RENDER_GIT_COMMIT', 'unknown')}", flush=True)
     tasks = []
     q: asyncio.Queue = asyncio.Queue(maxsize=2000)
 
     tasks.append(asyncio.create_task(event_loop(q)))
+    tasks.append(asyncio.create_task(heartbeat_loop()))
     if ENABLE_WS:
         tasks.append(asyncio.create_task(start_helius_listeners(q)))
     if ENABLE_DEX:
@@ -63,3 +74,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+logger = logging.getLogger(__name__)
