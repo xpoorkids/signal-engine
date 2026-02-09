@@ -338,6 +338,9 @@ async def listen(q: asyncio.Queue) -> None:
                             )
                         except Exception as e:
                             print("[pump] handler failed:", e, flush=True)
+        except Exception as e:
+            print("[helius] ws error, reconnecting:", e, flush=True)
+            await asyncio.sleep(15)
 
 
 async def start_helius_listeners(q: asyncio.Queue) -> None:
@@ -351,6 +354,3 @@ async def start_helius_listeners(q: asyncio.Queue) -> None:
         print("[helius] listener error:", e, flush=True)
     finally:
         print("[helius] listener stopped", flush=True)
-        except Exception as e:
-            print("[helius] ws error, reconnecting:", e, flush=True)
-            await asyncio.sleep(15)
