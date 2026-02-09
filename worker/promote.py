@@ -6,6 +6,8 @@ from worker.config import ENABLE_DEX, ENABLE_WALLET
 from worker.confidence import CONF_WEIGHTS, CAPS, bump
 from worker.wallet_risk import score_wallet_risk
 from worker.dex import dex_enrich_token
+from worker.forensics import analyze_risk
+from worker.execution import estimate_edge
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +37,39 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             creator=e.creator,
         )
 
+        # compute forensics
+        risk_score, risk_reasons, risk_flags = analyze_risk(e, state)
+        logger.info(
+            "[forensics] token=%s risk=%.2f reasons=%s flags=%s",
+            e.token,
+            risk_score,
+            risk_reasons,
+            risk_flags,
+        )
+
+        # compute execution edge (currently stub)
+        edge_bps, edge_reasons, size_cap_usd = estimate_edge(e, state)
+        logger.info(
+            "[execution] token=%s edge_bps=%.1f size_cap_usd=%.0f reasons=%s",
+            e.token,
+            edge_bps,
+            size_cap_usd,
+            edge_reasons,
+        )
+
+        # attach to event for future use
+        e.extra["risk_score"] = risk_score
+        e.extra["risk_reasons"] = risk_reasons
+        e.extra["risk_flags"] = risk_flags
+        e.extra["edge_bps"] = edge_bps
+        e.extra["edge_reasons"] = edge_reasons
+        e.extra["size_cap_usd"] = size_cap_usd
+
         if e.type == "token_resolved":
             e.confidence = bump(e.confidence, CONF_WEIGHTS["token_resolved"], CAPS["heating"])
             e.reasons.append("token_resolved")
 
-        extra: Dict[str, Any] = {}
+        extra: Dict[str, Any] = dict(e.extra)
         if ENABLE_DEX:
             extra["dex"] = await dex_enrich_token(e.token)
             if extra.get("dex", {}).get("ok"):
