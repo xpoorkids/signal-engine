@@ -341,7 +341,16 @@ async def listen(q: asyncio.Queue) -> None:
 
 
 async def start_helius_listeners(q: asyncio.Queue) -> None:
-    await listen(q)
+    print("[helius] starting listener", flush=True)
+    try:
+        await listen(q)
+    except asyncio.CancelledError:
+        print("[helius] listener cancelled", flush=True)
+        raise
+    except Exception as e:
+        print("[helius] listener error:", e, flush=True)
+    finally:
+        print("[helius] listener stopped", flush=True)
         except Exception as e:
             print("[helius] ws error, reconnecting:", e, flush=True)
             await asyncio.sleep(15)
