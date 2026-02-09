@@ -18,12 +18,19 @@ def format_discord(e: Event) -> dict:
     token = e.token or "unknown"
     conf = f"{e.confidence:.2f}"
     reasons = ", ".join(e.reasons[:4]) if e.reasons else ""
+    threshold = None
+    if e.type == "promoted":
+        threshold = "0.80"
+    elif e.type == "heating_up":
+        threshold = "0.55"
 
     lines = [
         f"**{_fmt_title(e)}**",
         f"Token: `{token}`",
         f"Confidence: `{conf}`",
     ]
+    if threshold:
+        lines.append(f"Threshold: `{threshold}`")
     if e.creator:
         lines.append(f"Creator: `{e.creator}`")
     if e.signature:
@@ -37,6 +44,18 @@ def format_discord(e: Event) -> dict:
             lines.append(f"Wallet risk: `{wr.get('score', 0):.2f}` flags={wr.get('flags', [])}")
         if "dex" in e.extra:
             lines.append("Dex: enriched")
+        if "risk_score" in e.extra:
+            rscore = e.extra.get("risk_score", 0.0)
+            rreasons = e.extra.get("risk_reasons", [])[:3]
+            lines.append(f"Risk: `{rscore:.2f}` reasons={rreasons}")
+        if "attention_score" in e.extra:
+            ascore = e.extra.get("attention_score", 0.0)
+            areasons = e.extra.get("attention_reasons", [])[:3]
+            lines.append(f"Attention: `{ascore:.2f}` reasons={areasons}")
+        if "edge_bps" in e.extra:
+            edge_bps = e.extra.get("edge_bps", 0.0)
+            if edge_bps:
+                lines.append(f"Edge: `{edge_bps:.1f}` bps")
 
     return {"content": "\n".join(lines)}
 

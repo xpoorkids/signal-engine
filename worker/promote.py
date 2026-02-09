@@ -1,13 +1,29 @@
 from typing import Dict, Any
 import logging
+import time
 from worker.events import Event
 from worker.state import EngineState, bump_token
-from worker.config import ENABLE_DEX, ENABLE_WALLET
+from worker.config import (
+    ENABLE_DEX,
+    ENABLE_WALLET,
+    ENABLE_FORENSICS,
+    ENABLE_ATTENTION,
+    ENABLE_EXECUTION,
+    ENABLE_RISK_VETO,
+    ENABLE_ATTENTION_BONUS,
+    RISK_VETO_THRESHOLD,
+    ATTENTION_BONUS_CAP,
+    ATTENTION_MIN_FOR_WINDOW,
+    ATTENTION_WINDOW_MINUTES,
+    EXECUTION_BONUS_CAP,
+    MIN_EDGE_BPS,
+)
 from worker.confidence import CONF_WEIGHTS, CAPS, bump
 from worker.wallet_risk import score_wallet_risk
 from worker.dex import dex_enrich_token
 from worker.forensics import analyze_risk
 from worker.execution import estimate_edge
+from worker.attention import compute_attention
 
 logger = logging.getLogger(__name__)
 
@@ -37,33 +53,62 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             creator=e.creator,
         )
 
-        # compute forensics
-        risk_score, risk_reasons, risk_flags = analyze_risk(e, state)
-        logger.info(
-            "[forensics] token=%s risk=%.2f reasons=%s flags=%s",
-            e.token,
-            risk_score,
-            risk_reasons,
-            risk_flags,
-        )
+        risk_score = 0.0
+        risk_reasons: list[str] = []
+        risk_flags: Dict[str, bool] = {}
+        if ENABLE_FORENSICS:
+            risk_score, risk_reasons, risk_flags = analyze_risk(e, state)
+            logger.info(
+                "[forensics] token=%s risk=%.2f reasons=%s flags=%s",
+                e.token,
+                risk_score,
+                risk_reasons,
+                risk_flags,
+            )
+            e.extra["risk_score"] = risk_score
+            e.extra["risk_reasons"] = risk_reasons
+            e.extra["risk_flags"] = risk_flags
 
-        # compute execution edge (currently stub)
-        edge_bps, edge_reasons, size_cap_usd = estimate_edge(e, state)
-        logger.info(
-            "[execution] token=%s edge_bps=%.1f size_cap_usd=%.0f reasons=%s",
-            e.token,
-            edge_bps,
-            size_cap_usd,
-            edge_reasons,
-        )
+        attention_score = 0.0
+        attn_reasons: list[str] = []
+        attn_metrics: Dict[str, Any] = {}
+        if ENABLE_ATTENTION:
+            attention_score, attn_reasons, attn_metrics = compute_attention(e, state)
+            logger.info(
+                "[attention] token=%s attention=%.2f reasons=%s metrics=%s",
+                e.token,
+                attention_score,
+                attn_reasons,
+                attn_metrics,
+            )
+            e.extra["attention_score"] = attention_score
+            e.extra["attention_reasons"] = attn_reasons
+            e.extra["attention_metrics"] = attn_metrics
 
-        # attach to event for future use
-        e.extra["risk_score"] = risk_score
-        e.extra["risk_reasons"] = risk_reasons
-        e.extra["risk_flags"] = risk_flags
-        e.extra["edge_bps"] = edge_bps
-        e.extra["edge_reasons"] = edge_reasons
-        e.extra["size_cap_usd"] = size_cap_usd
+        edge_bps = 0.0
+        edge_reasons: list[str] = []
+        size_cap_usd = 0.0
+        if ENABLE_EXECUTION:
+            edge_bps, edge_reasons, size_cap_usd = estimate_edge(e, state)
+            logger.info(
+                "[execution] token=%s edge_bps=%.1f size_cap_usd=%.0f reasons=%s",
+                e.token,
+                edge_bps,
+                size_cap_usd,
+                edge_reasons,
+            )
+            e.extra["edge_bps"] = edge_bps
+            e.extra["edge_reasons"] = edge_reasons
+            e.extra["size_cap_usd"] = size_cap_usd
+
+        if ENABLE_RISK_VETO and risk_score >= RISK_VETO_THRESHOLD:
+            logger.info(
+                "[promote-skip] reason=risk_veto token=%s risk=%.2f threshold=%.2f",
+                e.token,
+                risk_score,
+                RISK_VETO_THRESHOLD,
+            )
+            return [e]
 
         if e.type == "token_resolved":
             e.confidence = bump(e.confidence, CONF_WEIGHTS["token_resolved"], CAPS["heating"])
@@ -90,6 +135,42 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         if ts.signals > 1:
             e.confidence = bump(e.confidence, CONF_WEIGHTS["repeat"], CAPS["heating"])
             e.reasons.append(f"repeat_{ts.signals}")
+
+        if ENABLE_ATTENTION_BONUS:
+            now = time.time()
+            in_window = now - ts.first_seen_ts <= (ATTENTION_WINDOW_MINUTES * 60)
+            liquidity_ok = False
+            try:
+                liquidity_ok = state.liquidity_stable(e.token, window_sec=900)
+            except Exception:
+                liquidity_ok = False
+
+            if (
+                attention_score >= ATTENTION_MIN_FOR_WINDOW
+                and risk_score < RISK_VETO_THRESHOLD
+                and in_window
+                and liquidity_ok
+            ):
+                base_confidence = e.confidence
+                attn_bonus = min(ATTENTION_BONUS_CAP, attention_score * ATTENTION_BONUS_CAP)
+                risk_penalty = risk_score * ATTENTION_BONUS_CAP
+                e.confidence = base_confidence + attn_bonus - risk_penalty
+                logger.info(
+                    "[score-adjust] base=%.3f attn_bonus=%.3f risk_penalty=%.3f final=%.3f",
+                    base_confidence,
+                    attn_bonus,
+                    risk_penalty,
+                    e.confidence,
+                )
+
+        if ENABLE_EXECUTION and edge_bps >= MIN_EDGE_BPS:
+            exec_bonus = min(EXECUTION_BONUS_CAP, edge_bps / 10000.0)
+            e.confidence += exec_bonus
+            logger.info(
+                "[exec-bonus] edge_bps=%.1f exec_bonus=%.3f",
+                edge_bps,
+                exec_bonus,
+            )
 
         ts.confidence = max(ts.confidence, e.confidence)
         logger.info("[score] computed token=%s score=%.3f", e.token, e.confidence)

@@ -22,6 +22,24 @@ class EngineState:
     tokens: Dict[str, TokenState] = field(default_factory=dict)
     cooldown: Dict[str, float] = field(default_factory=dict)
 
+    def wallet_cluster_ratio(self, token: Optional[str]) -> float:
+        return 0.0
+
+    def liquidity_stable(self, token: Optional[str], window_sec: int = 1800) -> bool:
+        return True
+
+    def top_holder_ratio(self, token: Optional[str]) -> float:
+        return 0.0
+
+    def bot_trade_cadence(self, token: Optional[str]) -> bool:
+        return False
+
+    def burst_count_60s(self, token: Optional[str]) -> int:
+        return 0
+
+    def unique_buyers_5m(self, token: Optional[str]) -> int:
+        return 0
+
 
 def ttl_prune(seen: Dict[str, float], ttl_sec: int) -> None:
     now = time.time()
