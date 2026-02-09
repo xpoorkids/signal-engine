@@ -11,9 +11,11 @@ logger = logging.getLogger(__name__)
 
 async def process_event(state: EngineState, e: Event) -> list[Event]:
     out: list[Event] = []
+    logger.info("[promote-enter] token=%s", e.token)
 
     # Early events without token: state only, never alert or promote
     if e.type.startswith("early") and not e.token:
+        logger.info("[promote-skip] reason=token_unresolved")
         if e.type == "early_logs_initialize_mint":
             e.confidence = bump(e.confidence, CONF_WEIGHTS["logs_initialize_mint"], CAPS["early"])
             e.reasons.append("logs_initialize_mint")
