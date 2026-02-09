@@ -1,5 +1,6 @@
 import os
 import time
+import asyncio
 from datetime import datetime, timezone
 try:
     from zoneinfo import ZoneInfo
@@ -23,6 +24,9 @@ from app.services.state_service import (
 )
 from app.services.discord_service import send_candidate, send_text, send_collapsed_repeat
 from worker.config import DRY_RUN, ENABLE_DEX
+from worker.events import Event
+from worker.promote import process_event
+from worker.state import EngineState
 from app.services.explain_service import one_sentence_explanation
 from app.services.wallet_service import wallet_risk_score
 
@@ -56,6 +60,7 @@ WALLET_SCORE_ENABLED = os.getenv(
 HEARTBEAT_EVERY = 10  # cycles
 EARLY_COUNT = 0
 SEEN_SIGNATURES = set()
+PROMOTION_STATE = EngineState()
 
 
 def log(m: str):
@@ -230,6 +235,23 @@ def process_early_candidate(candidate: dict) -> None:
         print(f"[early] received token=None total_early={EARLY_COUNT}", flush=True)
         return
     print(f"[early] received token={token} total_early={EARLY_COUNT}", flush=True)
+    try:
+        asyncio.run(
+            process_event(
+                PROMOTION_STATE,
+                Event(
+                    type="token_resolved",
+                    source=candidate.get("source") or "tx",
+                    token=token,
+                    signature=candidate.get("signature"),
+                    confidence=float(candidate.get("confidence", 0.0) or 0.0),
+                    reasons=[candidate.get("reason")] if candidate.get("reason") else [],
+                    extra={"metrics": candidate.get("metrics") or {}},
+                ),
+            )
+        )
+    except Exception as e:
+        print("[score] early handoff failed:", e, flush=True)
     _process_candidate(candidate, bypass_metrics=True)
 
 
