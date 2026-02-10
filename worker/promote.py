@@ -26,7 +26,7 @@ from worker.dex import dex_enrich_token, select_best_pair, summarize_pair
 from worker.forensics import analyze_risk
 from worker.execution import estimate_edge
 from worker.attention import compute_attention
-from worker.alert_gate import evaluate_alert_gate
+from worker.alert_gate import evaluate_alert_gate, admission_check_candidate
 
 logger = logging.getLogger(__name__)
 logger.info("[PROMOTE FILE LOADED]")
@@ -121,11 +121,22 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         if ENABLE_ATTENTION_CANDIDATE:
             # Candidate is an EARLY-WATCHLIST signal, not a promotion.
             # It is driven by coordination/attention, not market cap.
-            if (
-                attention_score >= ATTENTION_CANDIDATE_THRESHOLD
-                and risk_score < RISK_VETO_THRESHOLD
-                and state.has_basic_liquidity(e.token)
-            ):
+            ok, gate_reasons, bonding_warn = admission_check_candidate(
+                attention_score,
+                risk_score,
+                e.extra if isinstance(e.extra, dict) else {},
+            )
+            if not ok:
+                logger.info(
+                    "[candidate-skip] token=%s reasons=%s attention=%.2f risk=%.2f",
+                    e.token,
+                    gate_reasons,
+                    attention_score,
+                    risk_score,
+                )
+            else:
+                if bonding_warn:
+                    logger.info("[candidate-warning] bonding_curve_only token=%s", e.token)
                 logger.info(
                     "[candidate-attention] token=%s attention=%.2f risk=%.2f attn_reasons=%s",
                     e.token,

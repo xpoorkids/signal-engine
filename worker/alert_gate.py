@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from typing import Dict, Any, Tuple, List, Optional
 
-from worker.config import ENABLE_ALERT_GATE, GATE_REQUIRE_DEX
+from worker.config import (
+    ENABLE_ALERT_GATE,
+    GATE_REQUIRE_DEX,
+    ATTENTION_CANDIDATE_THRESHOLD,
+    RISK_VETO_THRESHOLD,
+    CAND_MIN_TOKEN_AGE_SEC,
+)
 
 
 def _float_or_zero(value: Any) -> float:
@@ -96,3 +102,58 @@ def evaluate_alert_gate(
             reasons.append(f"vol_liq_ratio>{thresholds['max_vol_liq_ratio5m']}")
 
     return len(reasons) == 0, reasons
+
+
+def _bonding_curve_status(extra: Dict[str, Any]) -> tuple[bool, bool]:
+    if not isinstance(extra, dict):
+        return False, False
+    if "bonding_curve_present" in extra:
+        value = extra.get("bonding_curve_present")
+        if isinstance(value, bool):
+            return True, value
+    for key in ("bonding_curve_liquidity", "bonding_curve_liq", "bonding_curve_usd"):
+        if key in extra:
+            try:
+                return True, float(extra.get(key) or 0) > 0
+            except Exception:
+                return True, False
+    bc = extra.get("bonding_curve")
+    if isinstance(bc, dict):
+        for key in ("liquidity", "liquidity_usd", "lp", "lp_usd"):
+            if key in bc:
+                try:
+                    return True, float(bc.get(key) or 0) > 0
+                except Exception:
+                    return True, False
+        if "exists" in bc and isinstance(bc.get("exists"), bool):
+            return True, bool(bc.get("exists"))
+    return False, False
+
+
+def admission_check_candidate(
+    attention_score: float,
+    risk_score: float,
+    extra: Dict[str, Any],
+) -> tuple[bool, List[str], bool]:
+    if not ENABLE_ALERT_GATE:
+        return True, [], False
+
+    reasons: List[str] = []
+    metrics = extra.get("metrics") if isinstance(extra, dict) else {}
+    age_min = _float_or_zero(metrics.get("age_minutes") if isinstance(metrics, dict) else 0)
+    age_sec = age_min * 60.0
+    if age_sec < CAND_MIN_TOKEN_AGE_SEC:
+        reasons.append(f"age<{CAND_MIN_TOKEN_AGE_SEC}s")
+
+    if attention_score < ATTENTION_CANDIDATE_THRESHOLD:
+        reasons.append(f"attention<{ATTENTION_CANDIDATE_THRESHOLD:.2f}")
+
+    if risk_score >= RISK_VETO_THRESHOLD:
+        reasons.append("risk_veto")
+
+    has_bonding, bonding_ok = _bonding_curve_status(extra)
+    if has_bonding and not bonding_ok:
+        reasons.append("bonding_curve_missing")
+
+    bonding_warning = not has_bonding
+    return len(reasons) == 0, reasons, bonding_warning
