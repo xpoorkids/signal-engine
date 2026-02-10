@@ -311,17 +311,17 @@ async def listen(q: asyncio.Queue) -> None:
                                                             f"[pump] token_resolved via logs lookup sig={sig} mint={mint}",
                                                             flush=True,
                                                         )
-                                    await emit_event(
-                                        Event(
-                                            type="token_resolved",
-                                            source="logs",
-                                            signature=sig,
-                                            token=mint,
-                                            confidence=0.55,
-                                            reasons=["mint_resolved_from_logs_lookup"],
-                                            extra={"buyer": buyer},
-                                        )
-                                    )
+                                                        await emit_event(
+                                                            Event(
+                                                                type="token_resolved",
+                                                                source="logs",
+                                                                signature=sig,
+                                                                token=mint,
+                                                                confidence=0.55,
+                                                                reasons=["mint_resolved_from_logs_lookup"],
+                                                                extra={"buyer": buyer},
+                                                            )
+                                                        )
                                         await emit_event(
                                             Event(
                                                 type="early_logs_initialize_mint",
@@ -476,17 +476,17 @@ async def listen(q: asyncio.Queue) -> None:
                         if sig and sig in pending_log_signatures and mint:
                             print(f"[pump] token_resolved via logs sig={sig} mint={mint}", flush=True)
                             pending_log_signatures.pop(sig, None)
-                                await emit_event(
-                                    Event(
-                                        type="token_resolved",
-                                        source="tx",
-                                        signature=sig,
-                                        token=mint,
-                                        confidence=0.55,
-                                        reasons=["mint_resolved_from_tx"],
-                                        extra={"buyer": buyer},
-                                    )
+                            await emit_event(
+                                Event(
+                                    type="token_resolved",
+                                    source="tx",
+                                    signature=sig,
+                                    token=mint,
+                                    confidence=0.55,
+                                    reasons=["mint_resolved_from_tx"],
+                                    extra={"buyer": buyer},
                                 )
+                            )
                         except Exception as e:
                             print("[pump] logs promotion failed:", e, flush=True)
 
