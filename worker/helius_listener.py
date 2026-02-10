@@ -149,6 +149,7 @@ def _resolve_mint_from_sig(sig: str) -> str | None:
                 sig,
                 {
                     "encoding": "jsonParsed",
+                    "commitment": "confirmed",
                     "maxSupportedTransactionVersion": 0,
                 },
             ],
