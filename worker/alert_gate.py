@@ -4,10 +4,10 @@ from typing import Dict, Any, Tuple, List, Optional
 
 from worker.config import (
     ENABLE_ALERT_GATE,
-    ATTENTION_CANDIDATE_THRESHOLD,
     RISK_VETO_THRESHOLD,
     CAND_MIN_TOKEN_AGE_SEC,
     CAND_MIN_CURVE_LIQ_USD,
+    CAND_MIN_ATTENTION,
 )
 
 
@@ -133,6 +133,7 @@ def admission_check_candidate(
     risk_score: float,
     extra: Dict[str, Any],
     dex_summary: Optional[Dict[str, Any]],
+    attention_unavailable: bool,
 ) -> tuple[bool, List[str], str]:
     if not ENABLE_ALERT_GATE:
         return True, [], "unknown"
@@ -144,8 +145,8 @@ def admission_check_candidate(
     if age_sec < CAND_MIN_TOKEN_AGE_SEC:
         reasons.append(f"age<{CAND_MIN_TOKEN_AGE_SEC}s")
 
-    if attention_score < ATTENTION_CANDIDATE_THRESHOLD:
-        reasons.append(f"attention<{ATTENTION_CANDIDATE_THRESHOLD:.2f}")
+    if not attention_unavailable and attention_score < CAND_MIN_ATTENTION:
+        reasons.append(f"attention<{CAND_MIN_ATTENTION:.2f}")
 
     if risk_score >= RISK_VETO_THRESHOLD:
         reasons.append("risk_veto")
@@ -153,18 +154,14 @@ def admission_check_candidate(
     lifecycle = "dex" if dex_summary else "bonding_curve"
     if lifecycle == "bonding_curve":
         has_bonding, bonding_ok = _bonding_curve_status(extra)
-        if not has_bonding:
-            reasons.append("bonding_curve_unknown")
-        elif not bonding_ok:
+        if has_bonding and not bonding_ok:
             reasons.append("bonding_curve_missing")
         curve_liq = None
         if isinstance(extra.get("bonding_curve_liquidity"), (int, float, str)):
             curve_liq = _float_or_zero(extra.get("bonding_curve_liquidity"))
         elif isinstance(extra.get("bonding_curve"), dict):
             curve_liq = _float_or_zero(extra["bonding_curve"].get("liquidity_usd"))
-        if curve_liq is None:
-            reasons.append("curve_liq_unknown")
-        elif curve_liq < CAND_MIN_CURVE_LIQ_USD:
+        if curve_liq is not None and curve_liq < CAND_MIN_CURVE_LIQ_USD:
             reasons.append(f"curve_liq<{CAND_MIN_CURVE_LIQ_USD:.0f}")
 
     return len(reasons) == 0, reasons, lifecycle

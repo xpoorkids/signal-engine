@@ -21,6 +21,7 @@ class EngineState:
     seen_signatures: Dict[str, float] = field(default_factory=dict)
     tokens: Dict[str, TokenState] = field(default_factory=dict)
     cooldown: Dict[str, float] = field(default_factory=dict)
+    _buyer_trades: Dict[str, list[tuple[float, str]]] = field(default_factory=dict)
 
     def wallet_cluster_ratio(self, token: Optional[str]) -> float:
         return 0.0
@@ -35,13 +36,40 @@ class EngineState:
         return False
 
     def burst_count_60s(self, token: Optional[str]) -> int:
-        return 0
+        if not token:
+            return 0
+        trades = self._buyer_trades.get(token, [])
+        if not trades:
+            return 0
+        now = time.time()
+        cutoff = now - 60
+        return sum(1 for ts, _ in trades if ts >= cutoff)
 
     def unique_buyers_5m(self, token: Optional[str]) -> int:
-        return 0
+        if not token:
+            return 0
+        trades = self._buyer_trades.get(token, [])
+        if not trades:
+            return 0
+        now = time.time()
+        cutoff = now - 300
+        return len({buyer for ts, buyer in trades if ts >= cutoff})
 
     def has_basic_liquidity(self, token: Optional[str]) -> bool:
         return True
+
+    def record_buyer(self, token: Optional[str], buyer: Optional[str], ts: Optional[float] = None) -> None:
+        if not token or not buyer:
+            return
+        now = ts if ts is not None else time.time()
+        trades = self._buyer_trades.setdefault(token, [])
+        trades.append((now, buyer))
+        cutoff = now - 600
+        if len(trades) > 1000:
+            trades[:] = [(t, b) for t, b in trades if t >= cutoff]
+        else:
+            while trades and trades[0][0] < cutoff:
+                trades.pop(0)
 
 
 def ttl_prune(seen: Dict[str, float], ttl_sec: int) -> None:

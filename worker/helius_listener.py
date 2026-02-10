@@ -136,6 +136,27 @@ def extract_new_mints_from_token_balances(tx: dict) -> list[str]:
     return new_mints
 
 
+def _first_signer(tx: dict) -> str | None:
+    try:
+        message = tx.get("transaction", {}).get("message", {})
+        account_keys = message.get("accountKeys", []) or []
+    except Exception:
+        return None
+    for k in account_keys:
+        try:
+            if isinstance(k, dict) and k.get("signer"):
+                return k.get("pubkey")
+        except Exception:
+            continue
+    if account_keys:
+        first = account_keys[0]
+        if isinstance(first, dict):
+            return first.get("pubkey")
+        if isinstance(first, str):
+            return first
+    return None
+
+
 def _resolve_mint_from_sig(sig: str) -> str | None:
     if not sig or not HELIUS_RPC:
         _log_rpc_issue("missing_sig_or_rpc_url")
@@ -259,6 +280,7 @@ async def listen(q: asyncio.Queue) -> None:
 
                     # Logs-only visibility for InitializeMint
                     if method == "logsNotification":
+                        buyer = None
                         try:
                             result = msg.get("params", {}).get("result", {})
                             value = result.get("value", {}) if isinstance(result, dict) else {}
@@ -289,16 +311,17 @@ async def listen(q: asyncio.Queue) -> None:
                                                             f"[pump] token_resolved via logs lookup sig={sig} mint={mint}",
                                                             flush=True,
                                                         )
-                                                        await emit_event(
-                                                            Event(
-                                                                type="token_resolved",
-                                                                source="logs",
-                                                                signature=sig,
-                                                                token=mint,
-                                                                confidence=0.55,
-                                                                reasons=["mint_resolved_from_logs_lookup"],
-                                                            )
-                                                        )
+                                    await emit_event(
+                                        Event(
+                                            type="token_resolved",
+                                            source="logs",
+                                            signature=sig,
+                                            token=mint,
+                                            confidence=0.55,
+                                            reasons=["mint_resolved_from_logs_lookup"],
+                                            extra={"buyer": buyer},
+                                        )
+                                    )
                                         await emit_event(
                                             Event(
                                                 type="early_logs_initialize_mint",
@@ -339,6 +362,7 @@ async def listen(q: asyncio.Queue) -> None:
                                             token=mint,
                                             confidence=0.55,
                                             reasons=["mint_resolved_from_logs_retry"],
+                                            extra={"buyer": buyer},
                                         )
                                     )
                         continue
@@ -417,6 +441,8 @@ async def listen(q: asyncio.Queue) -> None:
                     else:
                         print("[pump] HIT mint", mint, flush=True)
 
+                    buyer = _first_signer(tx)
+
                     # Temporarily widen the net (WS-only proof): emit when pump program is seen
                     if is_pump_program:
                         try:
@@ -437,6 +463,7 @@ async def listen(q: asyncio.Queue) -> None:
                                     extra={
                                         "has_token_balance_diff": has_token_balance_diff,
                                         "observed_at": datetime.now(timezone.utc).isoformat(),
+                                        "buyer": buyer,
                                     },
                                 )
                             )
@@ -449,18 +476,19 @@ async def listen(q: asyncio.Queue) -> None:
                         if sig and sig in pending_log_signatures and mint:
                             print(f"[pump] token_resolved via logs sig={sig} mint={mint}", flush=True)
                             pending_log_signatures.pop(sig, None)
-                            await emit_event(
-                                Event(
-                                    type="token_resolved",
-                                    source="tx",
-                                    signature=sig,
-                                    token=mint,
-                                    confidence=0.55,
-                                    reasons=["mint_resolved_from_tx"],
+                                await emit_event(
+                                    Event(
+                                        type="token_resolved",
+                                        source="tx",
+                                        signature=sig,
+                                        token=mint,
+                                        confidence=0.55,
+                                        reasons=["mint_resolved_from_tx"],
+                                        extra={"buyer": buyer},
+                                    )
                                 )
-                            )
-                    except Exception as e:
-                        print("[pump] logs promotion failed:", e, flush=True)
+                        except Exception as e:
+                            print("[pump] logs promotion failed:", e, flush=True)
 
                     for mint in new_mints:
                         try:
@@ -474,6 +502,7 @@ async def listen(q: asyncio.Queue) -> None:
                                     token=mint,
                                     confidence=0.55,
                                     reasons=["mint_resolved_from_tx"],
+                                    extra={"buyer": buyer},
                                 )
                             )
                         except Exception as e:
