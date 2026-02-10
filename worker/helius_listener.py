@@ -3,9 +3,16 @@ import json
 import asyncio
 import websockets
 import time
+import requests
 from collections import deque
 from datetime import datetime, timezone
-from worker.config import ENABLE_LOGS_SUB, HELIUS_API_KEY, HELIUS_WS_URL
+from worker.config import (
+    ENABLE_LOGS_SUB,
+    ENABLE_LOGS_TX_LOOKUP,
+    HELIUS_API_KEY,
+    HELIUS_WS_URL,
+    HELIUS_RPC_URL,
+)
 from worker.events import Event
 
 HELIUS_KEY = HELIUS_API_KEY or os.getenv("HELIUS_API_KEY")
@@ -13,6 +20,11 @@ HELIUS_WS = (
     HELIUS_WS_URL
     or os.getenv("HELIUS_WS_URL")
     or f"wss://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}"
+)
+HELIUS_RPC = (
+    HELIUS_RPC_URL
+    or os.getenv("HELIUS_RPC_URL")
+    or f"https://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}"
 )
 
 # Pump.fun program ID (mainnet)
@@ -113,6 +125,38 @@ def extract_new_mints_from_token_balances(tx: dict) -> list[str]:
 
     return new_mints
 
+
+def _resolve_mint_from_sig(sig: str) -> str | None:
+    if not sig or not HELIUS_RPC:
+        return None
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTransaction",
+            "params": [
+                sig,
+                {
+                    "encoding": "jsonParsed",
+                    "maxSupportedTransactionVersion": 0,
+                },
+            ],
+        }
+        r = requests.post(HELIUS_RPC, json=payload, timeout=8)
+        if r.status_code >= 300:
+            return None
+        data = r.json()
+        result = data.get("result")
+        if not result:
+            return None
+        tx = {"transaction": result.get("transaction"), "meta": result.get("meta")}
+        new_mints = extract_new_mints_from_token_balances(tx)
+        if new_mints:
+            return new_mints[0]
+        return extract_mint_from_inner_instructions(tx)
+    except Exception:
+        return None
+
 async def listen(q: asyncio.Queue) -> None:
     tx_sub = {
         "jsonrpc": "2.0",
@@ -145,6 +189,8 @@ async def listen(q: asyncio.Queue) -> None:
     emit_count = 0
     recent_logs = deque(maxlen=50)
     pending_log_signatures = set()
+    resolved_log_signatures: dict[str, float] = {}
+    last_lookup_ts = 0.0
     last_report_ts = time.time()
     last_emit_ts = time.time()
 
@@ -214,6 +260,27 @@ async def listen(q: asyncio.Queue) -> None:
                                         print("[FORCE] logs InitializeMint EARLY emitted", flush=True)
                                         if sig:
                                             pending_log_signatures.add(sig)
+                                            if ENABLE_LOGS_TX_LOOKUP:
+                                                now = time.time()
+                                                if now - last_lookup_ts > 0.2 and sig not in resolved_log_signatures:
+                                                    last_lookup_ts = now
+                                                    mint = _resolve_mint_from_sig(sig)
+                                                    if mint:
+                                                        resolved_log_signatures[sig] = now
+                                                        print(
+                                                            f"[pump] token_resolved via logs lookup sig={sig} mint={mint}",
+                                                            flush=True,
+                                                        )
+                                                        await emit_event(
+                                                            Event(
+                                                                type="token_resolved",
+                                                                source="logs",
+                                                                signature=sig,
+                                                                token=mint,
+                                                                confidence=0.55,
+                                                                reasons=["mint_resolved_from_logs_lookup"],
+                                                            )
+                                                        )
                                         await emit_event(
                                             Event(
                                                 type="early_logs_initialize_mint",

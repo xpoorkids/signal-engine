@@ -14,6 +14,7 @@ ENABLE_WALLET = env_bool("ENABLE_WALLET", "0")
 
 ENABLE_LOGS_SUB = env_bool("ENABLE_LOGS_SUB", "1")
 ENABLE_WS_EARLY = env_bool("ENABLE_WS_EARLY", "1")
+ENABLE_LOGS_TX_LOOKUP = env_bool("ENABLE_LOGS_TX_LOOKUP", "1")
 
 ENABLE_FORENSICS = env_bool("ENABLE_FORENSICS", "1")
 ENABLE_ATTENTION = env_bool("ENABLE_ATTENTION", "1")
@@ -28,6 +29,7 @@ DISCORD_CANDIDATE_WEBHOOK = os.getenv("DISCORD_CANDIDATE_WEBHOOK", "").strip()
 
 HELIUS_WS_URL = os.getenv("HELIUS_WS_URL", "").strip()
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "").strip()
+HELIUS_RPC_URL = os.getenv("HELIUS_RPC_URL", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
 DEX_REFRESH_SECONDS = int(os.getenv("DEX_REFRESH_SECONDS", "10"))
