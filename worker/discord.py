@@ -110,6 +110,7 @@ def send_discord(e: Event) -> None:
         return
 
     payload = format_discord(e)
+    print(f"[discord] send attempt type={e.type} token={e.token}", flush=True)
 
     if DRY_RUN:
         print("[DRY_RUN] suppressed Discord send", json.dumps(payload)[:400])
@@ -119,6 +120,8 @@ def send_discord(e: Event) -> None:
         r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=8)
         if r.status_code >= 300:
             print("[discord] send failed", r.status_code, r.text[:200])
+        else:
+            print("[discord] send ok", r.status_code)
     except Exception as ex:
         print("[discord] send exception", ex)
 
@@ -160,6 +163,7 @@ def send_candidate_discord(e: Event) -> None:
         ],
     }
     payload = {"embeds": [embed]}
+    print(f"[discord] candidate send attempt token={e.token}", flush=True)
 
     if DRY_RUN:
         print("[DRY_RUN] suppressed Candidate Discord send", json.dumps(payload)[:400])
@@ -169,5 +173,7 @@ def send_candidate_discord(e: Event) -> None:
         r = requests.post(DISCORD_CANDIDATE_WEBHOOK, json=payload, timeout=8)
         if r.status_code >= 300:
             print("[discord] candidate send failed", r.status_code, r.text[:200])
+        else:
+            print("[discord] candidate send ok", r.status_code)
     except Exception as ex:
         print("[discord] candidate send exception", ex)
