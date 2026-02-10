@@ -59,6 +59,11 @@ def _extract_metrics(e: Event) -> dict:
     metrics = extra.get("metrics") if isinstance(extra.get("metrics"), dict) else {}
     attention_metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
     risk_flags = extra.get("risk_flags") if isinstance(extra.get("risk_flags"), dict) else {}
+    price_points = None
+    if isinstance(extra.get("price_points"), list):
+        price_points = extra.get("price_points")
+    elif isinstance(dex_summary.get("price_points"), list):
+        price_points = dex_summary.get("price_points")
 
     liq = dex_summary.get("liquidity_usd")
     age = dex_summary.get("age_minutes")
@@ -75,6 +80,7 @@ def _extract_metrics(e: Event) -> dict:
         "price_change_h24": dex_summary.get("price_change_h24"),
         "market_cap": dex_summary.get("market_cap") or dex_summary.get("fdv"),
         "risk_flags": risk_flags,
+        "price_points": price_points,
     }
 
 
@@ -97,6 +103,54 @@ def render_confidence_bar(score: float) -> str:
         clamped = 0.0
     filled = int(round(clamped * blocks))
     return ("#" * filled) + ("-" * (blocks - filled))
+
+
+def render_sparkline(points: list[float] | None, width: int = 8) -> str:
+    if not points:
+        return ""
+    series = [p for p in points if isinstance(p, (int, float))]
+    if len(series) < 2:
+        return ""
+    if len(series) > width:
+        step = max(1, len(series) // width)
+        series = [series[i] for i in range(0, len(series), step)][:width]
+    low = min(series)
+    high = max(series)
+    if high == low:
+        return "▁" * len(series)
+    blocks = "▁▂▃▄▅▆▇█"
+    out = []
+    for v in series:
+        idx = int(round((v - low) / (high - low) * (len(blocks) - 1)))
+        out.append(blocks[idx])
+    return "".join(out)
+
+
+def _section_lines(lines: list[str], indent: int = 2, bar: str = "|") -> str:
+    pad = " " * indent
+    return "\n".join(f"{bar}{pad}{line}" for line in lines if line)
+
+
+def _candidate_header(attention_score: float, risk_score: float) -> str:
+    if attention_score >= 0.85:
+        regime = "Radar (Hot)"
+    elif attention_score >= 0.70:
+        regime = "Radar (Active)"
+    elif risk_score < 0.30:
+        regime = "Radar (Quiet)"
+    else:
+        regime = "Radar (Active)"
+    return f"[ RADAR   WATCH ] {regime}"
+
+
+def _promoted_header(final_score: float) -> str:
+    if final_score >= 0.80:
+        regime = "Signal (Strong)"
+    elif final_score >= 0.75:
+        regime = "Signal (Normal)"
+    else:
+        regime = "Signal (Normal)"
+    return f"[ SIGNAL   VALIDATED ] {regime}"
 
 
 def _wallet_signal_lines(risk_flags: dict) -> str:
@@ -144,11 +198,15 @@ def format_discord(e: Event) -> dict:
     short_addr = _short_addr(token)
 
     if e.type == "promoted":
+        reasons = []
+        if e.reasons:
+            reasons = e.reasons[:4]
         rscore = float(e.extra.get("risk_score") or 0.0) if isinstance(e.extra, dict) else 0.0
         ascore = float(e.extra.get("attention_score") or 0.0) if isinstance(e.extra, dict) else 0.0
         metrics = _extract_metrics(e)
         confidence_bar = render_confidence_bar(e.confidence)
         change_24h = _format_change_pct(metrics.get("price_change_h24"))
+        sparkline = render_sparkline(metrics.get("price_points"))
         mc_value = metrics.get("market_cap")
         liq_value = metrics.get("liq")
         liq_mc = "-"
@@ -159,44 +217,68 @@ def format_discord(e: Event) -> dict:
             liq_mc = "-"
 
         fields = [
-            {"name": "Token", "value": f"${symbol}", "inline": True},
-            {"name": "Address", "value": f"`{short_addr}`", "inline": True},
             {
-                "name": "Final Score",
-                "value": f"{e.confidence:.2f}",
-                "inline": True,
-            },
-            {
-                "name": "Confidence",
-                "value": f"{confidence_bar} ({int(round(e.confidence * 100))}%)",
-                "inline": True,
-            },
-            {"name": "Risk", "value": f"{rscore:.2f}", "inline": True},
-            {"name": "Attention", "value": f"{ascore:.2f}", "inline": True},
+                "name": "Overview",
+                "value": _section_lines(
+                    [
+                        f"Token ${symbol}",
+                        f"Address `{short_addr}`",
+                        f"Final Score {e.confidence:.2f} (0.75)",
+                        f"Confidence {confidence_bar} ({int(round(e.confidence * 100))}%)",
+                        f"Risk {rscore:.2f}",
+                        f"Attention {ascore:.2f}",
+                    ]
+                ),
+                "inline": False,
+            }
+        ]
+        snapshot_lines = [
+            f"Liquidity {_fmt_usd(metrics['liq'])}",
+            f"Market Cap {_fmt_usd(mc_value)}",
+            f"Liq / MC {liq_mc}",
         ]
         if change_24h is not None:
-            fields.append({"name": "24h Change", "value": change_24h, "inline": True})
-        fields.extend(
-            [
-                {"name": "Liquidity", "value": _fmt_usd(metrics["liq"]), "inline": True},
-                {"name": "Market Cap", "value": _fmt_usd(mc_value), "inline": True},
-                {"name": "Liq/MC", "value": liq_mc, "inline": True},
+            change_line = f"24h Change {change_24h}"
+            if sparkline:
+                change_line = f"{change_line}  {sparkline}"
+            snapshot_lines.insert(0, change_line)
+        fields.append(
+            {
+                "name": "Market Snapshot",
+                "value": _section_lines(snapshot_lines),
+                "inline": False,
+            }
+        )
+        fields.append(
+            {
+                "name": "Wallet Signals",
+                "value": _section_lines([_wallet_signal_lines(metrics.get("risk_flags"))]),
+                "inline": False,
+            }
+        )
+        if reasons:
+            fields.append(
                 {
-                    "name": "Wallet Signals",
-                    "value": _wallet_signal_lines(metrics.get("risk_flags")),
+                    "name": "Why Promoted",
+                    "value": _section_lines([f"- {r}" for r in reasons]),
                     "inline": False,
-                },
-                {
-                    "name": "Links",
-                    "value": f"[Dexscreener](https://dexscreener.com/solana/{token})  "
-                    f"[Birdeye](https://birdeye.so/token/{token}?chain=solana)",
-                    "inline": False,
-                },
-            ]
+                }
+            )
+        fields.append(
+            {
+                "name": "Links",
+                "value": _section_lines(
+                    [
+                        f"[Dexscreener](https://dexscreener.com/solana/{token})",
+                        f"[Birdeye](https://birdeye.so/token/{token}?chain=solana)",
+                    ]
+                ),
+                "inline": False,
+            }
         )
 
         embed = {
-            "title": _fmt_title(e),
+            "title": _promoted_header(e.confidence),
             "description": "Validated by layered gates.",
             "color": DARK_RED,
             "fields": fields,
@@ -279,6 +361,7 @@ def send_candidate_discord(e: Event) -> None:
     metrics = _extract_metrics(e)
     confidence_bar = render_confidence_bar(e.confidence)
     change_24h = _format_change_pct(metrics.get("price_change_h24"))
+    sparkline = render_sparkline(metrics.get("price_points"))
     mc_value = metrics.get("market_cap")
     liq_value = metrics.get("liq")
     liq_mc = "-"
@@ -288,39 +371,59 @@ def send_candidate_discord(e: Event) -> None:
     except Exception:
         liq_mc = "-"
     fields = [
-        {"name": "Token", "value": f"${symbol}", "inline": True},
-        {"name": "Address", "value": f"`{short_addr}`", "inline": True},
-        {"name": "Attention", "value": f"{attention_score:.2f}", "inline": True},
-        {"name": "Risk", "value": f"{risk_score:.2f}", "inline": True},
         {
-            "name": "Confidence",
-            "value": f"{confidence_bar} ({int(round(e.confidence * 100))}%)",
-            "inline": True,
-        },
+            "name": "Overview",
+            "value": _section_lines(
+                [
+                    f"Token ${symbol}",
+                    f"Address `{short_addr}`",
+                    f"Attention {attention_score:.2f}",
+                    f"Risk {risk_score:.2f}",
+                    f"Confidence {confidence_bar} ({int(round(e.confidence * 100))}%)",
+                ]
+            ),
+            "inline": False,
+        }
+    ]
+    snapshot_lines = [
+        f"Liquidity {_fmt_usd(metrics['liq'])}",
+        f"Market Cap {_fmt_usd(mc_value)}",
+        f"Liq / MC {liq_mc}",
     ]
     if change_24h is not None:
-        fields.append({"name": "24h Change", "value": change_24h, "inline": True})
-    fields.extend(
-        [
-            {"name": "Liquidity", "value": _fmt_usd(metrics["liq"]), "inline": True},
-            {"name": "Market Cap", "value": _fmt_usd(mc_value), "inline": True},
-            {"name": "Liq/MC", "value": liq_mc, "inline": True},
-            {
-                "name": "Wallet Signals",
-                "value": _wallet_signal_lines(metrics.get("risk_flags")),
-                "inline": False,
-            },
-            {
-                "name": "Links",
-                "value": f"[Dexscreener](https://dexscreener.com/solana/{token})  "
-                f"[Birdeye](https://birdeye.so/token/{token}?chain=solana)",
-                "inline": False,
-            },
-        ]
+        change_line = f"24h Change {change_24h}"
+        if sparkline:
+            change_line = f"{change_line}  {sparkline}"
+        snapshot_lines.insert(0, change_line)
+    fields.append(
+        {
+            "name": "Market Snapshot",
+            "value": _section_lines(snapshot_lines),
+            "inline": False,
+        }
+    )
+    fields.append(
+        {
+            "name": "Wallet Signals",
+            "value": _section_lines([_wallet_signal_lines(metrics.get("risk_flags"))]),
+            "inline": False,
+        }
+    )
+    fields.append(
+        {
+            "name": "Links",
+            "value": _section_lines(
+                [
+                    f"[Dexscreener](https://dexscreener.com/solana/{token})",
+                    f"[Birdeye](https://birdeye.so/token/{token}?chain=solana)",
+                ]
+            ),
+            "inline": False,
+        }
     )
 
     embed = {
-        "title": _fmt_title(e),
+        "title": _candidate_header(attention_score, risk_score),
         "description": "Early coordination detected. Watch only.",
         "color": AMBER,
         "fields": fields,
