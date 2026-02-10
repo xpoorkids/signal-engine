@@ -205,11 +205,17 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
     except Exception:
         metrics["unique_buyers_5m"] = 0
 
+    if metrics["burst_count_60s"] >= 5:
+        attention_score += 0.10
+        reasons.append("burst_count_60s>=5")
     if metrics["burst_count_60s"] >= BURST_COUNT_60S_THRESHOLD:
-        attention_score += 0.35
-        reasons.append("burst_count_60s>=20")
-    if metrics["unique_buyers_5m"] >= UNIQUE_BUYERS_5M_THRESHOLD:
         attention_score += 0.25
+        reasons.append("burst_count_60s>=20")
+    if metrics["unique_buyers_5m"] >= 3:
+        attention_score += 0.10
+        reasons.append("unique_buyers_5m>=3")
+    if metrics["unique_buyers_5m"] >= UNIQUE_BUYERS_5M_THRESHOLD:
+        attention_score += 0.15
         reasons.append("unique_buyers_5m>=25")
 
     # DexScreener boosts/orders

@@ -74,6 +74,10 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             e.extra["risk_reasons"] = risk_reasons
             e.extra["risk_flags"] = risk_flags
 
+        buyer = e.extra.get("buyer") if isinstance(e.extra, dict) else None
+        if buyer:
+            state.record_buyer(e.token, buyer, ts=e.ts)
+
         attention_score = 0.0
         attn_reasons: list[str] = []
         attn_metrics: Dict[str, Any] = {}
@@ -127,9 +131,6 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             e.reasons.append("token_resolved")
 
         extra: Dict[str, Any] = dict(e.extra)
-        buyer = extra.get("buyer") if isinstance(extra, dict) else None
-        if buyer:
-            state.record_buyer(e.token, buyer, ts=e.ts)
         if ENABLE_DEX:
             extra["dex"] = await dex_enrich_token(e.token)
             dex_summary = None
