@@ -188,9 +188,10 @@ async def listen(q: asyncio.Queue) -> None:
     log_count = 0
     emit_count = 0
     recent_logs = deque(maxlen=50)
-    pending_log_signatures = set()
+    pending_log_signatures: dict[str, float] = {}
     resolved_log_signatures: dict[str, float] = {}
     last_lookup_ts = 0.0
+    last_pending_check = 0.0
     last_report_ts = time.time()
     last_emit_ts = time.time()
 
@@ -259,7 +260,7 @@ async def listen(q: asyncio.Queue) -> None:
                                         print("[FORCE] InitializeMint seen in logs", flush=True)
                                         print("[FORCE] logs InitializeMint EARLY emitted", flush=True)
                                         if sig:
-                                            pending_log_signatures.add(sig)
+                                            pending_log_signatures[sig] = time.time()
                                             if ENABLE_LOGS_TX_LOOKUP:
                                                 now = time.time()
                                                 if now - last_lookup_ts > 0.2 and sig not in resolved_log_signatures:
@@ -400,7 +401,7 @@ async def listen(q: asyncio.Queue) -> None:
                         sig = result.get("signature")
                         if sig and sig in pending_log_signatures and mint:
                             print(f"[pump] token_resolved via logs sig={sig} mint={mint}", flush=True)
-                            pending_log_signatures.discard(sig)
+                            pending_log_signatures.pop(sig, None)
                             await emit_event(
                                 Event(
                                     type="token_resolved",
@@ -430,6 +431,36 @@ async def listen(q: asyncio.Queue) -> None:
                             )
                         except Exception as e:
                             print("[pump] handler failed:", e, flush=True)
+
+                    # Periodic retry for pending log signatures (processed logs may not be confirmed yet)
+                    now = time.time()
+                    if ENABLE_LOGS_TX_LOOKUP and now - last_pending_check > 1.0 and pending_log_signatures:
+                        last_pending_check = now
+                        for sig, first_seen in list(pending_log_signatures.items())[:5]:
+                            if sig in resolved_log_signatures:
+                                pending_log_signatures.pop(sig, None)
+                                continue
+                            if now - first_seen > 180:
+                                pending_log_signatures.pop(sig, None)
+                                continue
+                            mint = _resolve_mint_from_sig(sig)
+                            if mint:
+                                resolved_log_signatures[sig] = now
+                                pending_log_signatures.pop(sig, None)
+                                print(
+                                    f"[pump] token_resolved via logs retry sig={sig} mint={mint}",
+                                    flush=True,
+                                )
+                                await emit_event(
+                                    Event(
+                                        type="token_resolved",
+                                        source="logs",
+                                        signature=sig,
+                                        token=mint,
+                                        confidence=0.55,
+                                        reasons=["mint_resolved_from_logs_retry"],
+                                    )
+                                )
         except Exception as e:
             print("[helius] ws error, reconnecting:", e, flush=True)
             await asyncio.sleep(15)
