@@ -27,6 +27,16 @@ HELIUS_RPC = (
     or f"https://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}"
 )
 
+_last_rpc_log_ts = 0.0
+
+
+def _log_rpc_issue(msg: str) -> None:
+    global _last_rpc_log_ts
+    now = time.time()
+    if now - _last_rpc_log_ts > 30:
+        print(f"[rpc] {msg}", flush=True)
+        _last_rpc_log_ts = now
+
 # Pump.fun program ID (mainnet)
 PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 PUMP_PROGRAM_IDS = {
@@ -128,6 +138,7 @@ def extract_new_mints_from_token_balances(tx: dict) -> list[str]:
 
 def _resolve_mint_from_sig(sig: str) -> str | None:
     if not sig or not HELIUS_RPC:
+        _log_rpc_issue("missing_sig_or_rpc_url")
         return None
     try:
         payload = {
@@ -144,10 +155,12 @@ def _resolve_mint_from_sig(sig: str) -> str | None:
         }
         r = requests.post(HELIUS_RPC, json=payload, timeout=8)
         if r.status_code >= 300:
+            _log_rpc_issue(f"getTransaction status={r.status_code} body={r.text[:120]}")
             return None
         data = r.json()
         result = data.get("result")
         if not result:
+            _log_rpc_issue("getTransaction result=null")
             return None
         tx = {"transaction": result.get("transaction"), "meta": result.get("meta")}
         new_mints = extract_new_mints_from_token_balances(tx)
@@ -155,9 +168,12 @@ def _resolve_mint_from_sig(sig: str) -> str | None:
             return new_mints[0]
         return extract_mint_from_inner_instructions(tx)
     except Exception:
+        _log_rpc_issue("getTransaction exception")
         return None
 
 async def listen(q: asyncio.Queue) -> None:
+    if not HELIUS_KEY:
+        print("[helius] missing HELIUS_API_KEY", flush=True)
     tx_sub = {
         "jsonrpc": "2.0",
         "id": 1,
