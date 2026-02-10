@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import websockets
+import time
 from collections import deque
 from datetime import datetime, timezone
 from worker.config import ENABLE_LOGS_SUB, HELIUS_API_KEY, HELIUS_WS_URL
@@ -141,8 +142,11 @@ async def listen(q: asyncio.Queue) -> None:
     ws_tx_count = 0
     early_count = 0
     log_count = 0
+    emit_count = 0
     recent_logs = deque(maxlen=50)
     pending_log_signatures = set()
+    last_report_ts = time.time()
+    last_emit_ts = time.time()
 
     while True:
         try:
@@ -161,19 +165,33 @@ async def listen(q: asyncio.Queue) -> None:
                 async for raw in ws:
                     try:
                         msg = json.loads(raw)
-                        print("[helius] tx message received", flush=True)
                     except Exception as e:
                         print("[helius] recv/parse failed:", e, flush=True)
                         continue
 
                     async def emit_event(e: Event) -> None:
+                        nonlocal emit_count, last_emit_ts
                         try:
                             print(f"[event-emit] type={e.type} token={e.token}", flush=True)
                             await q.put(e)
+                            emit_count += 1
+                            last_emit_ts = time.time()
                         except Exception as e2:
                             print("[pump-logs] emit failed:", e2, flush=True)
 
                     method = msg.get("method")
+                    now = time.time()
+                    if now - last_report_ts > 30:
+                        print(
+                            f"[helius] summary tx_msgs={ws_tx_count} logs_msgs={log_count} emits={emit_count}",
+                            flush=True,
+                        )
+                        ws_tx_count = 0
+                        log_count = 0
+                        emit_count = 0
+                        last_report_ts = now
+                        if now - last_emit_ts > 120:
+                            print("[event-emit] none in last 120s", flush=True)
 
                     # Logs-only visibility for InitializeMint
                     if method == "logsNotification":
