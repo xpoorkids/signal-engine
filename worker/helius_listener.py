@@ -223,7 +223,7 @@ async def listen(q: asyncio.Queue) -> None:
                 await ws.send(json.dumps(tx_sub))
                 if ENABLE_LOGS_SUB:
                     await ws.send(json.dumps(logs_sub))
-                    print("[logs] subscribed to ALL logs (processed)", flush=True)
+                    print("[logs] subscribed to ALL logs (confirmed)", flush=True)
 
                 async for raw in ws:
                     try:
@@ -310,6 +310,36 @@ async def listen(q: asyncio.Queue) -> None:
                                         break
                         except Exception as e:
                             print("[pump-logs] parse failed:", e, flush=True)
+
+                        # Periodic retry for pending log signatures (processed logs may not be confirmed yet)
+                        now = time.time()
+                        if ENABLE_LOGS_TX_LOOKUP and now - last_pending_check > 1.0 and pending_log_signatures:
+                            last_pending_check = now
+                            for sig, first_seen in list(pending_log_signatures.items())[:5]:
+                                if sig in resolved_log_signatures:
+                                    pending_log_signatures.pop(sig, None)
+                                    continue
+                                if now - first_seen > 180:
+                                    pending_log_signatures.pop(sig, None)
+                                    continue
+                                mint = _resolve_mint_from_sig(sig)
+                                if mint:
+                                    resolved_log_signatures[sig] = now
+                                    pending_log_signatures.pop(sig, None)
+                                    print(
+                                        f"[pump] token_resolved via logs retry sig={sig} mint={mint}",
+                                        flush=True,
+                                    )
+                                    await emit_event(
+                                        Event(
+                                            type="token_resolved",
+                                            source="logs",
+                                            signature=sig,
+                                            token=mint,
+                                            confidence=0.55,
+                                            reasons=["mint_resolved_from_logs_retry"],
+                                        )
+                                    )
                         continue
 
                     if method and method != "transactionNotification":
