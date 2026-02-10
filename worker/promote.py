@@ -28,9 +28,11 @@ from worker.execution import estimate_edge
 from worker.attention import compute_attention
 
 logger = logging.getLogger(__name__)
+logger.info("[PROMOTE FILE LOADED]")
 
 async def process_event(state: EngineState, e: Event) -> list[Event]:
     out: list[Event] = []
+    logger.info("[PROMOTE HANDLER CALLED] type=%s token=%s", e.type, e.token)
     logger.info("[promote-enter] token=%s", e.token)
 
     # Early events without token: state only, never alert or promote
