@@ -4,6 +4,8 @@ import time
 import traceback
 import logging
 
+logging.basicConfig(level=logging.INFO)
+
 from worker.config import (
     ENABLE_WS,
     ENABLE_DEX,

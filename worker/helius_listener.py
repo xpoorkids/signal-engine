@@ -168,6 +168,7 @@ async def listen(q: asyncio.Queue) -> None:
 
                     async def emit_event(e: Event) -> None:
                         try:
+                            print(f"[event-emit] type={e.type} token={e.token}", flush=True)
                             await q.put(e)
                         except Exception as e2:
                             print("[pump-logs] emit failed:", e2, flush=True)
