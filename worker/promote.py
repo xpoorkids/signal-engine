@@ -115,43 +115,6 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             )
             return [e]
 
-        # ------------------------------------------------------------
-        # Attention-driven candidate emission (Phase 1)
-        # ------------------------------------------------------------
-        if ENABLE_ATTENTION_CANDIDATE:
-            # Candidate is an EARLY-WATCHLIST signal, not a promotion.
-            # It is driven by coordination/attention, not market cap.
-            ok, gate_reasons = admission_check_candidate(
-                attention_score,
-                risk_score,
-                e.extra if isinstance(e.extra, dict) else {},
-            )
-            if not ok:
-                logger.info(
-                    "[candidate-skip] token=%s reasons=%s attention=%.2f risk=%.2f",
-                    e.token,
-                    gate_reasons,
-                    attention_score,
-                    risk_score,
-                )
-            else:
-                logger.info(
-                    "[candidate-attention] token=%s attention=%.2f risk=%.2f attn_reasons=%s",
-                    e.token,
-                    attention_score,
-                    risk_score,
-                    attn_reasons,
-                )
-
-                out.append(
-                    Event(
-                        type="candidate",
-                        source="engine",
-                        token=e.token,
-                        extra=dict(e.extra),
-                    )
-                )
-
         if e.type == "token_resolved":
             e.confidence = bump(e.confidence, CONF_WEIGHTS["token_resolved"], CAPS["heating"])
             e.reasons.append("token_resolved")
@@ -174,6 +137,8 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     e.confidence, CONF_WEIGHTS["dex_pair_found"], CAPS["heating"]
                 )
                 e.reasons.append("dex_pair_found")
+        else:
+            dex_summary = None
 
         if ENABLE_WALLET and ts.creator:
             extra["wallet_risk"] = await score_wallet_risk(ts.creator)
@@ -187,6 +152,46 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         if ts.signals > 1:
             e.confidence = bump(e.confidence, CONF_WEIGHTS["repeat"], CAPS["heating"])
             e.reasons.append(f"repeat_{ts.signals}")
+
+        # ------------------------------------------------------------
+        # Attention-driven candidate emission (Phase 1)
+        # ------------------------------------------------------------
+        if ENABLE_ATTENTION_CANDIDATE:
+            # Candidate is an EARLY-WATCHLIST signal, not a promotion.
+            # It is driven by coordination/attention, not market cap.
+            ok, gate_reasons, lifecycle = admission_check_candidate(
+                attention_score,
+                risk_score,
+                extra,
+                dex_summary,
+            )
+            if not ok:
+                logger.info(
+                    "[candidate-skip] token=%s reasons=%s attention=%.2f risk=%.2f",
+                    e.token,
+                    gate_reasons,
+                    attention_score,
+                    risk_score,
+                )
+            else:
+                logger.info("[candidate-lifecycle] token=%s lifecycle=%s", e.token, lifecycle)
+                logger.info(
+                    "[candidate-attention] token=%s attention=%.2f risk=%.2f attn_reasons=%s",
+                    e.token,
+                    attention_score,
+                    risk_score,
+                    attn_reasons,
+                )
+
+                extra["lifecycle"] = lifecycle
+                out.append(
+                    Event(
+                        type="candidate",
+                        source="engine",
+                        token=e.token,
+                        extra=dict(extra),
+                    )
+                )
 
         if ENABLE_ATTENTION_BONUS:
             now = time.time()
@@ -292,6 +297,8 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 0.80,
             )
             ts.is_promoted = True
+            if isinstance(extra, dict):
+                extra["lifecycle"] = "dex"
             out.append(
                 Event(
                     type="promoted",

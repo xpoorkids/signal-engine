@@ -73,6 +73,10 @@ def _extract_metrics(e: Event) -> dict:
     if age is None:
         age = metrics.get("age_minutes")
 
+    lifecycle = extra.get("lifecycle")
+    if not isinstance(lifecycle, str) or not lifecycle:
+        lifecycle = "dex" if dex_summary else "bonding_curve"
+
     return {
         "liq": liq,
         "age": age,
@@ -82,6 +86,7 @@ def _extract_metrics(e: Event) -> dict:
         "market_cap": dex_summary.get("market_cap") or dex_summary.get("fdv"),
         "risk_flags": risk_flags,
         "price_points": price_points,
+        "lifecycle": lifecycle,
     }
 
 
@@ -230,6 +235,7 @@ def format_discord(e: Event) -> dict:
                         f"Confidence {confidence_bar} ({int(round(e.confidence * 100))}%)",
                         f"Risk {rscore:.2f}",
                         f"Attention {ascore:.2f}",
+                        f"Lifecycle {metrics.get('lifecycle')}",
                     ]
                 ),
                 "inline": False,
@@ -383,6 +389,7 @@ def send_candidate_discord(e: Event) -> None:
                     f"Attention {attention_score:.2f}",
                     f"Risk {risk_score:.2f}",
                     f"Confidence {confidence_bar} ({int(round(e.confidence * 100))}%)",
+                    f"Lifecycle {metrics.get('lifecycle')}",
                 ]
             ),
             "inline": False,

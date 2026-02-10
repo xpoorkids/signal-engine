@@ -4,10 +4,10 @@ from typing import Dict, Any, Tuple, List, Optional
 
 from worker.config import (
     ENABLE_ALERT_GATE,
-    GATE_REQUIRE_DEX,
     ATTENTION_CANDIDATE_THRESHOLD,
     RISK_VETO_THRESHOLD,
     CAND_MIN_TOKEN_AGE_SEC,
+    CAND_MIN_CURVE_LIQ_USD,
 )
 
 
@@ -66,8 +66,6 @@ def evaluate_alert_gate(
         return True, []
 
     if not dex_summary:
-        if GATE_REQUIRE_DEX:
-            return False, ["dex_missing"]
         return True, []
 
     age_min = _float_or_zero(dex_summary.get("age_minutes"))
@@ -134,9 +132,10 @@ def admission_check_candidate(
     attention_score: float,
     risk_score: float,
     extra: Dict[str, Any],
-) -> tuple[bool, List[str]]:
+    dex_summary: Optional[Dict[str, Any]],
+) -> tuple[bool, List[str], str]:
     if not ENABLE_ALERT_GATE:
-        return True, []
+        return True, [], "unknown"
 
     reasons: List[str] = []
     metrics = extra.get("metrics") if isinstance(extra, dict) else {}
@@ -151,4 +150,21 @@ def admission_check_candidate(
     if risk_score >= RISK_VETO_THRESHOLD:
         reasons.append("risk_veto")
 
-    return len(reasons) == 0, reasons
+    lifecycle = "dex" if dex_summary else "bonding_curve"
+    if lifecycle == "bonding_curve":
+        has_bonding, bonding_ok = _bonding_curve_status(extra)
+        if not has_bonding:
+            reasons.append("bonding_curve_unknown")
+        elif not bonding_ok:
+            reasons.append("bonding_curve_missing")
+        curve_liq = None
+        if isinstance(extra.get("bonding_curve_liquidity"), (int, float, str)):
+            curve_liq = _float_or_zero(extra.get("bonding_curve_liquidity"))
+        elif isinstance(extra.get("bonding_curve"), dict):
+            curve_liq = _float_or_zero(extra["bonding_curve"].get("liquidity_usd"))
+        if curve_liq is None:
+            reasons.append("curve_liq_unknown")
+        elif curve_liq < CAND_MIN_CURVE_LIQ_USD:
+            reasons.append(f"curve_liq<{CAND_MIN_CURVE_LIQ_USD:.0f}")
+
+    return len(reasons) == 0, reasons, lifecycle
