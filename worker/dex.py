@@ -85,6 +85,8 @@ def summarize_pair(pair: Dict[str, Any]) -> Dict[str, Any]:
         "txns_m5_sells": m5_txns.get("sells"),
         "price_change_m5": price_change.get("m5"),
         "price_change_h1": price_change.get("h1"),
+        "price_change_h24": price_change.get("h24"),
         "age_minutes": age_minutes,
         "fdv": pair.get("fdv"),
+        "market_cap": pair.get("marketCap"),
     }
