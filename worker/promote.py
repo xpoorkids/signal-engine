@@ -22,10 +22,11 @@ from worker.config import (
 )
 from worker.confidence import CONF_WEIGHTS, CAPS, bump
 from worker.wallet_risk import score_wallet_risk
-from worker.dex import dex_enrich_token
+from worker.dex import dex_enrich_token, select_best_pair, summarize_pair
 from worker.forensics import analyze_risk
 from worker.execution import estimate_edge
 from worker.attention import compute_attention
+from worker.alert_gate import evaluate_alert_gate
 
 logger = logging.getLogger(__name__)
 logger.info("[PROMOTE FILE LOADED]")
@@ -149,6 +150,16 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         extra: Dict[str, Any] = dict(e.extra)
         if ENABLE_DEX:
             extra["dex"] = await dex_enrich_token(e.token)
+            dex_summary = None
+            try:
+                if isinstance(extra.get("dex"), dict):
+                    best_pair = select_best_pair(extra["dex"], e.token)
+                    if best_pair:
+                        dex_summary = summarize_pair(best_pair)
+            except Exception:
+                dex_summary = None
+            if dex_summary:
+                extra["dex_summary"] = dex_summary
             if extra.get("dex", {}).get("ok"):
                 e.confidence = bump(
                     e.confidence, CONF_WEIGHTS["dex_pair_found"], CAPS["heating"]
@@ -208,20 +219,42 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         logger.info("[score] computed token=%s score=%.3f", e.token, e.confidence)
 
         if 0.55 <= e.confidence < 0.80:
-            out.append(
-                Event(
-                    type="heating_up",
-                    source=e.source,
-                    token=e.token,
-                    creator=ts.creator,
-                    confidence=e.confidence,
-                    reasons=e.reasons,
-                    extra=extra,
-                    signature=e.signature,
-                )
+            gate_pass, gate_reasons = evaluate_alert_gate(
+                "heating_up",
+                extra.get("dex_summary") if isinstance(extra, dict) else None,
             )
+            if not gate_pass:
+                logger.info(
+                    "[gate-skip] stage=heating_up token=%s reasons=%s",
+                    e.token,
+                    gate_reasons,
+                )
+            else:
+                out.append(
+                    Event(
+                        type="heating_up",
+                        source=e.source,
+                        token=e.token,
+                        creator=ts.creator,
+                        confidence=e.confidence,
+                        reasons=e.reasons,
+                        extra=extra,
+                        signature=e.signature,
+                    )
+                )
 
         if e.confidence >= 0.80 and e.token and not ts.is_promoted:
+            gate_pass, gate_reasons = evaluate_alert_gate(
+                "promoted",
+                extra.get("dex_summary") if isinstance(extra, dict) else None,
+            )
+            if not gate_pass:
+                logger.info(
+                    "[gate-skip] stage=promoted token=%s reasons=%s",
+                    e.token,
+                    gate_reasons,
+                )
+                return out
             logger.info(
                 "[promoted] token=%s score=%.3f threshold=%.3f",
                 e.token,

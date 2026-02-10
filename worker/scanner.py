@@ -1,6 +1,7 @@
 import os
 import time
 import asyncio
+import logging
 from datetime import datetime, timezone
 try:
     from zoneinfo import ZoneInfo
@@ -61,6 +62,7 @@ HEARTBEAT_EVERY = 10  # cycles
 EARLY_COUNT = 0
 SEEN_SIGNATURES = set()
 PROMOTION_STATE = EngineState()
+logger = logging.getLogger(__name__)
 
 
 def log(m: str):
@@ -235,6 +237,12 @@ def process_early_candidate(candidate: dict) -> None:
         print(f"[early] received token=None total_early={EARLY_COUNT}", flush=True)
         return
     print(f"[early] received token={token} total_early={EARLY_COUNT}", flush=True)
+    logger.info(
+        "[handoff-check] token=%s resolved=%s context=%s",
+        token,
+        True,
+        True,
+    )
     try:
         asyncio.run(
             process_event(
