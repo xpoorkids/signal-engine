@@ -43,6 +43,9 @@ ATTENTION_CANDIDATE_THRESHOLD = float(os.getenv("ATTENTION_CANDIDATE_THRESHOLD",
 EXECUTION_BONUS_CAP = float(os.getenv("EXECUTION_BONUS_CAP", "0.05"))
 MIN_EDGE_BPS = float(os.getenv("MIN_EDGE_BPS", "80"))
 
+# Discord embed regime thresholds
+RADAR_QUIET_RISK_MAX = float(os.getenv("RADAR_QUIET_RISK_MAX", "0.25"))
+
 # Dedupe / cooldown
 EARLY_DEDUPE_TTL_SEC = int(os.getenv("EARLY_DEDUPE_TTL_SEC", "600"))
 ALERT_COOLDOWN_SEC = int(os.getenv("ALERT_COOLDOWN_SEC", "120"))

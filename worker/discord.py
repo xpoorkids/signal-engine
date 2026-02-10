@@ -7,6 +7,7 @@ from worker.config import (
     DRY_RUN,
 )
 from worker.events import Event
+from worker.config import RADAR_QUIET_RISK_MAX
 
 
 AMBER = 0xF4C430
@@ -136,8 +137,10 @@ def _candidate_header(attention_score: float, risk_score: float) -> str:
         regime = "Radar (Hot)"
     elif attention_score >= 0.70:
         regime = "Radar (Active)"
-    elif risk_score < 0.30:
+    elif risk_score < RADAR_QUIET_RISK_MAX:
         regime = "Radar (Quiet)"
+    elif risk_score < 0.50:
+        regime = "Radar (Active)"
     else:
         regime = "Radar (Active)"
     return f"[ RADAR   WATCH ] {regime}"
