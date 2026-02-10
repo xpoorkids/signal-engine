@@ -134,9 +134,9 @@ def admission_check_candidate(
     attention_score: float,
     risk_score: float,
     extra: Dict[str, Any],
-) -> tuple[bool, List[str], bool]:
+) -> tuple[bool, List[str]]:
     if not ENABLE_ALERT_GATE:
-        return True, [], False
+        return True, []
 
     reasons: List[str] = []
     metrics = extra.get("metrics") if isinstance(extra, dict) else {}
@@ -151,9 +151,4 @@ def admission_check_candidate(
     if risk_score >= RISK_VETO_THRESHOLD:
         reasons.append("risk_veto")
 
-    has_bonding, bonding_ok = _bonding_curve_status(extra)
-    if has_bonding and not bonding_ok:
-        reasons.append("bonding_curve_missing")
-
-    bonding_warning = not has_bonding
-    return len(reasons) == 0, reasons, bonding_warning
+    return len(reasons) == 0, reasons

@@ -121,7 +121,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         if ENABLE_ATTENTION_CANDIDATE:
             # Candidate is an EARLY-WATCHLIST signal, not a promotion.
             # It is driven by coordination/attention, not market cap.
-            ok, gate_reasons, bonding_warn = admission_check_candidate(
+            ok, gate_reasons = admission_check_candidate(
                 attention_score,
                 risk_score,
                 e.extra if isinstance(e.extra, dict) else {},
@@ -135,8 +135,6 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     risk_score,
                 )
             else:
-                if bonding_warn:
-                    logger.info("[candidate-warning] bonding_curve_only token=%s", e.token)
                 logger.info(
                     "[candidate-attention] token=%s attention=%.2f risk=%.2f attn_reasons=%s",
                     e.token,
@@ -255,9 +253,30 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 )
 
         if e.confidence >= 0.80 and e.token and not ts.is_promoted:
+            dex_summary = extra.get("dex_summary") if isinstance(extra, dict) else None
+            has_dex_pool = bool(dex_summary)
+            if not has_dex_pool:
+                logger.info("[promote-skip] reason=no_dex_pool token=%s", e.token)
+                return out
+            if attention_score < ATTENTION_CANDIDATE_THRESHOLD:
+                logger.info(
+                    "[promote-skip] reason=attention_low token=%s attention=%.2f threshold=%.2f",
+                    e.token,
+                    attention_score,
+                    ATTENTION_CANDIDATE_THRESHOLD,
+                )
+                return out
+            if risk_score >= RISK_VETO_THRESHOLD:
+                logger.info(
+                    "[promote-skip] reason=risk_veto token=%s risk=%.2f threshold=%.2f",
+                    e.token,
+                    risk_score,
+                    RISK_VETO_THRESHOLD,
+                )
+                return out
             gate_pass, gate_reasons = evaluate_alert_gate(
                 "promoted",
-                extra.get("dex_summary") if isinstance(extra, dict) else None,
+                dex_summary,
             )
             if not gate_pass:
                 logger.info(
