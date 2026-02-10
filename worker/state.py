@@ -43,7 +43,9 @@ class EngineState:
             return 0
         now = time.time()
         cutoff = now - 60
-        return sum(1 for ts, _ in trades if ts >= cutoff)
+        count = sum(1 for ts, _ in trades if ts >= cutoff)
+        print(f"[attention] burst_count_60s token={token} count={count}", flush=True)
+        return count
 
     def unique_buyers_5m(self, token: Optional[str]) -> int:
         if not token:
@@ -53,7 +55,10 @@ class EngineState:
             return 0
         now = time.time()
         cutoff = now - 300
-        return len({buyer for ts, buyer in trades if ts >= cutoff})
+        buyers = {buyer for ts, buyer in trades if ts >= cutoff}
+        count = len(buyers)
+        print(f"[attention] unique_buyers_5m token={token} count={count}", flush=True)
+        return count
 
     def has_basic_liquidity(self, token: Optional[str]) -> bool:
         return True
@@ -63,7 +68,11 @@ class EngineState:
             return
         now = ts if ts is not None else time.time()
         trades = self._buyer_trades.setdefault(token, [])
+        seen_buyers = {b for _, b in trades}
         trades.append((now, buyer))
+        if buyer not in seen_buyers:
+            print(f"[attention] new_buyer token={token} buyer={buyer}", flush=True)
+        print(f"[attention] buyer_count token={token} count={len({b for _, b in trades})}", flush=True)
         cutoff = now - 600
         if len(trades) > 1000:
             trades[:] = [(t, b) for t, b in trades if t >= cutoff]
