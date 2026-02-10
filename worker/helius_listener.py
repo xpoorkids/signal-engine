@@ -306,6 +306,10 @@ async def listen(q: asyncio.Queue) -> None:
                     if is_pump_program:
                         try:
                             sig = result.get("signature")
+                            print(
+                                f"[pump] tx program_seen sig={sig} mint={mint} balance_diff={has_token_balance_diff}",
+                                flush=True,
+                            )
                             await emit_event(
                                 Event(
                                     type="early_tx_pump_observed",
@@ -328,6 +332,7 @@ async def listen(q: asyncio.Queue) -> None:
                     try:
                         sig = result.get("signature")
                         if sig and sig in pending_log_signatures and mint:
+                            print(f"[pump] token_resolved via logs sig={sig} mint={mint}", flush=True)
                             pending_log_signatures.discard(sig)
                             await emit_event(
                                 Event(
@@ -345,6 +350,7 @@ async def listen(q: asyncio.Queue) -> None:
                     for mint in new_mints:
                         try:
                             sig = result.get("signature")
+                            print(f"[pump] token_resolved via balances sig={sig} mint={mint}", flush=True)
                             await emit_event(
                                 Event(
                                     type="token_resolved",
