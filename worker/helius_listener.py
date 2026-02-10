@@ -487,8 +487,8 @@ async def listen(q: asyncio.Queue) -> None:
                                     extra={"buyer": buyer},
                                 )
                             )
-                        except Exception as e:
-                            print("[pump] logs promotion failed:", e, flush=True)
+                    except Exception as e:
+                        print("[pump] logs promotion failed:", e, flush=True)
 
                     for mint in new_mints:
                         try:
