@@ -195,7 +195,7 @@ async def listen(q: asyncio.Queue) -> None:
         "method": "logsSubscribe",
         "params": [
             "all",
-            {"commitment": "processed"},
+            {"commitment": "confirmed"},
         ],
     }
 
