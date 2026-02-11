@@ -515,7 +515,8 @@ class LogSwapProcessor:
         buys = self._detect_positive_deltas(tx)
         if not buys:
             return
-        buyer_signer, buyer_index, sol_spent, method, fee_lamports = self._find_buyer_signer(tx)
+        primary_mint = buys[0].get("mint") if buys else None
+        buyer_signer, buyer_index, sol_spent, method, fee_lamports = self._find_buyer_signer(tx, primary_mint)
         for buy in buys:
             await self._emit_trade_buy(
                 signature,
@@ -528,7 +529,11 @@ class LogSwapProcessor:
                 fee_lamports,
             )
 
-    def _find_buyer_signer(self, tx: Dict[str, Any]) -> Tuple[Optional[str], Optional[int], float, str, int]:
+    def _find_buyer_signer(
+        self,
+        tx: Dict[str, Any],
+        mint: Optional[str],
+    ) -> Tuple[Optional[str], Optional[int], float, str, int]:
         try:
             meta = tx.get("meta") or {}
             pre_balances = meta.get("preBalances") or []
@@ -542,6 +547,7 @@ class LogSwapProcessor:
         best_owner = None
         best_index = None
         best_spent = 0
+        signer_candidates: List[str] = []
         for idx, k in enumerate(keys):
             try:
                 is_signer = k.get("signer") if isinstance(k, dict) else False
@@ -551,6 +557,7 @@ class LogSwapProcessor:
                 continue
             if not is_signer or not is_writable or owner is None:
                 continue
+            signer_candidates.append(owner)
             try:
                 pre = int(pre_balances[idx])
                 post = int(post_balances[idx])
@@ -568,6 +575,7 @@ class LogSwapProcessor:
             return best_owner, best_index, best_spent / 1_000_000_000, "sol", fee
 
         # WSOL fallback for signer
+        has_wsol_prepost = 0
         try:
             pre_tokens = meta.get("preTokenBalances") or []
             post_tokens = meta.get("postTokenBalances") or []
@@ -577,10 +585,12 @@ class LogSwapProcessor:
                 for b in pre_tokens:
                     if b.get("mint") == WSOL_MINT and (b.get("owner") or b.get("accountOwner")) == best_owner:
                         pre_wsol = int((b.get("uiTokenAmount") or {}).get("amount") or 0)
+                        has_wsol_prepost = 1
                         break
                 for b in post_tokens:
                     if b.get("mint") == WSOL_MINT and (b.get("owner") or b.get("accountOwner")) == best_owner:
                         post_wsol = int((b.get("uiTokenAmount") or {}).get("amount") or 0)
+                        has_wsol_prepost = 1
                         break
                 if pre_wsol > post_wsol:
                     sol_spent = (pre_wsol - post_wsol) / 1_000_000_000
@@ -588,6 +598,39 @@ class LogSwapProcessor:
         except Exception:
             pass
 
+        # Inner system transfer fallback
+        inner_transfer_sum = 0
+        try:
+            inner = meta.get("innerInstructions") or []
+            buyer = best_owner
+            if buyer:
+                for entry in inner:
+                    instructions = entry.get("instructions") or []
+                    for ix in instructions:
+                        program = ix.get("program")
+                        program_id = ix.get("programId")
+                        if program != "system" and program_id != "11111111111111111111111111111111":
+                            continue
+                        parsed = ix.get("parsed") or {}
+                        if parsed.get("type") != "transfer":
+                            continue
+                        info = parsed.get("info") or {}
+                        if info.get("source") != buyer:
+                            continue
+                        lamports = int(info.get("lamports") or 0)
+                        if lamports > 0:
+                            inner_transfer_sum += lamports
+                if inner_transfer_sum > 0:
+                    sol_spent = inner_transfer_sum / 1_000_000_000
+                    return best_owner, best_index, sol_spent, "inner_sol_transfer", fee
+        except Exception:
+            pass
+
+        print(
+            f"[buy-size-miss] sig={tx.get('signature') or ''} token={mint or ''} "
+            f"buyer={best_owner} signer_candidates={signer_candidates} has_wsol_prepost={has_wsol_prepost} inner_transfer_sum={inner_transfer_sum}",
+            flush=True,
+        )
         return best_owner, best_index, 0.0, "fallback", fee
 
     async def _emit_trade_buy(
