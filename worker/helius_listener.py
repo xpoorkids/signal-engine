@@ -3,6 +3,9 @@ import json
 import asyncio
 import websockets
 import time
+import re
+from typing import Any, Dict, List, Optional, Tuple
+
 import requests
 from collections import deque
 from datetime import datetime, timezone
@@ -23,19 +26,41 @@ HELIUS_WS = (
     or os.getenv("HELIUS_WS_URL")
     or f"wss://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}"
 )
-HELIUS_RPC = (
-    HELIUS_RPC_URL
-    or os.getenv("HELIUS_RPC_URL")
-    or f"https://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}"
-)
+
+
+def _get_helius_rpc_url() -> str:
+    url = (os.getenv("HELIUS_HTTPS_RPC_URL") or os.getenv("HELIUS_RPC_URL") or "").strip()
+    api_key = (os.getenv("HELIUS_API_KEY") or "").strip()
+
+    if not url:
+        raise RuntimeError("Missing HELIUS_HTTPS_RPC_URL / HELIUS_RPC_URL env var")
+
+    if "api-key=" in url or "apikey=" in url:
+        return url
+
+    if api_key:
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}api-key={api_key}"
+
+    return url
+
+
+HELIUS_RPC = _get_helius_rpc_url()
 
 _last_rpc_log_ts = 0.0
 
-STABLE_MINTS = {
-    "So11111111111111111111111111111111111111112",  # WSOL
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
-    "Es9vMFrzaCERKgfD8CgdQqkTg2z3sVv5nJxgGkXyVg8",   # USDT
-}
+WSOL_MINT = "So11111111111111111111111111111111111111112"
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+EXCLUDED_MINTS = {WSOL_MINT, USDC_MINT}
+
+_LOG_SWAP_PATTERNS = [
+    re.compile(r"instruction:\s*buy", re.IGNORECASE),
+    re.compile(r"instruction:\s*swap", re.IGNORECASE),
+    re.compile(r"raydium", re.IGNORECASE),
+    re.compile(r"swap", re.IGNORECASE),
+    re.compile(r"pump", re.IGNORECASE),
+    re.compile(r"buy", re.IGNORECASE),
+]
 
 
 def _is_buy_log(logs: list[str]) -> bool:
@@ -46,13 +71,24 @@ def _is_buy_log(logs: list[str]) -> bool:
     return False
 
 
-def _logs_has_program(logs: list[str]) -> bool:
+def _is_swap_log(logs: List[str]) -> bool:
     if not logs:
         return False
-    for line in logs:
-        log_line = str(line)
-        if PUMPFUN_PROGRAM_ID in log_line or RAYDIUM_AMM_PROGRAM_ID in log_line:
-            return True
+
+    low = [str(l).lower() for l in logs]
+    has_instruction_buy = any("instruction: buy" in l for l in low)
+    has_instruction_swap = any("instruction: swap" in l for l in low)
+    has_raydium = any("raydium" in l for l in low)
+    has_swap = any("swap" in l for l in low)
+    has_pump = any("pump" in l for l in low)
+    has_buy = any("buy" in l for l in low)
+
+    if has_instruction_buy or has_instruction_swap:
+        return True
+    if has_raydium and has_swap:
+        return True
+    if has_pump and has_buy:
+        return True
     return False
 
 
@@ -337,7 +373,7 @@ def _resolve_mint_and_buyer_from_sig(sig: str) -> tuple[str | None, str | None]:
         return None, None
 
 
-def _resolve_tx_from_sig(sig: str) -> dict | None:
+def _resolve_tx_from_sig(sig: str) -> Dict[str, Any] | None:
     if not sig or not HELIUS_RPC:
         _log_rpc_issue("missing_sig_or_rpc_url")
         return None
@@ -364,21 +400,84 @@ def _resolve_tx_from_sig(sig: str) -> dict | None:
         if not result:
             _log_rpc_issue("getTransaction result=null")
             return None
-        return {"transaction": result.get("transaction"), "meta": result.get("meta")}
+        return {"transaction": result.get("transaction"), "meta": result.get("meta"), "slot": result.get("slot")}
     except Exception:
         _log_rpc_issue("getTransaction exception")
         return None
 
 
-def fetch_tx_with_retry(signature: str, max_attempts: int = 8, delay: float = 0.35) -> dict | None:
+def fetch_tx_with_retry(signature: str, max_attempts: int = 8, delay: float = 0.35) -> Optional[Dict[str, Any]]:
     for attempt in range(1, max_attempts + 1):
-        tx = _resolve_tx_from_sig(signature)
-        ok = 1 if tx else 0
-        print(f"[tx-fetch] sig={signature} attempt={attempt} ok={ok}", flush=True)
-        if tx:
-            return tx
+        try:
+            tx = _resolve_tx_from_sig(signature)
+            ok = 1 if tx else 0
+            print(f"[tx-fetch] sig={signature} attempt={attempt} ok={ok}", flush=True)
+            if tx:
+                return tx
+        except Exception as e:
+            print(
+                f"[tx-fetch] sig={signature} attempt={attempt} ok=0 err={type(e).__name__}:{e}",
+                flush=True,
+            )
         time.sleep(delay)
+    print(f"[tx-missing-after-retry] sig={signature}", flush=True)
     return None
+
+
+def _token_balances_to_map(balances: List[Dict[str, Any]]) -> Dict[Tuple[str, str], int]:
+    out: Dict[Tuple[str, str], int] = {}
+    for b in balances or []:
+        mint = b.get("mint")
+        owner = b.get("owner") or b.get("accountOwner")
+        ui = b.get("uiTokenAmount") or {}
+        amt_str = ui.get("amount")
+        if not mint or not owner or amt_str is None:
+            continue
+        try:
+            raw = int(amt_str)
+        except Exception:
+            continue
+        key = (owner, mint)
+        out[key] = out.get(key, 0) + raw
+    return out
+
+
+def _detect_positive_deltas(tx: Dict[str, Any]) -> List[Dict[str, Any]]:
+    meta = (tx or {}).get("meta") or {}
+    pre = meta.get("preTokenBalances") or []
+    post = meta.get("postTokenBalances") or []
+
+    pre_map = _token_balances_to_map(pre)
+    post_map = _token_balances_to_map(post)
+
+    decimals_by_key: Dict[Tuple[str, str], int] = {}
+    for b in post + pre:
+        mint = b.get("mint")
+        owner = b.get("owner") or b.get("accountOwner")
+        ui = b.get("uiTokenAmount") or {}
+        dec = ui.get("decimals")
+        if mint and owner and isinstance(dec, int):
+            decimals_by_key[(owner, mint)] = dec
+
+    keys = set(pre_map.keys()) | set(post_map.keys())
+    hits: List[Dict[str, Any]] = []
+
+    for (owner, mint) in keys:
+        if mint in EXCLUDED_MINTS:
+            continue
+        pre_raw = pre_map.get((owner, mint), 0)
+        post_raw = post_map.get((owner, mint), 0)
+        delta_raw = post_raw - pre_raw
+        if delta_raw > 0:
+            hits.append(
+                {
+                    "buyer": owner,
+                    "mint": mint,
+                    "delta_raw": delta_raw,
+                    "decimals": decimals_by_key.get((owner, mint), 0),
+                }
+            )
+    return hits
 
 async def listen(q: asyncio.Queue) -> None:
     if not HELIUS_KEY:
@@ -481,93 +580,66 @@ async def listen(q: asyncio.Queue) -> None:
                                 print(f"[logs] received={log_count}", flush=True)
                             if logs:
                                 sig = value.get("signature") or result.get("signature")
-                                if sig and ENABLE_LOGS_TX_LOOKUP:
-                                    has_swap = False
+                                if sig and ENABLE_LOGS_TX_LOOKUP and _is_swap_log(logs):
                                     program_label = "unknown"
                                     for line in logs:
                                         log_lower = str(line).lower()
-                                        if (
-                                            "instruction: buy" in log_lower
-                                            or "instruction: swap" in log_lower
-                                            or ("raydium" in log_lower and "swap" in log_lower)
-                                            or ("pump" in log_lower and "buy" in log_lower)
-                                        ):
-                                            has_swap = True
-                                            if "raydium" in log_lower:
-                                                program_label = "raydium"
-                                            elif "pump" in log_lower:
-                                                program_label = "pumpfun"
+                                        if "raydium" in log_lower:
+                                            program_label = "raydium"
                                             break
-                                    if has_swap:
-                                        print(
-                                            f"[log-swap-detected] sig={sig} program={program_label}",
-                                            flush=True,
-                                        )
+                                        if "pump" in log_lower:
+                                            program_label = "pumpfun"
+                                            break
+                                    print(
+                                        f"[log-swap-detected] sig={sig} program={program_label}",
+                                        flush=True,
+                                    )
                                         last_seen = recent_buy_signatures.get(sig)
                                         if not last_seen or now - last_seen > 300:
                                             if now - last_buy_lookup_ts > 0.2:
                                                 last_buy_lookup_ts = now
                                                 tx = fetch_tx_with_retry(sig)
-                                                if not tx:
-                                                    print(f"[tx-missing-after-retry] sig={sig}", flush=True)
-                                                else:
+                                                if tx:
                                                     recent_buy_signatures[sig] = now
                                                     try:
-                                                        meta = tx.get("meta") or {}
-                                                        pre = meta.get("preTokenBalances", []) or []
-                                                        post = meta.get("postTokenBalances", []) or []
-                                                        for post_balance in post:
-                                                            mint = post_balance.get("mint")
-                                                            owner = post_balance.get("owner")
-                                                            if not mint or not owner:
-                                                                continue
-                                                            if mint in STABLE_MINTS:
-                                                                continue
-                                                            try:
-                                                                post_amt = int(
-                                                                    post_balance.get("uiTokenAmount", {}).get("amount")
-                                                                    or 0
+                                                        hits = _detect_positive_deltas(tx)
+                                                        slot = tx.get("slot")
+                                                        now_ts = int(time.time())
+                                                        for h in hits:
+                                                            buyer = h["buyer"]
+                                                            mint = h["mint"]
+                                                            delta_raw = h["delta_raw"]
+                                                            decimals = h["decimals"]
+                                                            delta = (
+                                                                delta_raw / (10 ** decimals)
+                                                                if decimals
+                                                                else float(delta_raw)
+                                                            )
+                                                            print(
+                                                                f"[log-buy-detected] token={mint} buyer={buyer} delta={delta}",
+                                                                flush=True,
+                                                            )
+                                                            print(
+                                                                f"[buyer-detected] token={mint} wallet={buyer}",
+                                                                flush=True,
+                                                            )
+                                                            await emit_event(
+                                                                Event(
+                                                                    type="trade_buy",
+                                                                    source="logs",
+                                                                    signature=sig,
+                                                                    token=mint,
+                                                                    slot=slot,
+                                                                    confidence=0.0,
+                                                                    reasons=["balance_increase_detected"],
+                                                                    extra={
+                                                                        "buyer": buyer,
+                                                                        "delta_raw": delta_raw,
+                                                                        "decimals": decimals,
+                                                                        "ts": now_ts,
+                                                                    },
                                                                 )
-                                                            except Exception:
-                                                                continue
-                                                            pre_match = None
-                                                            for p in pre:
-                                                                if (
-                                                                    p.get("mint") == mint
-                                                                    and p.get("owner") == owner
-                                                                ):
-                                                                    pre_match = p
-                                                                    break
-                                                            pre_amt = 0
-                                                            if pre_match:
-                                                                try:
-                                                                    pre_amt = int(
-                                                                        pre_match.get("uiTokenAmount", {}).get("amount")
-                                                                        or 0
-                                                                    )
-                                                                except Exception:
-                                                                    pre_amt = 0
-                                                            delta = post_amt - pre_amt
-                                                            if delta > 0:
-                                                                print(
-                                                                    f"[log-buy-detected] token={mint} buyer={owner} delta={delta}",
-                                                                    flush=True,
-                                                                )
-                                                                print(
-                                                                    f"[buyer-detected] token={mint} wallet={owner}",
-                                                                    flush=True,
-                                                                )
-                                                                await emit_event(
-                                                                    Event(
-                                                                        type="trade_buy",
-                                                                        source="logs",
-                                                                        signature=sig,
-                                                                        token=mint,
-                                                                        confidence=0.0,
-                                                                        reasons=["balance_increase_detected"],
-                                                                        extra={"buyer": owner},
-                                                                    )
-                                                                )
+                                                            )
                                                     except Exception as e:
                                                         print("[log-buy-detected] parse failed:", e, flush=True)
                                 for line in logs:
