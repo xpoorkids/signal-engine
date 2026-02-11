@@ -12,6 +12,8 @@ from worker.config import (
     HELIUS_API_KEY,
     HELIUS_WS_URL,
     HELIUS_RPC_URL,
+    PUMPFUN_PROGRAM_ID,
+    RAYDIUM_AMM_PROGRAM_ID,
 )
 from worker.events import Event
 
@@ -46,7 +48,7 @@ def _log_rpc_issue(msg: str) -> None:
         _last_rpc_log_ts = now
 
 # Pump.fun program ID (mainnet)
-PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+PUMP_FUN_PROGRAM_ID = PUMPFUN_PROGRAM_ID
 PUMP_PROGRAM_IDS = {
     # Main Pump.fun program
     "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
@@ -62,7 +64,7 @@ PUMP_TRADE_PROGRAM_IDS = {
 }
 
 RAYDIUM_PROGRAM_IDS = {
-    "RVKd61ztZW9L5GxF3XH9RZy5D3R1xYbC5nZ5qZpZr2D",
+    RAYDIUM_AMM_PROGRAM_ID,
 }
 
 # Raydium + Orca + Pump.fun program IDs
@@ -361,8 +363,8 @@ async def listen(q: asyncio.Queue) -> None:
         "params": [
             {
                 "accountInclude": [
-                    *sorted(PUMP_TRADE_PROGRAM_IDS),
-                    *sorted(RAYDIUM_PROGRAM_IDS),
+                    PUMPFUN_PROGRAM_ID,
+                    RAYDIUM_AMM_PROGRAM_ID,
                 ],
                 "failed": False,
                 "vote": False,

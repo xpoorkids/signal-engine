@@ -32,6 +32,9 @@ HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "").strip()
 HELIUS_RPC_URL = os.getenv("HELIUS_RPC_URL", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
+PUMPFUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8NFybJ9eQk6UkDBeo3xjT2f1gk"
+RAYDIUM_AMM_PROGRAM_ID = "RVKd61ztZW9nhE7ztUj8iDSHPkS7cBvCqYJbF5v7Cwo"
+
 DEX_REFRESH_SECONDS = int(os.getenv("DEX_REFRESH_SECONDS", "10"))
 PROMOTE_MIN_CONFIDENCE = float(os.getenv("PROMOTE_MIN_CONFIDENCE", "0.65"))
 
