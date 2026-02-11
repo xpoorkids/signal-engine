@@ -479,13 +479,18 @@ async def listen(q: asyncio.Queue) -> None:
                             if logs:
                                 sig = value.get("signature") or result.get("signature")
                                 if sig and ENABLE_LOGS_TX_LOOKUP and _logs_has_program(logs):
-                                    has_buy = False
+                                    has_swap = False
                                     for line in logs:
-                                        log_line = str(line)
-                                        if "Program log: Instruction: Buy" in log_line or "Program log: Instruction: Swap" in log_line:
-                                            has_buy = True
+                                        log_lower = str(line).lower()
+                                        if (
+                                            "instruction: buy" in log_lower
+                                            or "instruction: swap" in log_lower
+                                            or ("swap" in log_lower and "success" in log_lower)
+                                        ):
+                                            has_swap = True
                                             break
-                                    if has_buy:
+                                    if has_swap:
+                                        print(f"[log-swap-detected] sig={sig}", flush=True)
                                         last_seen = recent_buy_signatures.get(sig)
                                         if not last_seen or now - last_seen > 300:
                                             if now - last_buy_lookup_ts > 0.2:
@@ -496,37 +501,44 @@ async def listen(q: asyncio.Queue) -> None:
                                                 else:
                                                     recent_buy_signatures[sig] = now
                                                     try:
-                                                        meta = tx.get("meta", {}) or {}
+                                                        meta = tx.get("meta") or {}
                                                         pre = meta.get("preTokenBalances", []) or []
                                                         post = meta.get("postTokenBalances", []) or []
-                                                        pre_map = {}
-                                                        for b in pre:
-                                                            try:
-                                                                owner = b.get("owner")
-                                                                mint = b.get("mint")
-                                                                amt = int(b.get("uiTokenAmount", {}).get("amount") or 0)
-                                                            except Exception:
-                                                                continue
-                                                            if owner and mint:
-                                                                pre_map[(owner, mint)] = amt
-                                                        for b in post:
-                                                            try:
-                                                                owner = b.get("owner")
-                                                                mint = b.get("mint")
-                                                                post_amt = int(b.get("uiTokenAmount", {}).get("amount") or 0)
-                                                            except Exception:
-                                                                continue
-                                                            if not owner or not mint:
+                                                        for post_balance in post:
+                                                            mint = post_balance.get("mint")
+                                                            owner = post_balance.get("owner")
+                                                            if not mint or not owner:
                                                                 continue
                                                             if mint in STABLE_MINTS:
                                                                 continue
-                                                            pre_amt = pre_map.get((owner, mint), 0)
-                                                            if post_amt > pre_amt:
-                                                                delta = post_amt - pre_amt
-                                                                if delta <= 0:
-                                                                    continue
+                                                            try:
+                                                                post_amt = int(
+                                                                    post_balance.get("uiTokenAmount", {}).get("amount")
+                                                                    or 0
+                                                                )
+                                                            except Exception:
+                                                                continue
+                                                            pre_match = None
+                                                            for p in pre:
+                                                                if (
+                                                                    p.get("mint") == mint
+                                                                    and p.get("owner") == owner
+                                                                ):
+                                                                    pre_match = p
+                                                                    break
+                                                            pre_amt = 0
+                                                            if pre_match:
+                                                                try:
+                                                                    pre_amt = int(
+                                                                        pre_match.get("uiTokenAmount", {}).get("amount")
+                                                                        or 0
+                                                                    )
+                                                                except Exception:
+                                                                    pre_amt = 0
+                                                            delta = post_amt - pre_amt
+                                                            if delta > 0:
                                                                 print(
-                                                                    f"[log-buy-detected] token={mint} buyer={owner}",
+                                                                    f"[log-buy-detected] token={mint} buyer={owner} delta={delta}",
                                                                     flush=True,
                                                                 )
                                                                 print(
