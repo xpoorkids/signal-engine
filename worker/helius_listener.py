@@ -359,19 +359,14 @@ async def listen(q: asyncio.Queue) -> None:
         "id": 1,
         "method": "transactionSubscribe",
         "params": [
-            {"vote": False, "failed": False},
             {
-                "commitment": "confirmed",
-                "encoding": "jsonParsed",
+                "accountInclude": [
+                    *sorted(PUMP_TRADE_PROGRAM_IDS),
+                    *sorted(RAYDIUM_PROGRAM_IDS),
+                ],
+                "failed": False,
+                "vote": False,
             },
-        ],
-    }
-    tx_sub_alt = {
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "transactionsSubscribe",
-        "params": [
-            {"vote": False, "failed": False},
             {
                 "commitment": "confirmed",
                 "encoding": "jsonParsed",
@@ -414,8 +409,6 @@ async def listen(q: asyncio.Queue) -> None:
                 print("[helius] connected", flush=True)
                 print(f"[ws-subscribe-request] id={tx_sub.get('id')} method={tx_sub.get('method')}", flush=True)
                 await ws.send(json.dumps(tx_sub))
-                print(f"[ws-subscribe-request] id={tx_sub_alt.get('id')} method={tx_sub_alt.get('method')}", flush=True)
-                await ws.send(json.dumps(tx_sub_alt))
                 if ENABLE_LOGS_SUB:
                     print(f"[ws-subscribe-request] id={logs_sub.get('id')} method=logsSubscribe", flush=True)
                     await ws.send(json.dumps(logs_sub))
@@ -428,13 +421,13 @@ async def listen(q: asyncio.Queue) -> None:
                         print("[helius] recv/parse failed:", e, flush=True)
                         continue
 
-                    if msg.get("id") in (tx_sub.get("id"), tx_sub_alt.get("id"), logs_sub.get("id")):
+                    if msg.get("id") in (tx_sub.get("id"), logs_sub.get("id")):
                         if "result" in msg:
                             print(
                                 f"[ws-subscribe-response] id={msg.get('id')} result={msg.get('result')}",
                                 flush=True,
                             )
-                            if msg.get("id") in (tx_sub.get("id"), tx_sub_alt.get("id")):
+                            if msg.get("id") == tx_sub.get("id"):
                                 print(f"[tx-sub-id] sub_id={msg.get('result')}", flush=True)
                         elif "error" in msg:
                             err = msg.get("error") or {}
