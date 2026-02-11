@@ -359,13 +359,10 @@ async def listen(q: asyncio.Queue) -> None:
         "id": 1,
         "method": "transactionSubscribe",
         "params": [
-            {"accountInclude": PROGRAM_IDS},
+            {"vote": False, "failed": False},
             {
                 "commitment": "confirmed",
                 "encoding": "jsonParsed",
-                "transactionDetails": "full",
-                "showRewards": False,
-                "maxSupportedTransactionVersion": 0,
             },
         ],
     }
@@ -403,8 +400,10 @@ async def listen(q: asyncio.Queue) -> None:
                 max_queue=None,
             ) as ws:
                 print("[helius] connected", flush=True)
+                print(f"[ws-subscribe-request] id={tx_sub.get('id')} method=transactionSubscribe", flush=True)
                 await ws.send(json.dumps(tx_sub))
                 if ENABLE_LOGS_SUB:
+                    print(f"[ws-subscribe-request] id={logs_sub.get('id')} method=logsSubscribe", flush=True)
                     await ws.send(json.dumps(logs_sub))
                     print("[logs] subscribed to ALL logs (confirmed)", flush=True)
 
@@ -414,6 +413,12 @@ async def listen(q: asyncio.Queue) -> None:
                     except Exception as e:
                         print("[helius] recv/parse failed:", e, flush=True)
                         continue
+
+                    if "result" in msg and msg.get("id") in (tx_sub.get("id"), logs_sub.get("id")):
+                        print(
+                            f"[ws-subscribe-response] id={msg.get('id')} result={msg.get('result')}",
+                            flush=True,
+                        )
 
                     async def emit_event(e: Event) -> None:
                         nonlocal emit_count, last_emit_ts
