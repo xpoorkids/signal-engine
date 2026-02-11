@@ -210,30 +210,24 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
     except Exception:
         metrics["unique_buyers_15m"] = 0
 
-    if metrics["burst_count_60s"] >= 5:
-        attention_score += 0.10
-        reasons.append("burst_count_60s>=5")
-    if metrics["burst_count_60s"] >= BURST_COUNT_60S_THRESHOLD:
-        attention_score += 0.25
-        reasons.append("burst_count_60s>=20")
-    if metrics["unique_buyers_5m"] >= 3:
-        attention_score += 0.10
-        reasons.append("unique_buyers_5m>=3")
-    if metrics["unique_buyers_5m"] >= UNIQUE_BUYERS_5M_THRESHOLD:
-        attention_score += 0.15
-        reasons.append("unique_buyers_5m>=25")
+    local_buyers = min(0.25, metrics["unique_buyers_5m"] * 0.05)
+    local_burst = min(0.25, metrics["burst_count_60s"] * 0.03)
+    local_15m = min(0.20, metrics["unique_buyers_15m"] * 0.02)
+    local = local_buyers + local_burst + local_15m
 
     # DexScreener boosts/orders
+    dex_boost = 0.0
     boosts = _dexscreener_boosts_count(token) if token else None
     if boosts is None:
         reasons.append("source_unavailable:dexscreener")
     else:
         metrics["dexscreener_boosts_count"] = boosts
         if boosts >= DEXSCREENER_BOOST_THRESHOLD:
-            attention_score += 0.20
+            dex_boost = 0.20
             reasons.append("dexscreener_boost")
 
     # Birdeye trending (optional)
+    birdeye_score = 0.0
     be = _birdeye_trending(token) if token else None
     if be is None:
         reasons.append("source_unavailable:birdeye")
@@ -241,20 +235,34 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         metrics["birdeye_trending"] = be.get("rank") is not None
         metrics["birdeye_rank"] = be.get("rank")
         if be.get("rank") is not None:
-            attention_score += 0.10
+            birdeye_score = 0.10
             reasons.append("birdeye_trending")
 
     # PumpPortal trade burst (optional)
+    pumpportal_score = 0.0
     if ENABLE_PUMPORTAL:
         _PUMPPORTAL.ensure_started()
         if token:
             _PUMPPORTAL.track_token(token)
             metrics["pumportal_trade_burst"] = _PUMPPORTAL.trade_burst(token, window_sec=60)
             if metrics["pumportal_trade_burst"] >= PUMPORTAL_TRADE_BURST_THRESHOLD:
-                attention_score += 0.20
+                pumpportal_score = 0.20
                 reasons.append("pumpportal_trade_burst")
     else:
         reasons.append("source_unavailable:pumpportal")
 
-    attention_score = min(attention_score, 1.0)
+    attention_score = local + dex_boost + birdeye_score + pumpportal_score
+    attention_score = max(0.0, min(attention_score, 1.0))
+    print(
+        "[attention-components] token=%s local_buyers=%.2f local_burst=%.2f local_15m=%.2f dex_boosts=%s total=%.2f"
+        % (
+            token,
+            local_buyers,
+            local_burst,
+            local_15m,
+            metrics["dexscreener_boosts_count"],
+            attention_score,
+        ),
+        flush=True,
+    )
     return attention_score, reasons, metrics
