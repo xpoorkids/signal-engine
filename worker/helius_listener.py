@@ -366,6 +366,18 @@ async def listen(q: asyncio.Queue) -> None:
             },
         ],
     }
+    tx_sub_alt = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "transactionsSubscribe",
+        "params": [
+            {"vote": False, "failed": False},
+            {
+                "commitment": "confirmed",
+                "encoding": "jsonParsed",
+            },
+        ],
+    }
     logs_sub = {
         "jsonrpc": "2.0",
         "id": 99,
@@ -400,8 +412,10 @@ async def listen(q: asyncio.Queue) -> None:
                 max_queue=None,
             ) as ws:
                 print("[helius] connected", flush=True)
-                print(f"[ws-subscribe-request] id={tx_sub.get('id')} method=transactionSubscribe", flush=True)
+                print(f"[ws-subscribe-request] id={tx_sub.get('id')} method={tx_sub.get('method')}", flush=True)
                 await ws.send(json.dumps(tx_sub))
+                print(f"[ws-subscribe-request] id={tx_sub_alt.get('id')} method={tx_sub_alt.get('method')}", flush=True)
+                await ws.send(json.dumps(tx_sub_alt))
                 if ENABLE_LOGS_SUB:
                     print(f"[ws-subscribe-request] id={logs_sub.get('id')} method=logsSubscribe", flush=True)
                     await ws.send(json.dumps(logs_sub))
@@ -414,11 +428,21 @@ async def listen(q: asyncio.Queue) -> None:
                         print("[helius] recv/parse failed:", e, flush=True)
                         continue
 
-                    if "result" in msg and msg.get("id") in (tx_sub.get("id"), logs_sub.get("id")):
-                        print(
-                            f"[ws-subscribe-response] id={msg.get('id')} result={msg.get('result')}",
-                            flush=True,
-                        )
+                    if msg.get("id") in (tx_sub.get("id"), tx_sub_alt.get("id"), logs_sub.get("id")):
+                        if "result" in msg:
+                            print(
+                                f"[ws-subscribe-response] id={msg.get('id')} result={msg.get('result')}",
+                                flush=True,
+                            )
+                            if msg.get("id") in (tx_sub.get("id"), tx_sub_alt.get("id")):
+                                print(f"[tx-sub-id] sub_id={msg.get('result')}", flush=True)
+                        elif "error" in msg:
+                            err = msg.get("error") or {}
+                            print(
+                                f"[ws-subscribe-response] id={msg.get('id')} error_code={err.get('code')} "
+                                f"error_message={err.get('message')} error={err}",
+                                flush=True,
+                            )
 
                     async def emit_event(e: Event) -> None:
                         nonlocal emit_count, last_emit_ts
@@ -575,7 +599,7 @@ async def listen(q: asyncio.Queue) -> None:
                         result = msg.get("params", {}).get("result", {})
                         sig = result.get("signature")
                         if sig:
-                            print(f"[tx-received] signature={sig}", flush=True)
+                            print(f"[tx-received] sig={sig}", flush=True)
                         tx = {
                             "transaction": result.get("transaction"),
                             "meta": result.get("meta"),
