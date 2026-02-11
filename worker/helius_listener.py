@@ -30,6 +30,14 @@ HELIUS_RPC = (
 _last_rpc_log_ts = 0.0
 
 
+def _is_buy_log(logs: list[str]) -> bool:
+    for line in logs:
+        log_line = str(line).lower()
+        if "instruction: buy" in log_line or "instruction: swap" in log_line or "buy" in log_line:
+            return True
+    return False
+
+
 def _log_rpc_issue(msg: str) -> None:
     global _last_rpc_log_ts
     now = time.time()
@@ -265,6 +273,7 @@ async def listen(q: asyncio.Queue) -> None:
     recent_logs = deque(maxlen=50)
     pending_log_signatures: dict[str, float] = {}
     resolved_log_signatures: dict[str, float] = {}
+    recent_buy_signatures: dict[str, float] = {}
     last_lookup_ts = 0.0
     last_buy_lookup_ts = 0.0
     last_pending_check = 0.0
@@ -329,30 +338,31 @@ async def listen(q: asyncio.Queue) -> None:
                                 print(f"[logs] received={log_count}", flush=True)
                             if logs:
                                 sig = value.get("signature") or result.get("signature")
+                                if sig and ENABLE_LOGS_TX_LOOKUP and _is_buy_log(logs):
+                                    last_seen = recent_buy_signatures.get(sig)
+                                    if not last_seen or now - last_seen > 300:
+                                        if now - last_buy_lookup_ts > 0.2:
+                                            last_buy_lookup_ts = now
+                                            mint, buyer = _resolve_mint_and_buyer_from_sig(sig)
+                                            if mint and buyer:
+                                                recent_buy_signatures[sig] = now
+                                                print(
+                                                    f"[buyer-detected] token={mint} wallet={buyer}",
+                                                    flush=True,
+                                                )
+                                                await emit_event(
+                                                    Event(
+                                                        type="trade_buy",
+                                                        source="logs",
+                                                        signature=sig,
+                                                        token=mint,
+                                                        confidence=0.0,
+                                                        reasons=["buy_detected_in_logs"],
+                                                        extra={"buyer": buyer},
+                                                    )
+                                                )
                                 for line in logs:
                                     log_line = str(line)
-                                    if "Buy" in log_line or "buy" in log_line:
-                                        if sig and ENABLE_LOGS_TX_LOOKUP:
-                                            now = time.time()
-                                            if now - last_buy_lookup_ts > 0.2:
-                                                last_buy_lookup_ts = now
-                                                mint, buyer = _resolve_mint_and_buyer_from_sig(sig)
-                                                if mint and buyer:
-                                                    print(
-                                                        f"[buyer-detected] token={mint} wallet={buyer}",
-                                                        flush=True,
-                                                    )
-                                                    await emit_event(
-                                                        Event(
-                                                            type="trade_buy",
-                                                            source="logs",
-                                                            signature=sig,
-                                                            token=mint,
-                                                            confidence=0.0,
-                                                            reasons=["buy_detected_in_logs"],
-                                                            extra={"buyer": buyer},
-                                                        )
-                                                    )
                                     if "InitializeMint" in log_line:
                                         early_count += 1
                                         print(f"[early] +1 via logs total={early_count}", flush=True)
@@ -399,6 +409,10 @@ async def listen(q: asyncio.Queue) -> None:
                         now = time.time()
                         if ENABLE_LOGS_TX_LOOKUP and now - last_pending_check > 1.0 and pending_log_signatures:
                             last_pending_check = now
+                            if recent_buy_signatures:
+                                stale = [s for s, ts in recent_buy_signatures.items() if now - ts > 900]
+                                for s in stale:
+                                    recent_buy_signatures.pop(s, None)
                             for sig, first_seen in list(pending_log_signatures.items())[:5]:
                                 if sig in resolved_log_signatures:
                                     pending_log_signatures.pop(sig, None)
