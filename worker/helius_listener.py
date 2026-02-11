@@ -56,11 +56,17 @@ PUMP_PROGRAM_IDS = {
     "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",  # Associated Token Program
 }
 
+PUMP_TRADE_PROGRAM_IDS = {
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+    "pmpn6JtN6P1q7xvJ5tJqGJZ3dXz7Jp6o4KkZc8KZz9G",
+}
+
 # Raydium + Orca + Pump.fun program IDs
 PROGRAM_IDS = [
     "RVKd61ztZW9L5GxF3XH9RZy5D3R1xYbC5nZ5qZpZr2D",  # Raydium AMM (example)
     "whirLb8k1ZrZg2KqYF9rXy2rZpZqv2X6kz5n",          # Orca Whirlpool (example)
     PUMP_FUN_PROGRAM_ID,
+    *sorted(PUMP_TRADE_PROGRAM_IDS),
 ]
 
 def extract_mint_from_inner_instructions(tx: dict) -> str | None:
@@ -164,6 +170,52 @@ def extract_mints_from_token_balances(tx: dict) -> list[str]:
             continue
         if mint and mint not in out:
             out.append(mint)
+    return out
+
+
+def extract_buyers_from_balance_deltas(tx: dict) -> list[tuple[str, str]]:
+    """
+    Detect buyers by token balance increases for (owner, mint).
+    Returns list of (mint, owner) where post > pre.
+    """
+    try:
+        meta = tx.get("meta") or {}
+        pre = meta.get("preTokenBalances") or []
+        post = meta.get("postTokenBalances") or []
+    except Exception:
+        return []
+
+    pre_map: dict[tuple[str, str], float] = {}
+    for b in pre:
+        try:
+            mint = b.get("mint")
+            owner = b.get("owner")
+            amt = b.get("uiTokenAmount", {}).get("uiAmount")
+        except Exception:
+            continue
+        if mint and owner:
+            try:
+                pre_map[(owner, mint)] = float(amt or 0)
+            except Exception:
+                pre_map[(owner, mint)] = 0.0
+
+    out: list[tuple[str, str]] = []
+    for b in post:
+        try:
+            mint = b.get("mint")
+            owner = b.get("owner")
+            amt = b.get("uiTokenAmount", {}).get("uiAmount")
+        except Exception:
+            continue
+        if not mint or not owner:
+            continue
+        try:
+            post_amt = float(amt or 0)
+        except Exception:
+            post_amt = 0.0
+        pre_amt = pre_map.get((owner, mint), 0.0)
+        if post_amt > pre_amt:
+            out.append((mint, owner))
     return out
 
 
@@ -564,6 +616,27 @@ async def listen(q: asyncio.Queue) -> None:
                                 )
                     except Exception as e:
                         print("[buyer-detected] tx parse failed:", e, flush=True)
+
+                    try:
+                        for trade_mint, trade_buyer in extract_buyers_from_balance_deltas(tx):
+                            sig = result.get("signature")
+                            print(
+                                f"[buyer-detected] token={trade_mint} wallet={trade_buyer}",
+                                flush=True,
+                            )
+                            await emit_event(
+                                Event(
+                                    type="trade_buy",
+                                    source="tx_balance",
+                                    signature=sig,
+                                    token=trade_mint,
+                                    confidence=0.0,
+                                    reasons=["balance_increase_detected"],
+                                    extra={"buyer": trade_buyer},
+                                )
+                            )
+                    except Exception as e:
+                        print("[buyer-detected] balance delta failed:", e, flush=True)
 
                     # Temporarily widen the net (WS-only proof): emit when pump program is seen
                     if is_pump_program:
