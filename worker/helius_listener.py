@@ -31,11 +31,27 @@ HELIUS_RPC = (
 
 _last_rpc_log_ts = 0.0
 
+STABLE_MINTS = {
+    "So11111111111111111111111111111111111111112",  # WSOL
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+    "Es9vMFrzaCERKgfD8CgdQqkTg2z3sVv5nJxgGkXyVg8",   # USDT
+}
+
 
 def _is_buy_log(logs: list[str]) -> bool:
     for line in logs:
         log_line = str(line).lower()
         if "instruction: buy" in log_line or "instruction: swap" in log_line or "buy" in log_line:
+            return True
+    return False
+
+
+def _logs_has_program(logs: list[str]) -> bool:
+    if not logs:
+        return False
+    for line in logs:
+        log_line = str(line)
+        if PUMPFUN_PROGRAM_ID in log_line or RAYDIUM_AMM_PROGRAM_ID in log_line:
             return True
     return False
 
@@ -453,33 +469,65 @@ async def listen(q: asyncio.Queue) -> None:
                                 print(f"[logs] received={log_count}", flush=True)
                             if logs:
                                 sig = value.get("signature") or result.get("signature")
-                                if sig and ENABLE_LOGS_TX_LOOKUP and _is_buy_log(logs):
+                                if sig and ENABLE_LOGS_TX_LOOKUP and _logs_has_program(logs):
                                     last_seen = recent_buy_signatures.get(sig)
                                     if not last_seen or now - last_seen > 300:
                                         if now - last_buy_lookup_ts > 0.2:
                                             last_buy_lookup_ts = now
-                                            mint, buyer = _resolve_mint_and_buyer_from_sig(sig)
-                                            if mint and buyer:
+                                            tx = _resolve_tx_from_sig(sig)
+                                            if tx:
                                                 recent_buy_signatures[sig] = now
-                                                print(
-                                                    f"[log-buy-detected] token={mint} buyer={buyer}",
-                                                    flush=True,
-                                                )
-                                                print(
-                                                    f"[buyer-detected] token={mint} wallet={buyer}",
-                                                    flush=True,
-                                                )
-                                                await emit_event(
-                                                    Event(
-                                                        type="trade_buy",
-                                                        source="logs",
-                                                        signature=sig,
-                                                        token=mint,
-                                                        confidence=0.0,
-                                                        reasons=["buy_detected_in_logs"],
-                                                        extra={"buyer": buyer},
-                                                    )
-                                                )
+                                                try:
+                                                    meta = tx.get("meta", {}) or {}
+                                                    pre = meta.get("preTokenBalances", []) or []
+                                                    post = meta.get("postTokenBalances", []) or []
+                                                    pre_map = {}
+                                                    for b in pre:
+                                                        try:
+                                                            owner = b.get("owner")
+                                                            mint = b.get("mint")
+                                                            amt = int(b.get("uiTokenAmount", {}).get("amount") or 0)
+                                                        except Exception:
+                                                            continue
+                                                        if owner and mint:
+                                                            pre_map[(owner, mint)] = amt
+                                                    for b in post:
+                                                        try:
+                                                            owner = b.get("owner")
+                                                            mint = b.get("mint")
+                                                            post_amt = int(b.get("uiTokenAmount", {}).get("amount") or 0)
+                                                        except Exception:
+                                                            continue
+                                                        if not owner or not mint:
+                                                            continue
+                                                        if mint in STABLE_MINTS:
+                                                            continue
+                                                        pre_amt = pre_map.get((owner, mint), 0)
+                                                        if post_amt > pre_amt:
+                                                            delta = post_amt - pre_amt
+                                                            if delta <= 0:
+                                                                continue
+                                                            print(
+                                                                f"[log-buy-detected] token={mint} buyer={owner}",
+                                                                flush=True,
+                                                            )
+                                                            print(
+                                                                f"[buyer-detected] token={mint} wallet={owner}",
+                                                                flush=True,
+                                                            )
+                                                            await emit_event(
+                                                                Event(
+                                                                    type="trade_buy",
+                                                                    source="logs",
+                                                                    signature=sig,
+                                                                    token=mint,
+                                                                    confidence=0.0,
+                                                                    reasons=["balance_increase_detected"],
+                                                                    extra={"buyer": owner},
+                                                                )
+                                                            )
+                                                except Exception as e:
+                                                    print("[log-buy-detected] parse failed:", e, flush=True)
                                 for line in logs:
                                     log_line = str(line)
                                     if "InitializeMint" in log_line:
