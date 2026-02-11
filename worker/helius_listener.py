@@ -370,9 +370,11 @@ def _resolve_tx_from_sig(sig: str) -> dict | None:
         return None
 
 
-def fetch_tx_with_retry(signature: str, max_attempts: int = 5, delay: float = 0.4) -> dict | None:
-    for _ in range(max_attempts):
+def fetch_tx_with_retry(signature: str, max_attempts: int = 8, delay: float = 0.35) -> dict | None:
+    for attempt in range(1, max_attempts + 1):
         tx = _resolve_tx_from_sig(signature)
+        ok = 1 if tx else 0
+        print(f"[tx-fetch] sig={signature} attempt={attempt} ok={ok}", flush=True)
         if tx:
             return tx
         time.sleep(delay)
@@ -381,6 +383,7 @@ def fetch_tx_with_retry(signature: str, max_attempts: int = 5, delay: float = 0.
 async def listen(q: asyncio.Queue) -> None:
     if not HELIUS_KEY:
         print("[helius] missing HELIUS_API_KEY", flush=True)
+    print(f"[rpc-endpoint] url={HELIUS_RPC}", flush=True)
     logs_sub = {
         "jsonrpc": "2.0",
         "id": 99,
@@ -478,19 +481,28 @@ async def listen(q: asyncio.Queue) -> None:
                                 print(f"[logs] received={log_count}", flush=True)
                             if logs:
                                 sig = value.get("signature") or result.get("signature")
-                                if sig and ENABLE_LOGS_TX_LOOKUP and _logs_has_program(logs):
+                                if sig and ENABLE_LOGS_TX_LOOKUP:
                                     has_swap = False
+                                    program_label = "unknown"
                                     for line in logs:
                                         log_lower = str(line).lower()
                                         if (
                                             "instruction: buy" in log_lower
                                             or "instruction: swap" in log_lower
-                                            or ("swap" in log_lower and "success" in log_lower)
+                                            or ("raydium" in log_lower and "swap" in log_lower)
+                                            or ("pump" in log_lower and "buy" in log_lower)
                                         ):
                                             has_swap = True
+                                            if "raydium" in log_lower:
+                                                program_label = "raydium"
+                                            elif "pump" in log_lower:
+                                                program_label = "pumpfun"
                                             break
                                     if has_swap:
-                                        print(f"[log-swap-detected] sig={sig}", flush=True)
+                                        print(
+                                            f"[log-swap-detected] sig={sig} program={program_label}",
+                                            flush=True,
+                                        )
                                         last_seen = recent_buy_signatures.get(sig)
                                         if not last_seen or now - last_seen > 300:
                                             if now - last_buy_lookup_ts > 0.2:
