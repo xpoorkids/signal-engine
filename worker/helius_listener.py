@@ -515,11 +515,20 @@ class LogSwapProcessor:
         buys = self._detect_positive_deltas(tx)
         if not buys:
             return
-        buyer_signer, sol_spent = self._find_buyer_signer(tx)
+        buyer_signer, buyer_index, sol_spent, method, fee_lamports = self._find_buyer_signer(tx)
         for buy in buys:
-            await self._emit_trade_buy(signature, tx, buy, buyer_signer, sol_spent)
+            await self._emit_trade_buy(
+                signature,
+                tx,
+                buy,
+                buyer_signer,
+                buyer_index,
+                sol_spent,
+                method,
+                fee_lamports,
+            )
 
-    def _find_buyer_signer(self, tx: Dict[str, Any]) -> Tuple[Optional[str], float]:
+    def _find_buyer_signer(self, tx: Dict[str, Any]) -> Tuple[Optional[str], Optional[int], float, str, int]:
         try:
             meta = tx.get("meta") or {}
             pre_balances = meta.get("preBalances") or []
@@ -528,9 +537,10 @@ class LogSwapProcessor:
             message = (tx.get("transaction") or {}).get("message") or {}
             keys = message.get("accountKeys") or []
         except Exception:
-            return None, 0.0
+            return None, None, 0.0, "fallback", 0
 
         best_owner = None
+        best_index = None
         best_spent = 0
         for idx, k in enumerate(keys):
             try:
@@ -552,7 +562,33 @@ class LogSwapProcessor:
             if lamports_spent > best_spent:
                 best_spent = lamports_spent
                 best_owner = owner
-        return best_owner, best_spent / 1_000_000_000 if best_spent > 0 else 0.0
+                best_index = idx
+
+        if best_spent > 0:
+            return best_owner, best_index, best_spent / 1_000_000_000, "sol", fee
+
+        # WSOL fallback for signer
+        try:
+            pre_tokens = meta.get("preTokenBalances") or []
+            post_tokens = meta.get("postTokenBalances") or []
+            if best_owner:
+                pre_wsol = 0
+                post_wsol = 0
+                for b in pre_tokens:
+                    if b.get("mint") == WSOL_MINT and (b.get("owner") or b.get("accountOwner")) == best_owner:
+                        pre_wsol = int((b.get("uiTokenAmount") or {}).get("amount") or 0)
+                        break
+                for b in post_tokens:
+                    if b.get("mint") == WSOL_MINT and (b.get("owner") or b.get("accountOwner")) == best_owner:
+                        post_wsol = int((b.get("uiTokenAmount") or {}).get("amount") or 0)
+                        break
+                if pre_wsol > post_wsol:
+                    sol_spent = (pre_wsol - post_wsol) / 1_000_000_000
+                    return best_owner, best_index, sol_spent, "wsol", fee
+        except Exception:
+            pass
+
+        return best_owner, best_index, 0.0, "fallback", fee
 
     async def _emit_trade_buy(
         self,
@@ -560,7 +596,10 @@ class LogSwapProcessor:
         tx: Dict[str, Any],
         buy: Dict[str, Any],
         buyer_signer: Optional[str],
+        buyer_index: Optional[int],
         sol_spent: float,
+        method: str,
+        fee_lamports: int,
     ) -> None:
         now = time.time()
         mint = buy.get("mint")
@@ -575,6 +614,11 @@ class LogSwapProcessor:
             print(f"[dedup-skip] sig={signature} token={mint}", flush=True)
             return
         _recent_buy_signatures[dedup_key] = now
+        print(
+            f"[buy-size] token={mint} sig={signature} buyer={buyer_signer or buy.get('buyer')} "
+            f"sol={sol_spent} method={method}",
+            flush=True,
+        )
         event = Event(
             type="trade_buy",
             source="logs",
@@ -585,9 +629,13 @@ class LogSwapProcessor:
             reasons=["balance_increase_detected"],
             extra={
                 "buyer": buyer_signer or buy.get("buyer"),
+                "buyer_index": buyer_index,
+                "fee_lamports": fee_lamports,
+                "payer": buyer_signer or buy.get("buyer"),
+                "buy_size_sol": sol_spent,
+                "sol_spent": sol_spent,
                 "delta_raw": buy.get("delta_raw"),
                 "decimals": buy.get("decimals"),
-                "sol_spent": sol_spent,
                 "ts": int(time.time()),
             },
         )

@@ -20,6 +20,7 @@ PUMPORTAL_TRADE_BURST_THRESHOLD = 20
 _DEX_CACHE: Dict[str, tuple[float, Any]] = {}
 _recent_buyers_10s: Dict[str, deque[tuple[str, float]]] = defaultdict(deque)
 _recent_wallet_buys_15s: Dict[str, deque[tuple[str, float]]] = defaultdict(deque)
+_recent_buys_30s: Dict[str, deque[tuple[str, float, int, float]]] = defaultdict(deque)
 
 
 def _compute_burst_weight(sol_spent: float) -> int:
@@ -52,8 +53,19 @@ def register_buyer(mint: str, buyer: str, sol_spent: float | None = None) -> int
     while dq10 and now - dq10[0][1] > 10:
         dq10.popleft()
     unique_10s = len(set(b for b, _ in dq10))
-    acceleration_boost = 0.10 if unique_10s >= 3 else 0.0
+    acceleration_boost = 0.0
+    if unique_10s == 3:
+        acceleration_boost = 0.10
+    elif unique_10s == 4:
+        acceleration_boost = 0.15
+    elif unique_10s >= 5:
+        acceleration_boost = 0.20
     print(f"[acceleration] token={mint} unique_10s={unique_10s} boost={acceleration_boost}", flush=True)
+
+    dq30 = _recent_buys_30s[mint]
+    dq30.append((buyer, now, weight, float(sol_spent or 0.0)))
+    while dq30 and now - dq30[0][1] > 30:
+        dq30.popleft()
 
     return weight
 
@@ -66,9 +78,39 @@ def _acceleration_boost(mint: str) -> float:
     while dq10 and now - dq10[0][1] > 10:
         dq10.popleft()
     unique_10s = len(set(b for b, _ in dq10))
-    boost = 0.10 if unique_10s >= 3 else 0.0
+    boost = 0.0
+    if unique_10s == 3:
+        boost = 0.10
+    elif unique_10s == 4:
+        boost = 0.15
+    elif unique_10s >= 5:
+        boost = 0.20
     print(f"[acceleration] token={mint} unique_10s={unique_10s} boost={boost}", flush=True)
     return boost
+
+
+def _anti_wash_multiplier(mint: str) -> float:
+    if not mint:
+        return 1.0
+    now = time.time()
+    dq30 = _recent_buys_30s[mint]
+    while dq30 and now - dq30[0][1] > 30:
+        dq30.popleft()
+    if not dq30:
+        return 1.0
+    total = len(dq30)
+    by_wallet: Dict[str, int] = {}
+    for buyer, _, _, _ in dq30:
+        by_wallet[buyer] = by_wallet.get(buyer, 0) + 1
+    unique_wallets = len(by_wallet)
+    top_wallet_share = max(by_wallet.values()) / total if total else 0.0
+    if top_wallet_share >= 0.70 and unique_wallets <= 2:
+        print(
+            f"[anti-wash] token={mint} top_wallet_share={top_wallet_share:.2f} unique_wallets={unique_wallets} suppress=0.30",
+            flush=True,
+        )
+        return 0.70
+    return 1.0
 
 
 class _PumpPortalTracker:
@@ -306,6 +348,7 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
 
     attention_score = local + dex_boost + birdeye_score + pumpportal_score
     attention_score += _acceleration_boost(token or "")
+    attention_score *= _anti_wash_multiplier(token or "")
     attention_score = max(0.0, min(attention_score, 1.0))
     print(
         "[attention-components] token=%s local_buyers=%.2f local_burst=%.2f local_15m=%.2f dex_boosts=%s total=%.2f"

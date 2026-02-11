@@ -37,6 +37,7 @@ from worker.dex import dex_enrich_token, select_best_pair, summarize_pair
 from worker.forensics import analyze_risk
 from worker.execution import estimate_edge
 from worker.attention import compute_attention, register_buyer
+from worker.elite import ELITE
 from worker.metadata import fetch_token_metadata
 from worker.alert_gate import evaluate_alert_gate, admission_check_candidate
 from worker.creator_score import compute_creator_score
@@ -160,6 +161,10 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 sol_spent = None
             weight = register_buyer(e.token, buyer, sol_spent)
             state.record_buyer(e.token, buyer, ts=e.ts, weight=weight)
+            try:
+                ELITE.record_buy(e.token, buyer, weight, float(sol_spent or 0.0))
+            except Exception:
+                pass
 
         attention_score = 0.0
         attn_reasons: list[str] = []
@@ -233,6 +238,96 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 e.reasons.append("dex_pair_found")
         else:
             dex_summary = None
+
+        # Elite layer: structural safety + score + age bypass + decay
+        hard_fail = False
+        try:
+            mint_auth, freeze_auth = ELITE.auth_check(e.token)
+            print(
+                f"[auth-check] token={e.token} mint_auth={1 if mint_auth else 0} freeze_auth={1 if freeze_auth else 0}",
+                flush=True,
+            )
+            if mint_auth:
+                print(f"[risk-gate] token={e.token} reason=mint_authority_active", flush=True)
+                hard_fail = True
+            if freeze_auth:
+                print(f"[risk-gate] token={e.token} reason=freeze_authority_active", flush=True)
+                hard_fail = True
+        except Exception:
+            pass
+
+        try:
+            liq_usd, liq_locked, liq_drop = ELITE.liq_check(e.token, dex_summary)
+            print(
+                f"[liq-check] token={e.token} liq_usd={liq_usd} locked={1 if liq_locked else 0}",
+                flush=True,
+            )
+            if liq_usd and liq_usd < 15000:
+                print(f"[risk-gate] token={e.token} reason=low_liquidity", flush=True)
+                hard_fail = True
+            if liq_drop:
+                print(f"[risk-gate] token={e.token} reason=liq_drop_spike", flush=True)
+                hard_fail = True
+            if liq_locked is False:
+                print(f"[risk-gate] token={e.token} reason=liq_unlocked", flush=True)
+                hard_fail = True
+        except Exception:
+            liq_usd = 0.0
+            liq_locked = None
+
+        unique_10s = 0
+        burst_10s = 0
+        total_buys_30s = 0
+        unique_wallets_30s = 0
+        top_wallet_share = 0.0
+        try:
+            unique_10s = ELITE.unique_10s(e.token)
+            burst_10s = ELITE.burst_weight_sum_10s(e.token)
+            total_buys_30s, unique_wallets_30s, top_wallet_share = ELITE.distribution_metrics(e.token)
+        except Exception:
+            pass
+
+        try:
+            buy_size_sol = float(e.extra.get("sol_spent") or 0.0) if isinstance(e.extra, dict) else 0.0
+        except Exception:
+            buy_size_sol = 0.0
+
+        elite_score = ELITE.compute_elite_score(
+            e.token,
+            buy_size_sol,
+            unique_10s,
+            total_buys_30s,
+            unique_wallets_30s,
+            top_wallet_share,
+            liq_usd,
+            liq_locked,
+            hard_fail,
+        )
+        extra["elite_score"] = elite_score
+
+        if hard_fail:
+            return out
+
+        if elite_score >= 8 and unique_10s >= 3 and burst_10s >= 6:
+            now_wall = time.time()
+            extra["age_bypass_until"] = now_wall + 20
+            print(
+                f"[age-bypass] token={e.token} elite={elite_score} unique_10s={unique_10s} burst10s={burst_10s} ttl=20",
+                flush=True,
+            )
+
+        try:
+            blacklist_ttl = ELITE.update_decay(
+                e.token,
+                attention_score,
+                burst_10s,
+                int(attn_metrics.get("unique_buyers_5m") or 0),
+                float(liq_usd or 0.0),
+            )
+            if blacklist_ttl:
+                return out
+        except Exception:
+            pass
 
         if ENABLE_WALLET and ts.creator:
             extra["wallet_risk"] = await score_wallet_risk(ts.creator)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Dict, Any, Tuple, List, Optional
+import time
 
 from worker.config import (
     ENABLE_ALERT_GATE,
@@ -142,8 +143,10 @@ def admission_check_candidate(
     metrics = extra.get("metrics") if isinstance(extra, dict) else {}
     age_min = _float_or_zero(metrics.get("age_minutes") if isinstance(metrics, dict) else 0)
     age_sec = age_min * 60.0
+    age_bypass_until = _float_or_zero(extra.get("age_bypass_until") if isinstance(extra, dict) else 0)
     if age_sec < CAND_MIN_TOKEN_AGE_SEC:
-        reasons.append(f"age<{CAND_MIN_TOKEN_AGE_SEC}s")
+        if not age_bypass_until or time.time() > age_bypass_until:
+            reasons.append(f"age<{CAND_MIN_TOKEN_AGE_SEC}s")
 
     if not attention_unavailable and attention_score < EARLY_ATTENTION_MIN:
         reasons.append(f"attention<{EARLY_ATTENTION_MIN:.2f}")
