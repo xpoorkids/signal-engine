@@ -481,23 +481,28 @@ class LogSwapProcessor:
         return hits
 
     async def handle_logs_notification(self, notification: dict) -> None:
-        value = (
-            notification.get("params", {})
-            .get("result", {})
-            .get("value", {})
-        )
-        signature = value.get("signature")
-        logs = value.get("logs") or []
-        err = value.get("err")
+        try:
+            value = (
+                notification.get("params", {})
+                .get("result", {})
+                .get("value", {})
+            )
 
-        if not signature or err is not None:
-            return
+            signature = value.get("signature")
+            logs = value.get("logs") or []
+            err = value.get("err")
 
-        if not self._is_swap_log(logs):
-            return
+            if not signature or err is not None:
+                return
 
-        print(f"[log-swap-detected] sig={signature}", flush=True)
-        await self._process_swap_signature(signature)
+            if not self._is_swap_log(logs):
+                return
+
+            print(f"[log-swap-detected] sig={signature}", flush=True)
+
+            await self._process_swap_signature(signature)
+        except Exception as e:
+            print(f"[logs-handler-error] {type(e).__name__}: {e}", flush=True)
 
     async def _process_swap_signature(self, signature: str) -> None:
         tx = fetch_tx_with_retry(signature)
