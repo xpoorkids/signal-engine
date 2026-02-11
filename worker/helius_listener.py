@@ -626,6 +626,7 @@ async def listen(q: asyncio.Queue) -> None:
                         try:
                             result = msg.get("params", {}).get("result", {})
                             value = result.get("value", {}) if isinstance(result, dict) else {}
+                            sig = value.get("signature")
                             logs = value.get("logs", [])
                             recent_logs.append(logs)
                             log_count += 1
@@ -633,62 +634,54 @@ async def listen(q: asyncio.Queue) -> None:
                                 print(f"[logs] received={log_count}", flush=True)
                             if logs:
                                 await swap_processor.handle_logs_notification(msg)
-                        for line in logs:
-                            log_line = str(line)
-                            if "InitializeMint" in log_line:
-                                        early_count += 1
-                                        print(f"[early] +1 via logs total={early_count}", flush=True)
-                                        print("[FORCE] InitializeMint seen in logs", flush=True)
-                                        print("[FORCE] logs InitializeMint EARLY emitted", flush=True)
-                                        if sig:
-                                            pending_log_signatures[sig] = time.time()
-                                            if ENABLE_LOGS_TX_LOOKUP:
-                                                now = time.time()
-                                                if now - last_lookup_ts > 0.2 and sig not in resolved_log_signatures:
-                                                    last_lookup_ts = now
-                                                    mint = _resolve_mint_from_sig(sig)
-                                                    if mint:
-                                                        resolved_log_signatures[sig] = now
-                                                        print(
-                                                            f"[pump] token_resolved via logs lookup sig={sig} mint={mint}",
-                                                            flush=True,
+                            for line in logs:
+                                log_line = str(line)
+                                if "InitializeMint" in log_line:
+                                    early_count += 1
+                                    print(f"[early] +1 via logs total={early_count}", flush=True)
+                                    print("[FORCE] InitializeMint seen in logs", flush=True)
+                                    print("[FORCE] logs InitializeMint EARLY emitted", flush=True)
+                                    if sig:
+                                        pending_log_signatures[sig] = time.time()
+                                        if ENABLE_LOGS_TX_LOOKUP:
+                                            now = time.time()
+                                            if now - last_lookup_ts > 0.2 and sig not in resolved_log_signatures:
+                                                last_lookup_ts = now
+                                                mint = _resolve_mint_from_sig(sig)
+                                                if mint:
+                                                    resolved_log_signatures[sig] = now
+                                                    print(
+                                                        f"[pump] token_resolved via logs lookup sig={sig} mint={mint}",
+                                                        flush=True,
+                                                    )
+                                                    await emit_event(
+                                                        Event(
+                                                            type="token_resolved",
+                                                            source="logs",
+                                                            signature=sig,
+                                                            token=mint,
+                                                            confidence=0.55,
+                                                            reasons=["mint_resolved_from_logs_lookup"],
+                                                            extra={"buyer": buyer},
                                                         )
-                                                        await emit_event(
-                                                            Event(
-                                                                type="token_resolved",
-                                                                source="logs",
-                                                                signature=sig,
-                                                                token=mint,
-                                                                confidence=0.55,
-                                                                reasons=["mint_resolved_from_logs_lookup"],
-                                                                extra={"buyer": buyer},
-                                                            )
-                                                        )
-                                        await emit_event(
-                                            Event(
-                                                type="early_logs_initialize_mint",
-                                                source="logs",
-                                                signature=sig,
-                                                confidence=0.4,
-                                                reasons=["InitializeMint_in_logs"],
-                                            )
+                                                    )
+                                    await emit_event(
+                                        Event(
+                                            type="early_logs_initialize_mint",
+                                            source="logs",
+                                            signature=sig,
+                                            confidence=0.4,
+                                            reasons=["InitializeMint_in_logs"],
                                         )
-                                        break
+                                    )
+                                    break
                         except Exception as e:
-                            print("[pump-logs] parse failed:", e, flush=True)
+                            print(f"[logs-handler-error] {type(e).__name__}: {e}", flush=True)
 
                         # Periodic retry for pending log signatures (processed logs may not be confirmed yet)
                         now = time.time()
                         if ENABLE_LOGS_TX_LOOKUP and now - last_pending_check > 1.0 and pending_log_signatures:
                             last_pending_check = now
-                            if recent_buy_signatures:
-                                stale = [s for s, ts in recent_buy_signatures.items() if now - ts > 900]
-                                for s in stale:
-                                    recent_buy_signatures.pop(s, None)
-                            if recent_balance_signatures:
-                                stale = [s for s, ts in recent_balance_signatures.items() if now - ts > 900]
-                                for s in stale:
-                                    recent_balance_signatures.pop(s, None)
                             for sig, first_seen in list(pending_log_signatures.items())[:5]:
                                 if sig in resolved_log_signatures:
                                     pending_log_signatures.pop(sig, None)
