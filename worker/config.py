@@ -60,6 +60,26 @@ CREATOR_RISK_WEIGHT = float(os.getenv("CREATOR_RISK_WEIGHT", "0.20"))
 EXECUTION_BONUS_CAP = float(os.getenv("EXECUTION_BONUS_CAP", "0.05"))
 MIN_EDGE_BPS = float(os.getenv("MIN_EDGE_BPS", "80"))
 
+ENGINE_MODE = os.getenv("ENGINE_MODE", "sniper")  # sniper | long_term
+
+# ignore dust buys for attention (still can log if you want)
+MIN_BUY_SOL_FOR_ATTENTION_SNIPER = float(os.getenv("MIN_BUY_SOL_FOR_ATTENTION_SNIPER", "0.01"))
+MIN_BUY_SOL_FOR_ATTENTION_LONG = float(os.getenv("MIN_BUY_SOL_FOR_ATTENTION_LONG", "0.10"))
+
+# long-term stricter requirements
+LONG_MIN_UNIQUE_BUYERS_5M = int(os.getenv("LONG_MIN_UNIQUE_BUYERS_5M", "4"))
+LONG_MIN_ELITE_SCORE = int(os.getenv("LONG_MIN_ELITE_SCORE", "10"))
+
+# sniper bypass parameters
+SNIPER_MIN_UNIQUE_10S = int(os.getenv("SNIPER_MIN_UNIQUE_10S", "3"))
+SNIPER_MIN_BURST10S = int(os.getenv("SNIPER_MIN_BURST10S", "6"))
+SNIPER_MIN_ELITE_SCORE = int(os.getenv("SNIPER_MIN_ELITE_SCORE", "8"))
+AGE_BYPASS_TTL_SECONDS = int(os.getenv("AGE_BYPASS_TTL_SECONDS", "20"))
+
+# momentum decay blacklist
+DECAY_WINDOW_SECONDS = int(os.getenv("DECAY_WINDOW_SECONDS", "20"))
+BLACKLIST_SECONDS = int(os.getenv("BLACKLIST_SECONDS", "600"))
+
 # Discord embed regime thresholds
 RADAR_QUIET_RISK_MAX = float(os.getenv("RADAR_QUIET_RISK_MAX", "0.25"))
 

@@ -1,13 +1,14 @@
 import asyncio
 import json
 import time
-from collections import deque, defaultdict
+from collections import deque
 from typing import Tuple, List, Dict, Any, Optional
 import threading
 
 import requests
 
 from worker.config import ENABLE_PUMPORTAL, ENABLE_BIRDEYE, BIRDEYE_API_KEY
+from worker.token_state import _ts
 
 DEXSCREENER_ORDERS_URL = "https://api.dexscreener.com/orders/v1/solana/{token}"
 DEX_CACHE_TTL_SEC = 30
@@ -18,66 +19,82 @@ DEXSCREENER_BOOST_THRESHOLD = 1
 PUMPORTAL_TRADE_BURST_THRESHOLD = 20
 
 _DEX_CACHE: Dict[str, tuple[float, Any]] = {}
-_recent_buyers_10s: Dict[str, deque[tuple[str, float]]] = defaultdict(deque)
-_recent_wallet_buys_15s: Dict[str, deque[tuple[str, float]]] = defaultdict(deque)
-_recent_buys_30s: Dict[str, deque[tuple[str, float, int, float]]] = defaultdict(deque)
 
 
-def _compute_burst_weight(sol_spent: float) -> int:
-    if sol_spent < 0.2:
+
+
+def burst_weight_from_sol(sol: float) -> int:
+    if sol < 0.2:
         return 1
-    if sol_spent < 1:
+    if sol < 1.0:
         return 2
-    return 4
+    if sol < 3.0:
+        return 3
+    return 5
+
+
 
 
 def register_buyer(mint: str, buyer: str, sol_spent: float | None = None) -> int:
     if not mint or not buyer:
         return 1
-    weight = _compute_burst_weight(float(sol_spent or 0.0))
-    print(f"[buy-size] token={mint} sol_spent={float(sol_spent or 0.0)}", flush=True)
-    print(f"[burst-weight] token={mint} delta={float(sol_spent or 0.0)} weight={weight}", flush=True)
+    sol_val = float(sol_spent or 0.0)
+    weight = burst_weight_from_sol(sol_val)
+    print(f"[burst-weight] token={mint} sol={sol_val} weight={weight}", flush=True)
 
     now = time.time()
-    dq = _recent_wallet_buys_15s[mint]
-    dq.append((buyer, now))
-    while dq and now - dq[0][1] > 15:
-        dq.popleft()
-    recent_wallets = [b for b, _ in dq]
-    if recent_wallets.count(buyer) >= 2 and len(set(recent_wallets)) == 1:
-        weight = max(1, weight - 1)
-        print(f"[anti-wash-adjust] token={mint} buyer={buyer} new_weight={weight}", flush=True)
+    st = _ts(mint)
 
-    dq10 = _recent_buyers_10s[mint]
-    dq10.append((buyer, now))
-    while dq10 and now - dq10[0][1] > 10:
-        dq10.popleft()
-    unique_10s = len(set(b for b, _ in dq10))
-    acceleration_boost = 0.0
+    st.buyers_10s.append((buyer, now))
+    while st.buyers_10s and now - st.buyers_10s[0][1] > 10:
+        st.buyers_10s.popleft()
+    unique_10s = len({b for b, _ in st.buyers_10s})
+
+    st.burst_10s.append((now, weight))
+    while st.burst_10s and now - st.burst_10s[0][0] > 10:
+        st.burst_10s.popleft()
+    burst10s = sum(x[1] for x in st.burst_10s)
+
+    st.buys_30s.append((buyer, now, weight, sol_val))
+    while st.buys_30s and now - st.buys_30s[0][1] > 30:
+        st.buys_30s.popleft()
+
+    counts: Dict[str, int] = {}
+    for b, _, _, _ in st.buys_30s:
+        counts[b] = counts.get(b, 0) + 1
+    total = len(st.buys_30s)
+    unique_30s = len(counts)
+    top_share = (max(counts.values()) / total) if total else 0.0
+    wash_suppress = 0.30 if (top_share >= 0.70 and unique_30s <= 2) else 0.0
+
+    if wash_suppress:
+        print(
+            f"[anti-wash] token={mint} top_share={top_share:.2f} unique_30s={unique_30s} suppress={wash_suppress}",
+            flush=True,
+        )
+
+    accel_boost = 0.0
     if unique_10s == 3:
-        acceleration_boost = 0.10
+        accel_boost = 0.10
     elif unique_10s == 4:
-        acceleration_boost = 0.15
+        accel_boost = 0.15
     elif unique_10s >= 5:
-        acceleration_boost = 0.20
-    print(f"[acceleration] token={mint} unique_10s={unique_10s} boost={acceleration_boost}", flush=True)
-
-    dq30 = _recent_buys_30s[mint]
-    dq30.append((buyer, now, weight, float(sol_spent or 0.0)))
-    while dq30 and now - dq30[0][1] > 30:
-        dq30.popleft()
+        accel_boost = 0.20
+    print(f"[acceleration] token={mint} unique_10s={unique_10s} boost={accel_boost}", flush=True)
 
     return weight
+
+
 
 
 def _acceleration_boost(mint: str) -> float:
     if not mint:
         return 0.0
     now = time.time()
-    dq10 = _recent_buyers_10s[mint]
-    while dq10 and now - dq10[0][1] > 10:
-        dq10.popleft()
-    unique_10s = len(set(b for b, _ in dq10))
+    st = _ts(mint)
+    while st.buyers_10s and now - st.buyers_10s[0][1] > 10:
+        st.buyers_10s.popleft()
+    unique_10s = len(set(b for b, _ in st.buyers_10s))
     boost = 0.0
     if unique_10s == 3:
         boost = 0.10
@@ -85,30 +102,27 @@ def _acceleration_boost(mint: str) -> float:
         boost = 0.15
     elif unique_10s >= 5:
         boost = 0.20
-    print(f"[acceleration] token={mint} unique_10s={unique_10s} boost={boost}", flush=True)
     return boost
+
+
 
 
 def _anti_wash_multiplier(mint: str) -> float:
     if not mint:
         return 1.0
     now = time.time()
-    dq30 = _recent_buys_30s[mint]
-    while dq30 and now - dq30[0][1] > 30:
-        dq30.popleft()
-    if not dq30:
+    st = _ts(mint)
+    while st.buys_30s and now - st.buys_30s[0][1] > 30:
+        st.buys_30s.popleft()
+    if not st.buys_30s:
         return 1.0
-    total = len(dq30)
+    total = len(st.buys_30s)
     by_wallet: Dict[str, int] = {}
-    for buyer, _, _, _ in dq30:
+    for buyer, _, _, _ in st.buys_30s:
         by_wallet[buyer] = by_wallet.get(buyer, 0) + 1
     unique_wallets = len(by_wallet)
     top_wallet_share = max(by_wallet.values()) / total if total else 0.0
     if top_wallet_share >= 0.70 and unique_wallets <= 2:
-        print(
-            f"[anti-wash] token={mint} top_wallet_share={top_wallet_share:.2f} unique_wallets={unique_wallets} suppress=0.30",
-            flush=True,
-        )
         return 0.70
     return 1.0
 

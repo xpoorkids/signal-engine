@@ -20,6 +20,17 @@ from worker.config import (
     ATTENTION_CANDIDATE_THRESHOLD,
     EXECUTION_BONUS_CAP,
     MIN_EDGE_BPS,
+    ENGINE_MODE,
+    MIN_BUY_SOL_FOR_ATTENTION_SNIPER,
+    MIN_BUY_SOL_FOR_ATTENTION_LONG,
+    LONG_MIN_UNIQUE_BUYERS_5M,
+    LONG_MIN_ELITE_SCORE,
+    SNIPER_MIN_UNIQUE_10S,
+    SNIPER_MIN_BURST10S,
+    SNIPER_MIN_ELITE_SCORE,
+    AGE_BYPASS_TTL_SECONDS,
+    DECAY_WINDOW_SECONDS,
+    BLACKLIST_SECONDS,
     CREATOR_RISK_WEIGHT,
     EARLY_CREATOR_MIN,
     EARLY_WATCH_RATE_LIMIT_PER_HOUR,
@@ -37,6 +48,7 @@ from worker.dex import dex_enrich_token, select_best_pair, summarize_pair
 from worker.forensics import analyze_risk
 from worker.execution import estimate_edge
 from worker.attention import compute_attention, register_buyer
+from worker.token_state import _ts
 from worker.elite import ELITE
 from worker.metadata import fetch_token_metadata
 from worker.alert_gate import evaluate_alert_gate, admission_check_candidate
@@ -106,9 +118,19 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 )
         if ts.symbol and not e.extra.get("symbol"):
             e.extra["symbol"] = ts.symbol
+
+
         if ts.name and not e.extra.get("name"):
             e.extra["name"] = ts.name
+
+        st = _ts(e.token)
+        now_wall = time.time()
+        if now_wall < st.blacklist_until:
+            print(f"[blacklist-skip] token={e.token} until={st.blacklist_until}", flush=True)
+            return out
         if e.creator and e.type == "token_resolved" and ts.signals == 1:
+
+
             record_creator_deploy(e.creator)
 
         risk_score = 0.0
@@ -145,6 +167,8 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 e.extra["creator_stats"],
             )
 
+
+        buy_size_sol = 0.0
         buyer = e.extra.get("buyer") if isinstance(e.extra, dict) else None
         if buyer:
             sol_spent = None
@@ -159,12 +183,20 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     sol_spent = float(sol_spent)
             except Exception:
                 sol_spent = None
-            weight = register_buyer(e.token, buyer, sol_spent)
-            state.record_buyer(e.token, buyer, ts=e.ts, weight=weight)
-            try:
-                ELITE.record_buy(e.token, buyer, weight, float(sol_spent or 0.0))
-            except Exception:
-                pass
+            buy_size_sol = float(sol_spent or 0.0)
+            min_sol = (
+                MIN_BUY_SOL_FOR_ATTENTION_SNIPER
+                if ENGINE_MODE == "sniper"
+                else MIN_BUY_SOL_FOR_ATTENTION_LONG
+            )
+            if buy_size_sol < min_sol:
+                print(
+                    f"[skip-attention] token={e.token} sol={buy_size_sol} min_sol={min_sol}",
+                    flush=True,
+                )
+            else:
+                weight = register_buyer(e.token, buyer, buy_size_sol)
+                state.record_buyer(e.token, buyer, ts=e.ts, weight=weight)
 
         attention_score = 0.0
         attn_reasons: list[str] = []
@@ -275,61 +307,107 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             liq_usd = 0.0
             liq_locked = None
 
+
         unique_10s = 0
         burst_10s = 0
-        total_buys_30s = 0
-        unique_wallets_30s = 0
-        top_wallet_share = 0.0
+        unique_30s = 0
+        top_share = 0.0
+        wash_suppress = 0.0
+        now_wall = time.time()
         try:
-            unique_10s = ELITE.unique_10s(e.token)
-            burst_10s = ELITE.burst_weight_sum_10s(e.token)
-            total_buys_30s, unique_wallets_30s, top_wallet_share = ELITE.distribution_metrics(e.token)
+            while st.buyers_10s and now_wall - st.buyers_10s[0][1] > 10:
+                st.buyers_10s.popleft()
+            unique_10s = len({b for b, _ in st.buyers_10s})
+
+            while st.burst_10s and now_wall - st.burst_10s[0][0] > 10:
+                st.burst_10s.popleft()
+            burst_10s = sum(x[1] for x in st.burst_10s)
+
+            while st.buys_30s and now_wall - st.buys_30s[0][1] > 30:
+                st.buys_30s.popleft()
+
+            counts: Dict[str, int] = {}
+            for b, _, _, _ in st.buys_30s:
+                counts[b] = counts.get(b, 0) + 1
+            total = len(st.buys_30s)
+            unique_30s = len(counts)
+            top_share = (max(counts.values()) / total) if total else 0.0
+            wash_suppress = 0.30 if (top_share >= 0.70 and unique_30s <= 2) else 0.0
         except Exception:
             pass
 
-        try:
-            buy_size_sol = float(e.extra.get("sol_spent") or 0.0) if isinstance(e.extra, dict) else 0.0
-        except Exception:
-            buy_size_sol = 0.0
-
-        elite_score = ELITE.compute_elite_score(
-            e.token,
-            buy_size_sol,
-            unique_10s,
-            total_buys_30s,
-            unique_wallets_30s,
-            top_wallet_share,
-            liq_usd,
-            liq_locked,
-            hard_fail,
+        capital_score = 1 if buy_size_sol < 0.2 else 2 if buy_size_sol < 1 else 3 if buy_size_sol < 3 else 5
+        velocity_score = 0 if unique_10s < 3 else 2 if unique_10s == 3 else 3 if unique_10s == 4 else 5
+        dist_score = -3 if wash_suppress else (1 if unique_30s >= 4 else 0)
+        safety_bonus = 0
+        elite_score = (capital_score * 2) + (velocity_score * 2) + dist_score + safety_bonus
+        print(
+            f"[elite-score] token={e.token} capital={capital_score} velocity={velocity_score} dist={dist_score} safety={safety_bonus} elite={elite_score}",
+            flush=True,
         )
         extra["elite_score"] = elite_score
 
         if hard_fail:
             return out
 
-        if elite_score >= 8 and unique_10s >= 3 and burst_10s >= 6:
-            now_wall = time.time()
-            extra["age_bypass_until"] = now_wall + 20
-            print(
-                f"[age-bypass] token={e.token} elite={elite_score} unique_10s={unique_10s} burst10s={burst_10s} ttl=20",
-                flush=True,
-            )
+        age_bypassed = False
+        if ENGINE_MODE == "sniper":
+            if (
+                elite_score >= SNIPER_MIN_ELITE_SCORE
+                and unique_10s >= SNIPER_MIN_UNIQUE_10S
+                and burst_10s >= SNIPER_MIN_BURST10S
+            ):
+                st.age_bypass_until = now_wall + AGE_BYPASS_TTL_SECONDS
+                print(
+                    f"[age-bypass] token={e.token} elite={elite_score} unique_10s={unique_10s} burst10s={burst_10s} ttl={AGE_BYPASS_TTL_SECONDS}",
+                    flush=True,
+                )
+            age_bypassed = now_wall <= st.age_bypass_until
+        elif ENGINE_MODE == "long_term":
+            st.age_bypass_until = 0.0
+            age_bypassed = False
+        extra["age_bypass_until"] = st.age_bypass_until if age_bypassed else 0.0
 
-        try:
-            blacklist_ttl = ELITE.update_decay(
-                e.token,
-                attention_score,
-                burst_10s,
-                int(attn_metrics.get("unique_buyers_5m") or 0),
-                float(liq_usd or 0.0),
-            )
-            if blacklist_ttl:
+        accel_boost = 0.0
+        if unique_10s == 3:
+            accel_boost = 0.10
+        elif unique_10s == 4:
+            accel_boost = 0.15
+        elif unique_10s >= 5:
+            accel_boost = 0.20
+
+        if elite_score >= SNIPER_MIN_ELITE_SCORE or accel_boost >= 0.10:
+            if st.spike_started_at == 0:
+                st.spike_started_at = now_wall
+                st.last_unique_buyers = unique_10s
+                st.last_burst_weight = burst_10s
+                print(f"[decay-watch] token={e.token} started_at={st.spike_started_at}", flush=True)
+
+        if st.spike_started_at and (now_wall - st.spike_started_at) <= DECAY_WINDOW_SECONDS:
+            if unique_10s <= st.last_unique_buyers and burst_10s < (st.last_burst_weight * 0.5):
+                st.blacklist_until = now_wall + BLACKLIST_SECONDS
+                print(
+                    f"[momentum-fail] token={e.token} reason=no_follow_through blacklist={BLACKLIST_SECONDS}",
+                    flush=True,
+                )
                 return out
-        except Exception:
-            pass
+
+        if st.spike_started_at and (now_wall - st.spike_started_at) > DECAY_WINDOW_SECONDS:
+            st.spike_started_at = 0.0
+
+        if ENGINE_MODE == "long_term":
+            unique_buyers_5m = int(attn_metrics.get("unique_buyers_5m") or 0)
+            if unique_buyers_5m < LONG_MIN_UNIQUE_BUYERS_5M or elite_score < LONG_MIN_ELITE_SCORE:
+                print(
+                    f"[engine-gate] token={e.token} mode=long_term unique_buyers_5m={unique_buyers_5m} elite={elite_score}",
+                    flush=True,
+                )
+                return out
 
         if ENABLE_WALLET and ts.creator:
+"
+"
+
             extra["wallet_risk"] = await score_wallet_risk(ts.creator)
             wr = extra.get("wallet_risk")
             if wr and wr.get("score", 1.0) < 0.3:
