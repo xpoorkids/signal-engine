@@ -32,8 +32,12 @@ async def event_loop(q: asyncio.Queue) -> None:
         for de in derived:
             if de.type in ("heating_up", "promoted"):
                 if de.token and can_alert(state, de.token, ALERT_COOLDOWN_SEC):
+                    if isinstance(de.extra, dict) and de.extra.get("candidate_send") is False:
+                        continue
                     send_discord(de)
             elif de.type == "candidate":
+                if isinstance(de.extra, dict) and de.extra.get("candidate_send") is False:
+                    continue
                 send_candidate_discord(de)
 
         q.task_done()

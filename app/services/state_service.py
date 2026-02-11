@@ -29,11 +29,38 @@ def init():
         )
         """
         )
+        # add candidate-specific columns (safe if already exists)
+        try:
+            c.execute("ALTER TABLE token_state ADD COLUMN candidate_last_sent INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            c.execute("ALTER TABLE token_state ADD COLUMN candidate_sent_count INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         c.execute(
             """
         CREATE TABLE IF NOT EXISTS kv (
             k TEXT PRIMARY KEY,
             v TEXT
+        )
+        """
+        )
+        c.execute(
+            """
+        CREATE TABLE IF NOT EXISTS creator_state (
+            creator TEXT PRIMARY KEY,
+            first_seen INTEGER,
+            last_seen INTEGER,
+            deploy_count INTEGER DEFAULT 0
+        )
+        """
+        )
+        c.execute(
+            """
+        CREATE TABLE IF NOT EXISTS creator_deploys (
+            creator TEXT,
+            ts INTEGER
         )
         """
         )
@@ -59,6 +86,158 @@ def upsert_seen(token: str, metrics: dict):
             """,
                 (now, metrics_json, token),
             )
+
+
+def get_last_metrics(token: str) -> dict:
+    with _connect() as c:
+        row = c.execute(
+            "SELECT last_metrics FROM token_state WHERE token=?",
+            (token,),
+        ).fetchone()
+    if not row or not row[0]:
+        return {}
+    try:
+        return json.loads(row[0])
+    except Exception:
+        return {}
+
+
+def record_candidate_sent(token: str) -> None:
+    now = int(time.time())
+    with _connect() as c:
+        row = c.execute(
+            "SELECT token FROM token_state WHERE token=?",
+            (token,),
+        ).fetchone()
+        if not row:
+            c.execute(
+                """
+                INSERT INTO token_state (token, candidate_last_sent, candidate_sent_count, first_seen, last_seen)
+                VALUES (?, ?, 1, ?, ?)
+            """,
+                (token, now, now, now),
+            )
+            return
+        c.execute(
+            """
+            UPDATE token_state
+            SET candidate_last_sent=?, candidate_sent_count=candidate_sent_count+1
+            WHERE token=?
+        """,
+            (now, token),
+        )
+
+
+def get_candidate_state(token: str) -> dict:
+    with _connect() as c:
+        row = c.execute(
+            """
+            SELECT candidate_last_sent, candidate_sent_count, last_metrics
+            FROM token_state WHERE token=?
+        """,
+            (token,),
+        ).fetchone()
+    if not row:
+        return {"candidate_last_sent": 0, "candidate_sent_count": 0, "last_metrics": {}}
+    last_metrics = {}
+    try:
+        last_metrics = json.loads(row[2]) if row[2] else {}
+    except Exception:
+        last_metrics = {}
+    return {
+        "candidate_last_sent": row[0] or 0,
+        "candidate_sent_count": row[1] or 0,
+        "last_metrics": last_metrics,
+    }
+
+
+def allow_candidate_rate_limit(max_per_hour: int) -> bool:
+    now = int(time.time())
+    window_key = "candidate_rate_window_start"
+    count_key = "candidate_rate_window_count"
+    with _connect() as c:
+        start_row = c.execute("SELECT v FROM kv WHERE k=?", (window_key,)).fetchone()
+        count_row = c.execute("SELECT v FROM kv WHERE k=?", (count_key,)).fetchone()
+        start = int(start_row[0]) if start_row and start_row[0] else 0
+        count = int(count_row[0]) if count_row and count_row[0] else 0
+        if start == 0 or now - start >= 3600:
+            start = now
+            count = 0
+        if count >= max_per_hour:
+            c.execute(
+                "INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                (window_key, str(start)),
+            )
+            c.execute(
+                "INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                (count_key, str(count)),
+            )
+            return False
+        count += 1
+        c.execute(
+            "INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            (window_key, str(start)),
+        )
+        c.execute(
+            "INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            (count_key, str(count)),
+        )
+        return True
+
+
+def record_creator_deploy(creator: str) -> None:
+    if not creator:
+        return
+    now = int(time.time())
+    with _connect() as c:
+        row = c.execute(
+            "SELECT creator, first_seen, deploy_count FROM creator_state WHERE creator=?",
+            (creator,),
+        ).fetchone()
+        if not row:
+            c.execute(
+                """
+                INSERT INTO creator_state (creator, first_seen, last_seen, deploy_count)
+                VALUES (?, ?, ?, 1)
+            """,
+                (creator, now, now),
+            )
+        else:
+            c.execute(
+                """
+                UPDATE creator_state SET last_seen=?, deploy_count=deploy_count+1
+                WHERE creator=?
+            """,
+                (now, creator),
+            )
+        c.execute(
+            "INSERT INTO creator_deploys (creator, ts) VALUES (?, ?)",
+            (creator, now),
+        )
+
+
+def get_creator_stats(creator: str) -> dict:
+    if not creator:
+        return {"deploys_24h": 0, "deploys_lifetime": 0, "first_seen": 0}
+    now = int(time.time())
+    cutoff = now - 24 * 3600
+    with _connect() as c:
+        row = c.execute(
+            "SELECT first_seen, deploy_count FROM creator_state WHERE creator=?",
+            (creator,),
+        ).fetchone()
+        deploys_lifetime = row[1] if row else 0
+        first_seen = row[0] if row else 0
+        row2 = c.execute(
+            "SELECT COUNT(1) FROM creator_deploys WHERE creator=? AND ts>=?",
+            (creator, cutoff),
+        ).fetchone()
+        deploys_24h = row2[0] if row2 else 0
+    return {
+        "deploys_24h": deploys_24h,
+        "deploys_lifetime": deploys_lifetime,
+        "first_seen": first_seen,
+    }
 
 
 def should_mute(token: str) -> int:

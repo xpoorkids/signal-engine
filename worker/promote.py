@@ -19,6 +19,10 @@ from worker.config import (
     ATTENTION_CANDIDATE_THRESHOLD,
     EXECUTION_BONUS_CAP,
     MIN_EDGE_BPS,
+    CREATOR_SCORE_MIN,
+    CREATOR_RISK_WEIGHT,
+    CAND_MAX_PER_HOUR,
+    CAND_IMPROVE_PCT,
 )
 from worker.confidence import CONF_WEIGHTS, CAPS, bump
 from worker.wallet_risk import score_wallet_risk
@@ -27,6 +31,16 @@ from worker.forensics import analyze_risk
 from worker.execution import estimate_edge
 from worker.attention import compute_attention
 from worker.alert_gate import evaluate_alert_gate, admission_check_candidate
+from worker.creator_score import score_creator
+from worker.progression import metrics_improved
+from app.services.state_service import (
+    init as state_init,
+    upsert_seen,
+    get_last_metrics,
+    record_candidate_sent,
+    allow_candidate_rate_limit,
+    record_creator_deploy,
+)
 
 logger = logging.getLogger(__name__)
 logger.info("[PROMOTE FILE LOADED]")
@@ -57,6 +71,8 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             reason=e.type,
             creator=e.creator,
         )
+        if e.creator and e.type == "token_resolved" and ts.signals == 1:
+            record_creator_deploy(e.creator)
 
         risk_score = 0.0
         risk_reasons: list[str] = []
@@ -73,6 +89,16 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             e.extra["risk_score"] = risk_score
             e.extra["risk_reasons"] = risk_reasons
             e.extra["risk_flags"] = risk_flags
+
+        creator_score_info = {"score": 0.0, "reasons": ["creator_unknown"], "stats": {}}
+        if e.creator:
+            creator_score_info = score_creator(e.creator)
+            score_val = float(creator_score_info.get("score") or 0.0)
+            risk_score = min(1.0, risk_score + (1.0 - score_val) * CREATOR_RISK_WEIGHT)
+            e.extra["creator_score"] = score_val
+            e.extra["creator_reasons"] = creator_score_info.get("reasons") or []
+            e.extra["creator_stats"] = creator_score_info.get("stats") or {}
+            e.extra["risk_score"] = risk_score
 
         buyer = e.extra.get("buyer") if isinstance(e.extra, dict) else None
         if buyer:
@@ -164,6 +190,19 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             e.confidence = bump(e.confidence, CONF_WEIGHTS["repeat"], CAPS["heating"])
             e.reasons.append(f"repeat_{ts.signals}")
 
+        # Persist current metrics for progression and rate-limiting
+        state_init()
+        prev_metrics = get_last_metrics(e.token)
+        current_metrics = {
+            "attention_score": attention_score,
+            "unique_buyers_5m": attn_metrics.get("unique_buyers_5m") if isinstance(attn_metrics, dict) else 0,
+            "liquidity": (extra.get("dex_summary") or {}).get("liquidity_usd") if isinstance(extra, dict) else 0,
+            "score": e.confidence,
+        }
+        upsert_seen(e.token, current_metrics)
+        improved, improved_keys = metrics_improved(prev_metrics, current_metrics, CAND_IMPROVE_PCT)
+        prev_attention = float(prev_metrics.get("attention_score") or 0.0) if isinstance(prev_metrics, dict) else 0.0
+
         # ------------------------------------------------------------
         # Attention-driven candidate emission (Phase 1)
         # ------------------------------------------------------------
@@ -204,8 +243,23 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     risk_score,
                     attn_reasons,
                 )
+                creator_ok = float(creator_score_info.get("score") or 0.0) >= CREATOR_SCORE_MIN
+                attention_improving = attention_score > prev_attention
+                send_eligible = creator_ok or attention_improving
+                allow_rate = allow_candidate_rate_limit(CAND_MAX_PER_HOUR) if send_eligible else False
+                should_send = send_eligible and allow_rate
+                if not allow_rate:
+                    if send_eligible:
+                        logger.info("[candidate-skip] reason=rate_limited token=%s", e.token)
+                elif not send_eligible:
+                    logger.info("[candidate-skip] reason=no_creator_or_improve token=%s", e.token)
 
                 extra["lifecycle"] = lifecycle
+                extra["candidate_send"] = should_send
+                extra["candidate_improved"] = improved
+                extra["candidate_improved_keys"] = improved_keys
+                if should_send:
+                    record_candidate_sent(e.token)
                 out.append(
                     Event(
                         type="candidate",
@@ -266,18 +320,22 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     gate_reasons,
                 )
             else:
-                out.append(
-                    Event(
-                        type="heating_up",
-                        source=e.source,
-                        token=e.token,
-                        creator=ts.creator,
-                        confidence=e.confidence,
-                        reasons=e.reasons,
-                        extra=extra,
-                        signature=e.signature,
+                if improved:
+                    extra["candidate_send"] = True
+                    extra["candidate_improved"] = True
+                    extra["candidate_improved_keys"] = improved_keys
+                    out.append(
+                        Event(
+                            type="heating_up",
+                            source=e.source,
+                            token=e.token,
+                            creator=ts.creator,
+                            confidence=e.confidence,
+                            reasons=e.reasons,
+                            extra=extra,
+                            signature=e.signature,
+                        )
                     )
-                )
 
         if e.confidence >= 0.80 and e.token and not ts.is_promoted:
             dex_summary = extra.get("dex_summary") if isinstance(extra, dict) else None

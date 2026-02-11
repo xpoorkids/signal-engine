@@ -161,7 +161,9 @@ def admission_check_candidate(
             curve_liq = _float_or_zero(extra.get("bonding_curve_liquidity"))
         elif isinstance(extra.get("bonding_curve"), dict):
             curve_liq = _float_or_zero(extra["bonding_curve"].get("liquidity_usd"))
-        if curve_liq is not None and curve_liq < CAND_MIN_CURVE_LIQ_USD:
+        if curve_liq is None:
+            reasons.append("curve_liq_missing")
+        elif curve_liq < CAND_MIN_CURVE_LIQ_USD:
             reasons.append(f"curve_liq<{CAND_MIN_CURVE_LIQ_USD:.0f}")
 
     return len(reasons) == 0, reasons, lifecycle
