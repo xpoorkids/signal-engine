@@ -193,6 +193,43 @@ def _resolve_mint_from_sig(sig: str) -> str | None:
         _log_rpc_issue("getTransaction exception")
         return None
 
+
+def _resolve_mint_and_buyer_from_sig(sig: str) -> tuple[str | None, str | None]:
+    if not sig or not HELIUS_RPC:
+        _log_rpc_issue("missing_sig_or_rpc_url")
+        return None, None
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTransaction",
+            "params": [
+                sig,
+                {
+                    "encoding": "jsonParsed",
+                    "commitment": "confirmed",
+                    "maxSupportedTransactionVersion": 0,
+                },
+            ],
+        }
+        r = requests.post(HELIUS_RPC, json=payload, timeout=8)
+        if r.status_code >= 300:
+            _log_rpc_issue(f"getTransaction status={r.status_code} body={r.text[:120]}")
+            return None, None
+        data = r.json()
+        result = data.get("result")
+        if not result:
+            _log_rpc_issue("getTransaction result=null")
+            return None, None
+        tx = {"transaction": result.get("transaction"), "meta": result.get("meta")}
+        new_mints = extract_new_mints_from_token_balances(tx)
+        mint = new_mints[0] if new_mints else extract_mint_from_inner_instructions(tx)
+        buyer = _first_signer(tx)
+        return mint, buyer
+    except Exception:
+        _log_rpc_issue("getTransaction exception")
+        return None, None
+
 async def listen(q: asyncio.Queue) -> None:
     if not HELIUS_KEY:
         print("[helius] missing HELIUS_API_KEY", flush=True)
@@ -229,6 +266,7 @@ async def listen(q: asyncio.Queue) -> None:
     pending_log_signatures: dict[str, float] = {}
     resolved_log_signatures: dict[str, float] = {}
     last_lookup_ts = 0.0
+    last_buy_lookup_ts = 0.0
     last_pending_check = 0.0
     last_report_ts = time.time()
     last_emit_ts = time.time()
@@ -293,6 +331,28 @@ async def listen(q: asyncio.Queue) -> None:
                                 sig = value.get("signature") or result.get("signature")
                                 for line in logs:
                                     log_line = str(line)
+                                    if "Buy" in log_line or "buy" in log_line:
+                                        if sig and ENABLE_LOGS_TX_LOOKUP:
+                                            now = time.time()
+                                            if now - last_buy_lookup_ts > 0.2:
+                                                last_buy_lookup_ts = now
+                                                mint, buyer = _resolve_mint_and_buyer_from_sig(sig)
+                                                if mint and buyer:
+                                                    print(
+                                                        f"[buyer-detected] token={mint} wallet={buyer}",
+                                                        flush=True,
+                                                    )
+                                                    await emit_event(
+                                                        Event(
+                                                            type="trade_buy",
+                                                            source="logs",
+                                                            signature=sig,
+                                                            token=mint,
+                                                            confidence=0.0,
+                                                            reasons=["buy_detected_in_logs"],
+                                                            extra={"buyer": buyer},
+                                                        )
+                                                    )
                                     if "InitializeMint" in log_line:
                                         early_count += 1
                                         print(f"[early] +1 via logs total={early_count}", flush=True)

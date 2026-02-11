@@ -82,7 +82,8 @@ class EngineState:
         trades.append((now, buyer))
         if buyer not in seen_buyers:
             print(f"[attention] new_buyer token={token} buyer={buyer}", flush=True)
-        print(f"[attention] buyer_count token={token} count={len({b for _, b in trades})}", flush=True)
+        count = len({b for _, b in trades})
+        print(f"[buyer-count] token={token} unique_buyers_5m={count}", flush=True)
         cutoff = now - 600
         if len(trades) > 1000:
             trades[:] = [(t, b) for t, b in trades if t >= cutoff]
