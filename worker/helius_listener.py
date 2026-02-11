@@ -71,27 +71,6 @@ def _is_buy_log(logs: list[str]) -> bool:
     return False
 
 
-def _is_swap_log(logs: List[str]) -> bool:
-    if not logs:
-        return False
-
-    low = [str(l).lower() for l in logs]
-    has_instruction_buy = any("instruction: buy" in l for l in low)
-    has_instruction_swap = any("instruction: swap" in l for l in low)
-    has_raydium = any("raydium" in l for l in low)
-    has_swap = any("swap" in l for l in low)
-    has_pump = any("pump" in l for l in low)
-    has_buy = any("buy" in l for l in low)
-
-    if has_instruction_buy or has_instruction_swap:
-        return True
-    if has_raydium and has_swap:
-        return True
-    if has_pump and has_buy:
-        return True
-    return False
-
-
 def _log_rpc_issue(msg: str) -> None:
     global _last_rpc_log_ts
     now = time.time()
@@ -424,60 +403,130 @@ def fetch_tx_with_retry(signature: str, max_attempts: int = 8, delay: float = 0.
     return None
 
 
-def _token_balances_to_map(balances: List[Dict[str, Any]]) -> Dict[Tuple[str, str], int]:
-    out: Dict[Tuple[str, str], int] = {}
-    for b in balances or []:
-        mint = b.get("mint")
-        owner = b.get("owner") or b.get("accountOwner")
-        ui = b.get("uiTokenAmount") or {}
-        amt_str = ui.get("amount")
-        if not mint or not owner or amt_str is None:
-            continue
-        try:
-            raw = int(amt_str)
-        except Exception:
-            continue
-        key = (owner, mint)
-        out[key] = out.get(key, 0) + raw
-    return out
+class LogSwapProcessor:
+    def __init__(self, emit_event) -> None:
+        self.emit_event = emit_event
 
+    def _is_swap_log(self, logs: List[str]) -> bool:
+        if not logs:
+            return False
+        low = [str(l).lower() for l in logs]
+        has_instruction_buy = any("instruction: buy" in l for l in low)
+        has_instruction_swap = any("instruction: swap" in l for l in low)
+        has_raydium = any("raydium" in l for l in low)
+        has_swap = any("swap" in l for l in low)
+        has_pump = any("pump" in l for l in low)
+        has_buy = any("buy" in l for l in low)
 
-def _detect_positive_deltas(tx: Dict[str, Any]) -> List[Dict[str, Any]]:
-    meta = (tx or {}).get("meta") or {}
-    pre = meta.get("preTokenBalances") or []
-    post = meta.get("postTokenBalances") or []
+        if has_instruction_buy or has_instruction_swap:
+            return True
+        if has_raydium and has_swap:
+            return True
+        if has_pump and has_buy:
+            return True
+        return False
 
-    pre_map = _token_balances_to_map(pre)
-    post_map = _token_balances_to_map(post)
+    def _token_balances_to_map(self, balances: List[Dict[str, Any]]) -> Dict[Tuple[str, str], int]:
+        out: Dict[Tuple[str, str], int] = {}
+        for b in balances or []:
+            mint = b.get("mint")
+            owner = b.get("owner") or b.get("accountOwner")
+            ui = b.get("uiTokenAmount") or {}
+            amt_str = ui.get("amount")
+            if not mint or not owner or amt_str is None:
+                continue
+            try:
+                raw = int(amt_str)
+            except Exception:
+                continue
+            key = (owner, mint)
+            out[key] = out.get(key, 0) + raw
+        return out
 
-    decimals_by_key: Dict[Tuple[str, str], int] = {}
-    for b in post + pre:
-        mint = b.get("mint")
-        owner = b.get("owner") or b.get("accountOwner")
-        ui = b.get("uiTokenAmount") or {}
-        dec = ui.get("decimals")
-        if mint and owner and isinstance(dec, int):
-            decimals_by_key[(owner, mint)] = dec
+    def _detect_positive_deltas(self, tx: Dict[str, Any]) -> List[Dict[str, Any]]:
+        meta = (tx or {}).get("meta") or {}
+        pre = meta.get("preTokenBalances") or []
+        post = meta.get("postTokenBalances") or []
 
-    keys = set(pre_map.keys()) | set(post_map.keys())
-    hits: List[Dict[str, Any]] = []
+        pre_map = self._token_balances_to_map(pre)
+        post_map = self._token_balances_to_map(post)
 
-    for (owner, mint) in keys:
-        if mint in EXCLUDED_MINTS:
-            continue
-        pre_raw = pre_map.get((owner, mint), 0)
-        post_raw = post_map.get((owner, mint), 0)
-        delta_raw = post_raw - pre_raw
-        if delta_raw > 0:
-            hits.append(
-                {
-                    "buyer": owner,
-                    "mint": mint,
-                    "delta_raw": delta_raw,
-                    "decimals": decimals_by_key.get((owner, mint), 0),
-                }
-            )
-    return hits
+        decimals_by_key: Dict[Tuple[str, str], int] = {}
+        for b in post + pre:
+            mint = b.get("mint")
+            owner = b.get("owner") or b.get("accountOwner")
+            ui = b.get("uiTokenAmount") or {}
+            dec = ui.get("decimals")
+            if mint and owner and isinstance(dec, int):
+                decimals_by_key[(owner, mint)] = dec
+
+        keys = set(pre_map.keys()) | set(post_map.keys())
+        hits: List[Dict[str, Any]] = []
+
+        for (owner, mint) in keys:
+            if mint in EXCLUDED_MINTS:
+                continue
+            pre_raw = pre_map.get((owner, mint), 0)
+            post_raw = post_map.get((owner, mint), 0)
+            delta_raw = post_raw - pre_raw
+            if delta_raw > 0:
+                hits.append(
+                    {
+                        "buyer": owner,
+                        "mint": mint,
+                        "delta_raw": delta_raw,
+                        "decimals": decimals_by_key.get((owner, mint), 0),
+                    }
+                )
+        return hits
+
+    async def handle_logs_notification(self, notification: dict) -> None:
+        value = (
+            notification.get("params", {})
+            .get("result", {})
+            .get("value", {})
+        )
+        signature = value.get("signature")
+        logs = value.get("logs") or []
+        err = value.get("err")
+
+        if not signature or err is not None:
+            return
+
+        if not self._is_swap_log(logs):
+            return
+
+        print(f"[log-swap-detected] sig={signature}", flush=True)
+        await self._process_swap_signature(signature)
+
+    async def _process_swap_signature(self, signature: str) -> None:
+        tx = fetch_tx_with_retry(signature)
+        if not tx:
+            return
+        buys = self._detect_positive_deltas(tx)
+        if not buys:
+            return
+        for buy in buys:
+            await self._emit_trade_buy(signature, tx, buy)
+
+    async def _emit_trade_buy(self, signature: str, tx: Dict[str, Any], buy: Dict[str, Any]) -> None:
+        event = Event(
+            type="trade_buy",
+            source="logs",
+            signature=signature,
+            token=buy.get("mint"),
+            slot=tx.get("slot"),
+            confidence=0.0,
+            reasons=["balance_increase_detected"],
+            extra={
+                "buyer": buy.get("buyer"),
+                "delta_raw": buy.get("delta_raw"),
+                "decimals": buy.get("decimals"),
+                "ts": int(time.time()),
+            },
+        )
+        await self.emit_event(event)
+        print("[event-emit] trade_buy", flush=True)
 
 async def listen(q: asyncio.Queue) -> None:
     if not HELIUS_KEY:
@@ -500,10 +549,8 @@ async def listen(q: asyncio.Queue) -> None:
     recent_logs = deque(maxlen=50)
     pending_log_signatures: dict[str, float] = {}
     resolved_log_signatures: dict[str, float] = {}
-    recent_buy_signatures: dict[str, float] = {}
     recent_balance_signatures: dict[str, float] = {}
     last_lookup_ts = 0.0
-    last_buy_lookup_ts = 0.0
     last_pending_check = 0.0
     last_report_ts = time.time()
     last_emit_ts = time.time()
@@ -552,6 +599,7 @@ async def listen(q: asyncio.Queue) -> None:
                             last_emit_ts = time.time()
                         except Exception as e2:
                             print("[pump-logs] emit failed:", e2, flush=True)
+                    swap_processor = LogSwapProcessor(emit_event)
 
                     method = msg.get("method")
                     now = time.time()
@@ -579,72 +627,10 @@ async def listen(q: asyncio.Queue) -> None:
                             if log_count % 200 == 0:
                                 print(f"[logs] received={log_count}", flush=True)
                             if logs:
-                                sig = value.get("signature") or result.get("signature")
-                                if sig and ENABLE_LOGS_TX_LOOKUP and _is_swap_log(logs):
-                                    program_label = "unknown"
-                                    for line in logs:
-                                        log_lower = str(line).lower()
-                                        if "raydium" in log_lower:
-                                            program_label = "raydium"
-                                            break
-                                        if "pump" in log_lower:
-                                            program_label = "pumpfun"
-                                            break
-                                    print(
-                                        f"[log-swap-detected] sig={sig} program={program_label}",
-                                        flush=True,
-                                    )
-                                        last_seen = recent_buy_signatures.get(sig)
-                                        if not last_seen or now - last_seen > 300:
-                                            if now - last_buy_lookup_ts > 0.2:
-                                                last_buy_lookup_ts = now
-                                                tx = fetch_tx_with_retry(sig)
-                                                if tx:
-                                                    recent_buy_signatures[sig] = now
-                                                    try:
-                                                        hits = _detect_positive_deltas(tx)
-                                                        slot = tx.get("slot")
-                                                        now_ts = int(time.time())
-                                                        for h in hits:
-                                                            buyer = h["buyer"]
-                                                            mint = h["mint"]
-                                                            delta_raw = h["delta_raw"]
-                                                            decimals = h["decimals"]
-                                                            delta = (
-                                                                delta_raw / (10 ** decimals)
-                                                                if decimals
-                                                                else float(delta_raw)
-                                                            )
-                                                            print(
-                                                                f"[log-buy-detected] token={mint} buyer={buyer} delta={delta}",
-                                                                flush=True,
-                                                            )
-                                                            print(
-                                                                f"[buyer-detected] token={mint} wallet={buyer}",
-                                                                flush=True,
-                                                            )
-                                                            await emit_event(
-                                                                Event(
-                                                                    type="trade_buy",
-                                                                    source="logs",
-                                                                    signature=sig,
-                                                                    token=mint,
-                                                                    slot=slot,
-                                                                    confidence=0.0,
-                                                                    reasons=["balance_increase_detected"],
-                                                                    extra={
-                                                                        "buyer": buyer,
-                                                                        "delta_raw": delta_raw,
-                                                                        "decimals": decimals,
-                                                                        "ts": now_ts,
-                                                                    },
-                                                                )
-                                                            )
-                                                    except Exception as e:
-                                                        print("[log-buy-detected] parse failed:", e, flush=True)
-                                for line in logs:
-                                    log_line = str(line)
-                                    if "InitializeMint" in log_line:
+                                await swap_processor.handle_logs_notification(msg)
+                        for line in logs:
+                            log_line = str(line)
+                            if "InitializeMint" in log_line:
                                         early_count += 1
                                         print(f"[early] +1 via logs total={early_count}", flush=True)
                                         print("[FORCE] InitializeMint seen in logs", flush=True)
@@ -927,14 +913,6 @@ async def listen(q: asyncio.Queue) -> None:
                     now = time.time()
                     if ENABLE_LOGS_TX_LOOKUP and now - last_pending_check > 1.0 and pending_log_signatures:
                         last_pending_check = now
-                        if recent_buy_signatures:
-                            stale = [s for s, ts in recent_buy_signatures.items() if now - ts > 900]
-                            for s in stale:
-                                recent_buy_signatures.pop(s, None)
-                        if recent_balance_signatures:
-                            stale = [s for s, ts in recent_balance_signatures.items() if now - ts > 900]
-                            for s in stale:
-                                recent_balance_signatures.pop(s, None)
                         for sig, first_seen in list(pending_log_signatures.items())[:5]:
                             if sig in resolved_log_signatures:
                                 pending_log_signatures.pop(sig, None)
