@@ -60,10 +60,27 @@ def init():
             lifecycle TEXT,
             alert_sent INTEGER DEFAULT 0,
             message_id TEXT,
-            promo_confirm_count INTEGER DEFAULT 0
+            promo_confirm_count INTEGER DEFAULT 0,
+            next_check_at INTEGER,
+            stage TEXT,
+            flat_liq_count INTEGER DEFAULT 0,
+            flat_buyer_count INTEGER DEFAULT 0,
+            max_confidence REAL DEFAULT 0.0
         )
         """
         )
+        # add optional columns for existing DBs
+        for stmt in (
+            "ALTER TABLE candidate_state ADD COLUMN next_check_at INTEGER",
+            "ALTER TABLE candidate_state ADD COLUMN stage TEXT",
+            "ALTER TABLE candidate_state ADD COLUMN flat_liq_count INTEGER DEFAULT 0",
+            "ALTER TABLE candidate_state ADD COLUMN flat_buyer_count INTEGER DEFAULT 0",
+            "ALTER TABLE candidate_state ADD COLUMN max_confidence REAL DEFAULT 0.0",
+        ):
+            try:
+                c.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
         c.execute(
             """
         CREATE TABLE IF NOT EXISTS creator_state (
@@ -175,7 +192,8 @@ def get_candidate_state(token: str) -> dict:
             """
             SELECT first_seen_at, last_update_at, last_attention, last_score,
                    last_liquidity, last_unique_buyers, creator_score, lifecycle,
-                   alert_sent, message_id, promo_confirm_count
+                   alert_sent, message_id, promo_confirm_count, next_check_at,
+                   stage, flat_liq_count, flat_buyer_count, max_confidence
             FROM candidate_state WHERE token=?
         """,
             (token,),
@@ -194,6 +212,11 @@ def get_candidate_state(token: str) -> dict:
         "alert_sent": row[8] or 0,
         "message_id": row[9] or "",
         "promo_confirm_count": row[10] or 0,
+        "next_check_at": row[11] or 0,
+        "stage": row[12] or "",
+        "flat_liq_count": row[13] or 0,
+        "flat_buyer_count": row[14] or 0,
+        "max_confidence": row[15] or 0.0,
     }
 
 
@@ -217,9 +240,9 @@ def upsert_candidate_state(
                 """
                 INSERT INTO candidate_state (
                     token, first_seen_at, last_update_at, last_attention, last_score,
-                    last_liquidity, last_unique_buyers, creator_score, lifecycle
+                    last_liquidity, last_unique_buyers, creator_score, lifecycle, max_confidence
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     token,
@@ -231,6 +254,7 @@ def upsert_candidate_state(
                     unique_buyers,
                     creator_score,
                     lifecycle,
+                    score,
                 ),
             )
         else:
@@ -238,7 +262,7 @@ def upsert_candidate_state(
                 """
                 UPDATE candidate_state
                 SET last_update_at=?, last_attention=?, last_score=?, last_liquidity=?,
-                    last_unique_buyers=?, creator_score=?, lifecycle=?
+                    last_unique_buyers=?, creator_score=?, lifecycle=?, max_confidence=MAX(max_confidence, ?)
                 WHERE token=?
             """,
                 (
@@ -249,9 +273,42 @@ def upsert_candidate_state(
                     unique_buyers,
                     creator_score,
                     lifecycle,
+                    score,
                     token,
                 ),
             )
+
+
+def update_candidate_recheck(
+    token: str,
+    next_check_at: int,
+    stage: str,
+) -> None:
+    with _connect() as c:
+        c.execute(
+            """
+            UPDATE candidate_state
+            SET next_check_at=?, stage=?
+            WHERE token=?
+        """,
+            (next_check_at, stage, token),
+        )
+
+
+def update_candidate_flat_counters(
+    token: str,
+    flat_liq_count: int,
+    flat_buyer_count: int,
+) -> None:
+    with _connect() as c:
+        c.execute(
+            """
+            UPDATE candidate_state
+            SET flat_liq_count=?, flat_buyer_count=?
+            WHERE token=?
+        """,
+            (flat_liq_count, flat_buyer_count, token),
+        )
 
 
 def mark_candidate_alert_sent(token: str) -> None:

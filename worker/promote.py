@@ -40,6 +40,7 @@ from worker.attention import compute_attention
 from worker.alert_gate import evaluate_alert_gate, admission_check_candidate
 from worker.creator_score import compute_creator_score
 from worker.progression import metrics_improved
+from worker.recheck import schedule_rechecks, update_stop_counters, min_liquidity_gate
 from app.services.state_service import (
     init as state_init,
     upsert_seen,
@@ -52,6 +53,7 @@ from app.services.state_service import (
     mark_candidate_alert_sent,
     update_candidate_message_id,
     update_promo_confirm,
+    should_mute,
 )
 
 logger = logging.getLogger(__name__)
@@ -175,31 +177,6 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         if e.type == "token_resolved":
             e.confidence = bump(e.confidence, CONF_WEIGHTS["token_resolved"], CAPS["heating"])
             e.reasons.append("token_resolved")
-            # Schedule delayed re-evaluations to allow metrics to accumulate.
-            async def _delayed_recheck(delay_sec: int) -> None:
-                await asyncio.sleep(delay_sec)
-                ts_check = state.tokens.get(e.token)
-                if not ts_check or ts_check.is_promoted:
-                    return
-                try:
-                    await process_event(
-                        state,
-                        Event(
-                            type="recheck",
-                            source="engine",
-                            token=e.token,
-                            creator=ts_check.creator,
-                            confidence=0.0,
-                            reasons=[f"scheduled_recheck_{delay_sec}s"],
-                            extra=dict(e.extra),
-                        ),
-                    )
-                except Exception:
-                    logger.info("[recheck] token=%s delay=%ss failed", e.token, delay_sec)
-
-            asyncio.create_task(_delayed_recheck(30))
-            asyncio.create_task(_delayed_recheck(60))
-            asyncio.create_task(_delayed_recheck(120))
 
         extra: Dict[str, Any] = dict(e.extra)
         if ENABLE_DEX:
@@ -334,6 +311,71 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     float(creator_score_info.get("score") or 0.0),
                     lifecycle,
                 )
+                # Determine recheck stage
+                stage = "A"
+                if (
+                    attention_score >= 0.25
+                    or (attn_metrics.get("unique_buyers_5m") or 0) >= 5
+                    or ("liquidity" in improved_keys)
+                ):
+                    stage = "B"
+                if (
+                    e.confidence >= 0.50
+                    or extra.get("candidate_send")
+                    or float(creator_score_info.get("score") or 0.0) >= 0.5
+                ):
+                    stage = "C"
+
+                cand_state = get_candidate_state(e.token)
+                now_ts = int(time.time())
+                # Stop conditions
+                if cand_state:
+                    flat_stop = update_stop_counters(
+                        e.token,
+                        float(cand_state.get("last_liquidity") or 0.0),
+                        current_metrics.get("liquidity") or 0.0,
+                        int(cand_state.get("last_unique_buyers") or 0),
+                        int(current_metrics.get("unique_buyers_5m") or 0),
+                        CAND_MIN_CURVE_LIQ_USD,
+                    )
+                    if flat_stop:
+                        logger.info("[recheck-stop] token=%s reason=flat_metrics", e.token)
+                    age_sec = now_ts - int(cand_state.get("first_seen_at") or now_ts)
+                    if age_sec > 30 * 86400:
+                        logger.info("[recheck-stop] token=%s reason=age>30d", e.token)
+                    if age_sec > 7 * 86400 and float(cand_state.get("max_confidence") or 0.0) < 0.40:
+                        logger.info("[recheck-stop] token=%s reason=never_crossed_0.40", e.token)
+
+                # Schedule rechecks
+                if not should_mute(e.token):
+                    next_check_at = int(cand_state.get("next_check_at") or 0) if cand_state else 0
+                    if next_check_at and next_check_at > now_ts:
+                        pass
+                    else:
+                        if min_liquidity_gate(extra, CAND_MIN_CURVE_LIQ_USD):
+                            async def _recheck_fn(token: str) -> None:
+                                await process_event(
+                                    state,
+                                    Event(
+                                        type="recheck",
+                                        source="engine",
+                                        token=token,
+                                        creator=ts.creator,
+                                        confidence=0.0,
+                                        reasons=["scheduled_recheck"],
+                                        extra=dict(extra),
+                                    ),
+                                )
+                            e._recheck_fn = _recheck_fn  # type: ignore[attr-defined]
+                            asyncio.create_task(
+                                schedule_rechecks(
+                                    state,
+                                    e,
+                                    extra,
+                                    CAND_MIN_CURVE_LIQ_USD,
+                                    stage,
+                                )
+                            )
                 out.append(
                     Event(
                         type="candidate",
