@@ -14,12 +14,10 @@ AMBER = 0xF4C430
 DARK_RED = 0xC0392B
 
 
-def _short_addr(addr: str | None) -> str:
+def _full_addr(addr: str | None) -> str:
     if not addr:
         return "unknown"
-    if len(addr) <= 8:
-        return addr
-    return f"{addr[:4]}{addr[-4:]}"
+    return addr
 
 
 def _fmt_num(value: float | int | None, decimals: int = 0) -> str:
@@ -101,14 +99,14 @@ def _format_change_pct(value: float | int | None) -> str | None:
     return f"{sign}{num:.1f}%"
 
 
-def render_confidence_bar(score: float) -> str:
+def render_confidence_pct(score: float) -> str:
     blocks = 5
     try:
         clamped = max(0.0, min(1.0, float(score)))
     except Exception:
         clamped = 0.0
-    filled = int(round(clamped * blocks))
-    return ("■" * filled) + ("□" * (blocks - filled))
+    _ = blocks
+    return f"{int(round(clamped * 100))}%"
 
 
 def render_sparkline(points: list[float] | None, width: int = 8) -> str:
@@ -148,7 +146,7 @@ def _candidate_header(attention_score: float, risk_score: float) -> str:
         regime = "Radar (Active)"
     else:
         regime = "Radar (Active)"
-    return f"[ RADAR   WATCH ] {regime}"
+    return f"[RADAR  WATCH]  {regime}"
 
 
 def _promoted_header(final_score: float) -> str:
@@ -158,7 +156,7 @@ def _promoted_header(final_score: float) -> str:
         regime = "Signal (Normal)"
     else:
         regime = "Signal (Normal)"
-    return f"[ SIGNAL   VALIDATED ] {regime}"
+    return f"[SIGNAL  VALIDATED]  {regime}"
 
 
 def _wallet_signal_lines(risk_flags: dict) -> str:
@@ -216,7 +214,7 @@ def _lifecycle_label(raw: str | None) -> str:
 
 def _build_overview_lines(
     symbol: str,
-    short_addr: str,
+    full_addr: str,
     lines: list[str],
 ) -> list[str]:
     return [
@@ -224,33 +222,22 @@ def _build_overview_lines(
         f"  ${symbol}",
         "",
         "Contract",
-        f"  `{short_addr}`",
+        f"  `{full_addr}`",
         "",
         *lines,
     ]
 
 
 def _build_market_snapshot_lines(
-    change_24h: str | None,
-    sparkline: str,
     liq: str,
     mc: str,
     liq_mc: str,
 ) -> list[str]:
-    lines = []
-    if change_24h is not None:
-        change_line = f"24h Change {change_24h}"
-        if sparkline:
-            change_line = f"{change_line}  {sparkline}"
-        lines.append(change_line)
-    lines.extend(
-        [
-            f"Liquidity {liq}",
-            f"Market Cap {mc}",
-            f"Liq / MC {liq_mc}",
-        ]
-    )
-    return lines
+    return [
+        f"Liquidity {liq}",
+        f"Market Cap {mc}",
+        f"Liq / MC {liq_mc}",
+    ]
 
 
 def _divider_field() -> dict:
@@ -260,7 +247,7 @@ def _divider_field() -> dict:
 def _format_candidate_like(e: Event, description: str) -> dict:
     token = e.token or "unknown"
     symbol = _symbol_from_event(e)
-    short_addr = _short_addr(token)
+    full_addr = _full_addr(token)
     attention_score = 0.0
     risk_score = 0.0
     if isinstance(e.extra, dict):
@@ -268,17 +255,15 @@ def _format_candidate_like(e: Event, description: str) -> dict:
         risk_score = float(e.extra.get("risk_score") or 0.0)
 
     metrics = _extract_metrics(e)
-    confidence_bar = render_confidence_bar(e.confidence)
-    change_24h = _format_change_pct(metrics.get("price_change_h24"))
-    sparkline = render_sparkline(metrics.get("price_points"))
+    confidence_pct = render_confidence_pct(e.confidence)
     mc_value = metrics.get("market_cap")
     liq_value = metrics.get("liq")
-    liq_mc = "-"
+    liq_mc = "—"
     try:
         if mc_value and float(mc_value) > 0 and liq_value is not None:
             liq_mc = f"{round((float(liq_value) / float(mc_value)) * 100)}%"
     except Exception:
-        liq_mc = "-"
+        liq_mc = "—"
 
     fields = [
         {
@@ -286,11 +271,11 @@ def _format_candidate_like(e: Event, description: str) -> dict:
             "value": _section_lines(
                 _build_overview_lines(
                     symbol,
-                    short_addr,
+                    full_addr,
                     [
                         _label_value("Attention", f"{attention_score:.2f}"),
                         _label_value("Risk", f"{risk_score:.2f}"),
-                        _label_value("Confidence", f"{confidence_bar} ({int(round(e.confidence * 100))}%)"),
+                        _label_value("Confidence", confidence_pct),
                         _label_value("Lifecycle", _lifecycle_label(metrics.get("lifecycle"))),
                     ],
                 )
@@ -302,8 +287,6 @@ def _format_candidate_like(e: Event, description: str) -> dict:
             "name": "Market",
             "value": _section_lines(
                 _build_market_snapshot_lines(
-                    change_24h,
-                    sparkline,
                     _fmt_usd(metrics["liq"]),
                     _fmt_usd(mc_value),
                     liq_mc,
@@ -343,7 +326,7 @@ def _format_candidate_like(e: Event, description: str) -> dict:
 def format_discord(e: Event) -> dict:
     token = e.token or "unknown"
     symbol = _symbol_from_event(e)
-    short_addr = _short_addr(token)
+    full_addr = _full_addr(token)
 
     if e.type == "promoted":
         reasons = []
@@ -352,17 +335,15 @@ def format_discord(e: Event) -> dict:
         rscore = float(e.extra.get("risk_score") or 0.0) if isinstance(e.extra, dict) else 0.0
         ascore = float(e.extra.get("attention_score") or 0.0) if isinstance(e.extra, dict) else 0.0
         metrics = _extract_metrics(e)
-        confidence_bar = render_confidence_bar(e.confidence)
-        change_24h = _format_change_pct(metrics.get("price_change_h24"))
-        sparkline = render_sparkline(metrics.get("price_points"))
+        confidence_pct = render_confidence_pct(e.confidence)
         mc_value = metrics.get("market_cap")
         liq_value = metrics.get("liq")
-        liq_mc = "-"
+        liq_mc = "—"
         try:
             if mc_value and float(mc_value) > 0 and liq_value is not None:
                 liq_mc = f"{round((float(liq_value) / float(mc_value)) * 100)}%"
         except Exception:
-            liq_mc = "-"
+            liq_mc = "—"
 
         fields = [
             {
@@ -370,10 +351,10 @@ def format_discord(e: Event) -> dict:
                 "value": _section_lines(
                     _build_overview_lines(
                         symbol,
-                        short_addr,
+                        full_addr,
                         [
                             _label_value("Final Score", f"{e.confidence:.2f} (0.75)"),
-                            _label_value("Confidence", f"{confidence_bar} ({int(round(e.confidence * 100))}%)"),
+                            _label_value("Confidence", confidence_pct),
                             _label_value("Risk", f"{rscore:.2f}"),
                             _label_value("Attention", f"{ascore:.2f}"),
                             _label_value("Lifecycle", _lifecycle_label(metrics.get("lifecycle"))),
@@ -389,8 +370,6 @@ def format_discord(e: Event) -> dict:
                 "name": "Market",
                 "value": _section_lines(
                     _build_market_snapshot_lines(
-                        change_24h,
-                        sparkline,
                         _fmt_usd(metrics["liq"]),
                         _fmt_usd(mc_value),
                         liq_mc,
