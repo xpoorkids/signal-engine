@@ -24,11 +24,11 @@ def _short_addr(addr: str | None) -> str:
 
 def _fmt_num(value: float | int | None, decimals: int = 0) -> str:
     if value is None:
-        return "-"
+        return "—"
     try:
         num = float(value)
     except Exception:
-        return "-"
+        return "—"
     if decimals <= 0:
         return f"{num:,.0f}"
     return f"{num:,.{decimals}f}"
@@ -36,21 +36,21 @@ def _fmt_num(value: float | int | None, decimals: int = 0) -> str:
 
 def _fmt_usd(value: float | int | None) -> str:
     if value is None:
-        return "-"
+        return "—"
     try:
         num = float(value)
     except Exception:
-        return "-"
+        return "—"
     return f"${num:,.0f}"
 
 
 def _fmt_age_minutes(age: float | int | None) -> str:
     if age is None:
-        return "-"
+        return "—"
     try:
         num = float(age)
     except Exception:
-        return "-"
+        return "—"
     return f"{num:.1f}m"
 
 
@@ -108,7 +108,7 @@ def render_confidence_bar(score: float) -> str:
     except Exception:
         clamped = 0.0
     filled = int(round(clamped * blocks))
-    return ("#" * filled) + ("-" * (blocks - filled))
+    return ("■" * filled) + ("□" * (blocks - filled))
 
 
 def render_sparkline(points: list[float] | None, width: int = 8) -> str:
@@ -132,9 +132,9 @@ def render_sparkline(points: list[float] | None, width: int = 8) -> str:
     return "".join(out)
 
 
-def _section_lines(lines: list[str], indent: int = 2, bar: str = "|") -> str:
+def _section_lines(lines: list[str], indent: int = 2) -> str:
     pad = " " * indent
-    return "\n".join(f"{bar}{pad}{line}" for line in lines if line)
+    return "\n".join(f"{pad}{line}" for line in lines if line)
 
 
 def _candidate_header(attention_score: float, risk_score: float) -> str:
@@ -176,7 +176,7 @@ def _wallet_signal_lines(risk_flags: dict) -> str:
         if len(lines) >= 3:
             break
     if not lines:
-        return "organic holder distribution"
+        return "- organic holder distribution"
     return "\n".join(lines)
 
 
@@ -200,14 +200,32 @@ def _fmt_title(e: Event) -> str:
     return f"INFO {e.type}"
 
 
+def _label_value(label: str, value: str, width: int = 14) -> str:
+    return f"{label:<{width}}{value}"
+
+
+def _lifecycle_label(raw: str | None) -> str:
+    if not raw:
+        return "Unknown"
+    if raw == "bonding_curve":
+        return "Bonding Curve"
+    if raw == "dex":
+        return "Dex"
+    return raw.replace("_", " ").title()
+
+
 def _build_overview_lines(
     symbol: str,
     short_addr: str,
     lines: list[str],
 ) -> list[str]:
     return [
-        f"Token ${symbol}",
-        f"Address `{short_addr}`",
+        "Token",
+        f"  ${symbol}",
+        "",
+        "Contract",
+        f"  `{short_addr}`",
+        "",
         *lines,
     ]
 
@@ -233,6 +251,10 @@ def _build_market_snapshot_lines(
         ]
     )
     return lines
+
+
+def _divider_field() -> dict:
+    return {"name": " ", "value": " ", "inline": False}
 
 
 def _format_candidate_like(e: Event, description: str) -> dict:
@@ -266,17 +288,18 @@ def _format_candidate_like(e: Event, description: str) -> dict:
                     symbol,
                     short_addr,
                     [
-                        f"Attention {attention_score:.2f}",
-                        f"Risk {risk_score:.2f}",
-                        f"Confidence {confidence_bar} ({int(round(e.confidence * 100))}%)",
-                        f"Lifecycle {metrics.get('lifecycle')}",
+                        _label_value("Attention", f"{attention_score:.2f}"),
+                        _label_value("Risk", f"{risk_score:.2f}"),
+                        _label_value("Confidence", f"{confidence_bar} ({int(round(e.confidence * 100))}%)"),
+                        _label_value("Lifecycle", _lifecycle_label(metrics.get("lifecycle"))),
                     ],
                 )
             ),
             "inline": False,
         },
+        _divider_field(),
         {
-            "name": "Market Snapshot",
+            "name": "Market",
             "value": _section_lines(
                 _build_market_snapshot_lines(
                     change_24h,
@@ -288,16 +311,18 @@ def _format_candidate_like(e: Event, description: str) -> dict:
             ),
             "inline": False,
         },
+        _divider_field(),
         {
             "name": "Wallet Signals",
             "value": _section_lines([_wallet_signal_lines(metrics.get("risk_flags"))]),
             "inline": False,
         },
+        _divider_field(),
         {
             "name": "Links",
             "value": _section_lines(
                 [
-                    f"[Dexscreener](https://dexscreener.com/solana/{token})",
+                    f"[Dexscreener](https://dexscreener.com/solana/{token}) | "
                     f"[Birdeye](https://birdeye.so/token/{token}?chain=solana)",
                 ]
             ),
@@ -347,20 +372,21 @@ def format_discord(e: Event) -> dict:
                         symbol,
                         short_addr,
                         [
-                            f"Final Score {e.confidence:.2f} (0.75)",
-                            f"Confidence {confidence_bar} ({int(round(e.confidence * 100))}%)",
-                            f"Risk {rscore:.2f}",
-                            f"Attention {ascore:.2f}",
-                            f"Lifecycle {metrics.get('lifecycle')}",
+                            _label_value("Final Score", f"{e.confidence:.2f} (0.75)"),
+                            _label_value("Confidence", f"{confidence_bar} ({int(round(e.confidence * 100))}%)"),
+                            _label_value("Risk", f"{rscore:.2f}"),
+                            _label_value("Attention", f"{ascore:.2f}"),
+                            _label_value("Lifecycle", _lifecycle_label(metrics.get("lifecycle"))),
                         ],
                     )
                 ),
                 "inline": False,
             }
         ]
+        fields.append(_divider_field())
         fields.append(
             {
-                "name": "Market Snapshot",
+                "name": "Market",
                 "value": _section_lines(
                     _build_market_snapshot_lines(
                         change_24h,
@@ -373,6 +399,7 @@ def format_discord(e: Event) -> dict:
                 "inline": False,
             }
         )
+        fields.append(_divider_field())
         fields.append(
             {
                 "name": "Wallet Signals",
@@ -381,6 +408,7 @@ def format_discord(e: Event) -> dict:
             }
         )
         if reasons:
+            fields.append(_divider_field())
             fields.append(
                 {
                     "name": "Why Promoted",
@@ -388,12 +416,13 @@ def format_discord(e: Event) -> dict:
                     "inline": False,
                 }
             )
+        fields.append(_divider_field())
         fields.append(
             {
                 "name": "Links",
                 "value": _section_lines(
                     [
-                        f"[Dexscreener](https://dexscreener.com/solana/{token})",
+                        f"[Dexscreener](https://dexscreener.com/solana/{token}) | "
                         f"[Birdeye](https://birdeye.so/token/{token}?chain=solana)",
                     ]
                 ),
