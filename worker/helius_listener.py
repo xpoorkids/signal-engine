@@ -62,6 +62,10 @@ _LOG_SWAP_PATTERNS = [
     re.compile(r"buy", re.IGNORECASE),
 ]
 
+# signature-level dedup cache
+_recent_buy_signatures: Dict[Tuple[str, str], float] = {}
+DEDUP_TTL_SECONDS = 60
+
 
 def _is_buy_log(logs: list[str]) -> bool:
     for line in logs:
@@ -515,11 +519,24 @@ class LogSwapProcessor:
             await self._emit_trade_buy(signature, tx, buy)
 
     async def _emit_trade_buy(self, signature: str, tx: Dict[str, Any], buy: Dict[str, Any]) -> None:
+        now = time.time()
+        mint = buy.get("mint")
+        dedup_key = (signature, mint)
+        expired = [
+            k for k, ts in _recent_buy_signatures.items()
+            if now - ts > DEDUP_TTL_SECONDS
+        ]
+        for k in expired:
+            del _recent_buy_signatures[k]
+        if dedup_key in _recent_buy_signatures:
+            print(f"[dedup-skip] sig={signature} token={mint}", flush=True)
+            return
+        _recent_buy_signatures[dedup_key] = now
         event = Event(
             type="trade_buy",
             source="logs",
             signature=signature,
-            token=buy.get("mint"),
+            token=mint,
             slot=tx.get("slot"),
             confidence=0.0,
             reasons=["balance_increase_detected"],

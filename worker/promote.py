@@ -36,7 +36,7 @@ from worker.wallet_risk import score_wallet_risk
 from worker.dex import dex_enrich_token, select_best_pair, summarize_pair
 from worker.forensics import analyze_risk
 from worker.execution import estimate_edge
-from worker.attention import compute_attention
+from worker.attention import compute_attention, register_buyer
 from worker.metadata import fetch_token_metadata
 from worker.alert_gate import evaluate_alert_gate, admission_check_candidate
 from worker.creator_score import compute_creator_score
@@ -146,7 +146,19 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
 
         buyer = e.extra.get("buyer") if isinstance(e.extra, dict) else None
         if buyer:
-            state.record_buyer(e.token, buyer, ts=e.ts)
+            delta_raw = None
+            decimals = None
+            if isinstance(e.extra, dict):
+                delta_raw = e.extra.get("delta_raw")
+                decimals = e.extra.get("decimals")
+            delta = None
+            try:
+                if delta_raw is not None:
+                    delta = float(delta_raw) / (10 ** int(decimals or 0))
+            except Exception:
+                delta = None
+            weight = register_buyer(e.token, buyer, delta)
+            state.record_buyer(e.token, buyer, ts=e.ts, weight=weight)
 
         attention_score = 0.0
         attn_reasons: list[str] = []

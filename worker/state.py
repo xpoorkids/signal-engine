@@ -23,7 +23,7 @@ class EngineState:
     seen_signatures: Dict[str, float] = field(default_factory=dict)
     tokens: Dict[str, TokenState] = field(default_factory=dict)
     cooldown: Dict[str, float] = field(default_factory=dict)
-    _buyer_trades: Dict[str, list[tuple[float, str]]] = field(default_factory=dict)
+    _buyer_trades: Dict[str, list[tuple[float, str, int]]] = field(default_factory=dict)
 
     def wallet_cluster_ratio(self, token: Optional[str]) -> float:
         return 0.0
@@ -45,7 +45,7 @@ class EngineState:
             return 0
         now = time.time()
         cutoff = now - 60
-        count = sum(1 for ts, _ in trades if ts >= cutoff)
+        count = sum(weight for ts, _, weight in trades if ts >= cutoff)
         print(f"[attention] burst_count_60s token={token} count={count}", flush=True)
         return count
 
@@ -57,7 +57,7 @@ class EngineState:
             return 0
         now = time.time()
         cutoff = now - 300
-        buyers = {buyer for ts, buyer in trades if ts >= cutoff}
+        buyers = {buyer for ts, buyer, _ in trades if ts >= cutoff}
         count = len(buyers)
         print(f"[attention] unique_buyers_5m token={token} count={count}", flush=True)
         return count
@@ -70,26 +70,32 @@ class EngineState:
             return 0
         now = time.time()
         cutoff = now - 900
-        return len({buyer for ts, buyer in trades if ts >= cutoff})
+        return len({buyer for ts, buyer, _ in trades if ts >= cutoff})
 
     def has_basic_liquidity(self, token: Optional[str]) -> bool:
         return True
 
-    def record_buyer(self, token: Optional[str], buyer: Optional[str], ts: Optional[float] = None) -> None:
+    def record_buyer(
+        self,
+        token: Optional[str],
+        buyer: Optional[str],
+        ts: Optional[float] = None,
+        weight: int = 1,
+    ) -> None:
         if not token or not buyer:
             return
         now = ts if ts is not None else time.time()
         trades = self._buyer_trades.setdefault(token, [])
-        seen_buyers = {b for _, b in trades}
-        trades.append((now, buyer))
+        seen_buyers = {b for _, b, _ in trades}
+        trades.append((now, buyer, int(weight)))
         if buyer not in seen_buyers:
             print(f"[attention] new_buyer token={token} buyer={buyer}", flush=True)
         cutoff = now - 300
-        count = len({b for t, b in trades if t >= cutoff})
+        count = len({b for t, b, _ in trades if t >= cutoff})
         print(f"[buyer-count] token={token} unique_buyers_5m={count}", flush=True)
         cutoff = now - 600
         if len(trades) > 1000:
-            trades[:] = [(t, b) for t, b in trades if t >= cutoff]
+            trades[:] = [(t, b, w) for t, b, w in trades if t >= cutoff]
         else:
             while trades and trades[0][0] < cutoff:
                 trades.pop(0)

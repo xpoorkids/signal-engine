@@ -1,13 +1,13 @@
 import asyncio
 import json
 import time
-from collections import deque
+from collections import deque, defaultdict
 from typing import Tuple, List, Dict, Any, Optional
 import threading
 
 import requests
 
-from worker.config import ENABLE_PUMPORTAL, BIRDEYE_API_KEY
+from worker.config import ENABLE_PUMPORTAL, ENABLE_BIRDEYE, BIRDEYE_API_KEY
 
 DEXSCREENER_ORDERS_URL = "https://api.dexscreener.com/orders/v1/solana/{token}"
 DEX_CACHE_TTL_SEC = 30
@@ -18,6 +18,56 @@ DEXSCREENER_BOOST_THRESHOLD = 1
 PUMPORTAL_TRADE_BURST_THRESHOLD = 20
 
 _DEX_CACHE: Dict[str, tuple[float, Any]] = {}
+_recent_buyers_10s: Dict[str, deque[tuple[str, float]]] = defaultdict(deque)
+_recent_wallet_buys_15s: Dict[str, deque[tuple[str, float]]] = defaultdict(deque)
+
+
+def _compute_burst_weight(delta: float) -> int:
+    if delta < 0.2:
+        return 1
+    if delta < 1:
+        return 2
+    return 4
+
+
+def register_buyer(mint: str, buyer: str, delta: float | None = None) -> int:
+    if not mint or not buyer:
+        return 1
+    weight = _compute_burst_weight(float(delta or 0.0))
+    print(f"[burst-weight] token={mint} delta={float(delta or 0.0)} weight={weight}", flush=True)
+
+    now = time.time()
+    dq = _recent_wallet_buys_15s[mint]
+    dq.append((buyer, now))
+    while dq and now - dq[0][1] > 15:
+        dq.popleft()
+    recent_wallets = [b for b, _ in dq]
+    if recent_wallets.count(buyer) >= 2 and len(set(recent_wallets)) == 1:
+        weight = max(1, weight - 1)
+        print(f"[anti-wash-adjust] token={mint} buyer={buyer} new_weight={weight}", flush=True)
+
+    dq10 = _recent_buyers_10s[mint]
+    dq10.append((buyer, now))
+    while dq10 and now - dq10[0][1] > 10:
+        dq10.popleft()
+    unique_10s = len(set(b for b, _ in dq10))
+    acceleration_boost = 0.10 if unique_10s >= 3 else 0.0
+    print(f"[acceleration] token={mint} unique_10s={unique_10s} boost={acceleration_boost}", flush=True)
+
+    return weight
+
+
+def _acceleration_boost(mint: str) -> float:
+    if not mint:
+        return 0.0
+    now = time.time()
+    dq10 = _recent_buyers_10s[mint]
+    while dq10 and now - dq10[0][1] > 10:
+        dq10.popleft()
+    unique_10s = len(set(b for b, _ in dq10))
+    boost = 0.10 if unique_10s >= 3 else 0.0
+    print(f"[acceleration] token={mint} unique_10s={unique_10s} boost={boost}", flush=True)
+    return boost
 
 
 class _PumpPortalTracker:
@@ -230,7 +280,8 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
     birdeye_score = 0.0
     be = _birdeye_trending(token) if token else None
     if be is None:
-        reasons.append("source_unavailable:birdeye")
+        if ENABLE_BIRDEYE:
+            reasons.append("source_unavailable:birdeye")
     else:
         metrics["birdeye_trending"] = be.get("rank") is not None
         metrics["birdeye_rank"] = be.get("rank")
@@ -249,9 +300,11 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
                 pumpportal_score = 0.20
                 reasons.append("pumpportal_trade_burst")
     else:
-        reasons.append("source_unavailable:pumpportal")
+        if ENABLE_PUMPORTAL:
+            reasons.append("source_unavailable:pumpportal")
 
     attention_score = local + dex_boost + birdeye_score + pumpportal_score
+    attention_score += _acceleration_boost(token or "")
     attention_score = max(0.0, min(attention_score, 1.0))
     print(
         "[attention-components] token=%s local_buyers=%.2f local_burst=%.2f local_15m=%.2f dex_boosts=%s total=%.2f"
