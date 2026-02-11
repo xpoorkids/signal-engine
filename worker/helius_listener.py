@@ -568,6 +568,9 @@ async def listen(q: asyncio.Queue) -> None:
 
                     try:
                         result = msg.get("params", {}).get("result", {})
+                        sig = result.get("signature")
+                        if sig:
+                            print(f"[tx-received] signature={sig}", flush=True)
                         tx = {
                             "transaction": result.get("transaction"),
                             "meta": result.get("meta"),
@@ -668,25 +671,23 @@ async def listen(q: asyncio.Queue) -> None:
                             if not last_seen or now - last_seen > 300:
                                 trade_accounts = accounts & (PUMP_TRADE_PROGRAM_IDS | RAYDIUM_PROGRAM_IDS)
                                 if trade_accounts:
-                                    full_tx = _resolve_tx_from_sig(sig)
-                                    if full_tx:
-                                        recent_balance_signatures[sig] = now
-                                        for trade_mint, trade_buyer in extract_buyers_from_balance_deltas(full_tx):
-                                            print(
-                                                f"[buyer-detected] token={trade_mint} wallet={trade_buyer}",
-                                                flush=True,
+                                    recent_balance_signatures[sig] = now
+                                    for trade_mint, trade_buyer in extract_buyers_from_balance_deltas(tx):
+                                        print(
+                                            f"[buyer-detected] token={trade_mint} wallet={trade_buyer}",
+                                            flush=True,
+                                        )
+                                        await emit_event(
+                                            Event(
+                                                type="trade_buy",
+                                                source="tx_balance",
+                                                signature=sig,
+                                                token=trade_mint,
+                                                confidence=0.0,
+                                                reasons=["balance_increase_detected"],
+                                                extra={"buyer": trade_buyer},
                                             )
-                                            await emit_event(
-                                                Event(
-                                                    type="trade_buy",
-                                                    source="tx_balance",
-                                                    signature=sig,
-                                                    token=trade_mint,
-                                                    confidence=0.0,
-                                                    reasons=["balance_increase_detected"],
-                                                    extra={"buyer": trade_buyer},
-                                                )
-                                            )
+                                        )
                     except Exception as e:
                         print("[buyer-detected] balance delta failed:", e, flush=True)
 
