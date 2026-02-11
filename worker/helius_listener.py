@@ -61,12 +61,17 @@ PUMP_TRADE_PROGRAM_IDS = {
     "pmpn6JtN6P1q7xvJ5tJqGJZ3dXz7Jp6o4KkZc8KZz9G",
 }
 
+RAYDIUM_PROGRAM_IDS = {
+    "RVKd61ztZW9L5GxF3XH9RZy5D3R1xYbC5nZ5qZpZr2D",
+}
+
 # Raydium + Orca + Pump.fun program IDs
 PROGRAM_IDS = [
     "RVKd61ztZW9L5GxF3XH9RZy5D3R1xYbC5nZ5qZpZr2D",  # Raydium AMM (example)
     "whirLb8k1ZrZg2KqYF9rXy2rZpZqv2X6kz5n",          # Orca Whirlpool (example)
     PUMP_FUN_PROGRAM_ID,
     *sorted(PUMP_TRADE_PROGRAM_IDS),
+    *sorted(RAYDIUM_PROGRAM_IDS),
 ]
 
 def extract_mint_from_inner_instructions(tx: dict) -> str | None:
@@ -313,6 +318,39 @@ def _resolve_mint_and_buyer_from_sig(sig: str) -> tuple[str | None, str | None]:
         _log_rpc_issue("getTransaction exception")
         return None, None
 
+
+def _resolve_tx_from_sig(sig: str) -> dict | None:
+    if not sig or not HELIUS_RPC:
+        _log_rpc_issue("missing_sig_or_rpc_url")
+        return None
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTransaction",
+            "params": [
+                sig,
+                {
+                    "encoding": "jsonParsed",
+                    "commitment": "confirmed",
+                    "maxSupportedTransactionVersion": 0,
+                },
+            ],
+        }
+        r = requests.post(HELIUS_RPC, json=payload, timeout=8)
+        if r.status_code >= 300:
+            _log_rpc_issue(f"getTransaction status={r.status_code} body={r.text[:120]}")
+            return None
+        data = r.json()
+        result = data.get("result")
+        if not result:
+            _log_rpc_issue("getTransaction result=null")
+            return None
+        return {"transaction": result.get("transaction"), "meta": result.get("meta")}
+    except Exception:
+        _log_rpc_issue("getTransaction exception")
+        return None
+
 async def listen(q: asyncio.Queue) -> None:
     if not HELIUS_KEY:
         print("[helius] missing HELIUS_API_KEY", flush=True)
@@ -349,6 +387,7 @@ async def listen(q: asyncio.Queue) -> None:
     pending_log_signatures: dict[str, float] = {}
     resolved_log_signatures: dict[str, float] = {}
     recent_buy_signatures: dict[str, float] = {}
+    recent_balance_signatures: dict[str, float] = {}
     last_lookup_ts = 0.0
     last_buy_lookup_ts = 0.0
     last_pending_check = 0.0
@@ -488,6 +527,10 @@ async def listen(q: asyncio.Queue) -> None:
                                 stale = [s for s, ts in recent_buy_signatures.items() if now - ts > 900]
                                 for s in stale:
                                     recent_buy_signatures.pop(s, None)
+                            if recent_balance_signatures:
+                                stale = [s for s, ts in recent_balance_signatures.items() if now - ts > 900]
+                                for s in stale:
+                                    recent_balance_signatures.pop(s, None)
                             for sig, first_seen in list(pending_log_signatures.items())[:5]:
                                 if sig in resolved_log_signatures:
                                     pending_log_signatures.pop(sig, None)
@@ -544,6 +587,7 @@ async def listen(q: asyncio.Queue) -> None:
                             print("[pump] PROGRAM SEEN", list(seen), flush=True)
                     except Exception as e:
                         print("[pump] PROGRAM SEEN check failed:", e, flush=True)
+                        accounts = set()
 
                     try:
                         new_mints = extract_new_mints_from_token_balances(tx)
@@ -618,23 +662,31 @@ async def listen(q: asyncio.Queue) -> None:
                         print("[buyer-detected] tx parse failed:", e, flush=True)
 
                     try:
-                        for trade_mint, trade_buyer in extract_buyers_from_balance_deltas(tx):
-                            sig = result.get("signature")
-                            print(
-                                f"[buyer-detected] token={trade_mint} wallet={trade_buyer}",
-                                flush=True,
-                            )
-                            await emit_event(
-                                Event(
-                                    type="trade_buy",
-                                    source="tx_balance",
-                                    signature=sig,
-                                    token=trade_mint,
-                                    confidence=0.0,
-                                    reasons=["balance_increase_detected"],
-                                    extra={"buyer": trade_buyer},
-                                )
-                            )
+                        sig = result.get("signature")
+                        if sig:
+                            last_seen = recent_balance_signatures.get(sig)
+                            if not last_seen or now - last_seen > 300:
+                                trade_accounts = accounts & (PUMP_TRADE_PROGRAM_IDS | RAYDIUM_PROGRAM_IDS)
+                                if trade_accounts:
+                                    full_tx = _resolve_tx_from_sig(sig)
+                                    if full_tx:
+                                        recent_balance_signatures[sig] = now
+                                        for trade_mint, trade_buyer in extract_buyers_from_balance_deltas(full_tx):
+                                            print(
+                                                f"[buyer-detected] token={trade_mint} wallet={trade_buyer}",
+                                                flush=True,
+                                            )
+                                            await emit_event(
+                                                Event(
+                                                    type="trade_buy",
+                                                    source="tx_balance",
+                                                    signature=sig,
+                                                    token=trade_mint,
+                                                    confidence=0.0,
+                                                    reasons=["balance_increase_detected"],
+                                                    extra={"buyer": trade_buyer},
+                                                )
+                                            )
                     except Exception as e:
                         print("[buyer-detected] balance delta failed:", e, flush=True)
 
@@ -707,6 +759,14 @@ async def listen(q: asyncio.Queue) -> None:
                     now = time.time()
                     if ENABLE_LOGS_TX_LOOKUP and now - last_pending_check > 1.0 and pending_log_signatures:
                         last_pending_check = now
+                        if recent_buy_signatures:
+                            stale = [s for s, ts in recent_buy_signatures.items() if now - ts > 900]
+                            for s in stale:
+                                recent_buy_signatures.pop(s, None)
+                        if recent_balance_signatures:
+                            stale = [s for s, ts in recent_balance_signatures.items() if now - ts > 900]
+                            for s in stale:
+                                recent_balance_signatures.pop(s, None)
                         for sig, first_seen in list(pending_log_signatures.items())[:5]:
                             if sig in resolved_log_signatures:
                                 pending_log_signatures.pop(sig, None)
