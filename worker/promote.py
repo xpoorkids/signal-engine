@@ -1,6 +1,7 @@
 from typing import Dict, Any
 import logging
 import time
+import asyncio
 from worker.events import Event
 from worker.state import EngineState, bump_token
 from worker.config import (
@@ -174,6 +175,31 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         if e.type == "token_resolved":
             e.confidence = bump(e.confidence, CONF_WEIGHTS["token_resolved"], CAPS["heating"])
             e.reasons.append("token_resolved")
+            # Schedule delayed re-evaluations to allow metrics to accumulate.
+            async def _delayed_recheck(delay_sec: int) -> None:
+                await asyncio.sleep(delay_sec)
+                ts_check = state.tokens.get(e.token)
+                if not ts_check or ts_check.is_promoted:
+                    return
+                try:
+                    await process_event(
+                        state,
+                        Event(
+                            type="recheck",
+                            source="engine",
+                            token=e.token,
+                            creator=ts_check.creator,
+                            confidence=0.0,
+                            reasons=[f"scheduled_recheck_{delay_sec}s"],
+                            extra=dict(e.extra),
+                        ),
+                    )
+                except Exception:
+                    logger.info("[recheck] token=%s delay=%ss failed", e.token, delay_sec)
+
+            asyncio.create_task(_delayed_recheck(30))
+            asyncio.create_task(_delayed_recheck(60))
+            asyncio.create_task(_delayed_recheck(120))
 
         extra: Dict[str, Any] = dict(e.extra)
         if ENABLE_DEX:
@@ -353,6 +379,28 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 exec_bonus,
             )
 
+        # Dynamic confidence scoring
+        liq_usd = 0.0
+        if isinstance(extra, dict):
+            liq_usd = float((extra.get("dex_summary") or {}).get("liquidity_usd") or 0.0)
+        liquidity_factor = min(liq_usd / PROM_MIN_LIQ_USD, 1.0) if PROM_MIN_LIQ_USD > 0 else 0.0
+        creator_score = float(creator_score_info.get("score") or 0.0)
+        e.confidence = (
+            (attention_score * 0.40)
+            + ((1.0 - risk_score) * 0.30)
+            + (creator_score * 0.20)
+            + (liquidity_factor * 0.10)
+        )
+        e.confidence = max(0.0, min(1.0, e.confidence))
+        logger.info(
+            "[score-components] token=%s attention=%.3f risk=%.3f creator=%.3f liquidity_factor=%.3f final_score=%.3f",
+            e.token,
+            attention_score,
+            risk_score,
+            creator_score,
+            liquidity_factor,
+            e.confidence,
+        )
         ts.confidence = max(ts.confidence, e.confidence)
         logger.info("[score] computed token=%s score=%.3f", e.token, e.confidence)
 
