@@ -294,18 +294,23 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 f"[liq-check] token={e.token} liq_usd={liq_usd} locked={1 if liq_locked else 0}",
                 flush=True,
             )
-            if liq_usd and liq_usd < 15000:
+            liquidity_unknown = False
+            if liq_usd == 0:
+                liquidity_unknown = True
+            elif liq_usd < 15000:
                 print(f"[risk-gate] token={e.token} reason=low_liquidity", flush=True)
                 hard_fail = True
-            if liq_drop:
-                print(f"[risk-gate] token={e.token} reason=liq_drop_spike", flush=True)
-                hard_fail = True
-            if liq_locked is False:
-                print(f"[risk-gate] token={e.token} reason=liq_unlocked", flush=True)
-                hard_fail = True
+            if not liquidity_unknown:
+                if liq_drop:
+                    print(f"[risk-gate] token={e.token} reason=liq_drop_spike", flush=True)
+                    hard_fail = True
+                if liq_locked is False:
+                    print(f"[risk-gate] token={e.token} reason=liq_unlocked", flush=True)
+                    hard_fail = True
         except Exception:
             liq_usd = 0.0
             liq_locked = None
+            liquidity_unknown = True
 
 
         unique_10s = 0
@@ -346,6 +351,20 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             flush=True,
         )
         extra["elite_score"] = elite_score
+
+        if liquidity_unknown:
+            if (
+                ENGINE_MODE == "balanced"
+                and unique_10s >= 3
+                and burst_10s >= 6
+                and elite_score >= 8
+            ):
+                print(
+                    f"[liq-unknown-bypass] token={e.token} unique_10s={unique_10s} burst10s={burst_10s}",
+                    flush=True,
+                )
+            else:
+                hard_fail = True
 
         if hard_fail:
             return out
