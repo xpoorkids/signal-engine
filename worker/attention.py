@@ -188,6 +188,7 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
     metrics: Dict[str, Any] = {
         "burst_count_60s": 0,
         "unique_buyers_5m": 0,
+        "unique_buyers_15m": 0,
         "dexscreener_boosts_count": 0,
         "pumportal_trade_burst": 0,
         "birdeye_trending": False,
@@ -204,6 +205,10 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         metrics["unique_buyers_5m"] = int(state.unique_buyers_5m(token))
     except Exception:
         metrics["unique_buyers_5m"] = 0
+    try:
+        metrics["unique_buyers_15m"] = int(state.unique_buyers_15m(token))
+    except Exception:
+        metrics["unique_buyers_15m"] = 0
 
     if metrics["burst_count_60s"] >= 5:
         attention_score += 0.10

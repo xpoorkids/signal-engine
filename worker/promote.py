@@ -19,10 +19,16 @@ from worker.config import (
     ATTENTION_CANDIDATE_THRESHOLD,
     EXECUTION_BONUS_CAP,
     MIN_EDGE_BPS,
-    CREATOR_SCORE_MIN,
     CREATOR_RISK_WEIGHT,
-    CAND_MAX_PER_HOUR,
-    CAND_IMPROVE_PCT,
+    EARLY_CREATOR_MIN,
+    EARLY_WATCH_RATE_LIMIT_PER_HOUR,
+    PROGRESSION_ATTENTION_DELTA,
+    PROGRESSION_BUYER_DELTA,
+    PROGRESSION_LIQ_DELTA,
+    PROGRESSION_SCORE_DELTA,
+    PROM_MIN_LIQ_USD,
+    PROMOTION_MIN_ATTENTION,
+    PROMOTION_MAX_RISK,
 )
 from worker.confidence import CONF_WEIGHTS, CAPS, bump
 from worker.wallet_risk import score_wallet_risk
@@ -31,7 +37,7 @@ from worker.forensics import analyze_risk
 from worker.execution import estimate_edge
 from worker.attention import compute_attention
 from worker.alert_gate import evaluate_alert_gate, admission_check_candidate
-from worker.creator_score import score_creator
+from worker.creator_score import compute_creator_score
 from worker.progression import metrics_improved
 from app.services.state_service import (
     init as state_init,
@@ -40,6 +46,11 @@ from app.services.state_service import (
     record_candidate_sent,
     allow_candidate_rate_limit,
     record_creator_deploy,
+    get_candidate_state,
+    upsert_candidate_state,
+    mark_candidate_alert_sent,
+    update_candidate_message_id,
+    update_promo_confirm,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,13 +103,21 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
 
         creator_score_info = {"score": 0.0, "reasons": ["creator_unknown"], "stats": {}}
         if e.creator:
-            creator_score_info = score_creator(e.creator)
+            creator_score_info = compute_creator_score(e.creator)
             score_val = float(creator_score_info.get("score") or 0.0)
-            risk_score = min(1.0, risk_score + (1.0 - score_val) * CREATOR_RISK_WEIGHT)
+            risk_score = max(0.0, risk_score - (score_val * CREATOR_RISK_WEIGHT))
             e.extra["creator_score"] = score_val
             e.extra["creator_reasons"] = creator_score_info.get("reasons") or []
             e.extra["creator_stats"] = creator_score_info.get("stats") or {}
             e.extra["risk_score"] = risk_score
+            logger.info(
+                "[creator-score] token=%s creator=%s score=%.2f reasons=%s stats=%s",
+                e.token,
+                e.creator,
+                score_val,
+                e.extra["creator_reasons"],
+                e.extra["creator_stats"],
+            )
 
         buyer = e.extra.get("buyer") if isinstance(e.extra, dict) else None
         if buyer:
@@ -200,7 +219,14 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             "score": e.confidence,
         }
         upsert_seen(e.token, current_metrics)
-        improved, improved_keys = metrics_improved(prev_metrics, current_metrics, CAND_IMPROVE_PCT)
+        improved, improved_keys = metrics_improved(
+            prev_metrics,
+            current_metrics,
+            PROGRESSION_ATTENTION_DELTA,
+            PROGRESSION_BUYER_DELTA,
+            PROGRESSION_LIQ_DELTA,
+            PROGRESSION_SCORE_DELTA,
+        )
         prev_attention = float(prev_metrics.get("attention_score") or 0.0) if isinstance(prev_metrics, dict) else 0.0
 
         # ------------------------------------------------------------
@@ -243,10 +269,10 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     risk_score,
                     attn_reasons,
                 )
-                creator_ok = float(creator_score_info.get("score") or 0.0) >= CREATOR_SCORE_MIN
+                creator_ok = float(creator_score_info.get("score") or 0.0) >= EARLY_CREATOR_MIN
                 attention_improving = attention_score > prev_attention
-                send_eligible = creator_ok or attention_improving
-                allow_rate = allow_candidate_rate_limit(CAND_MAX_PER_HOUR) if send_eligible else False
+                send_eligible = creator_ok or attention_score >= 0.50
+                allow_rate = allow_candidate_rate_limit(EARLY_WATCH_RATE_LIMIT_PER_HOUR) if send_eligible else False
                 should_send = send_eligible and allow_rate
                 if not allow_rate:
                     if send_eligible:
@@ -255,11 +281,31 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     logger.info("[candidate-skip] reason=no_creator_or_improve token=%s", e.token)
 
                 extra["lifecycle"] = lifecycle
+                candidate_state = get_candidate_state(e.token)
+                alert_sent = bool(candidate_state.get("alert_sent"))
+                message_id = candidate_state.get("message_id") or ""
+                progression_ok = improved or not alert_sent
+                should_send = should_send and progression_ok
                 extra["candidate_send"] = should_send
+                extra["candidate_edit"] = alert_sent and improved
                 extra["candidate_improved"] = improved
                 extra["candidate_improved_keys"] = improved_keys
-                if should_send:
-                    record_candidate_sent(e.token)
+                extra["candidate_message_id"] = message_id
+                logger.info(
+                    "[candidate-progress] token=%s improved=%s keys=%s",
+                    e.token,
+                    improved,
+                    improved_keys,
+                )
+                upsert_candidate_state(
+                    e.token,
+                    attention_score,
+                    e.confidence,
+                    current_metrics.get("liquidity") or 0.0,
+                    current_metrics.get("unique_buyers_5m") or 0,
+                    float(creator_score_info.get("score") or 0.0),
+                    lifecycle,
+                )
                 out.append(
                     Event(
                         type="candidate",
@@ -308,6 +354,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         ts.confidence = max(ts.confidence, e.confidence)
         logger.info("[score] computed token=%s score=%.3f", e.token, e.confidence)
 
+        # Remove legacy heating_up sends; progression is handled via candidate updates.
         if 0.55 <= e.confidence < 0.80:
             gate_pass, gate_reasons = evaluate_alert_gate(
                 "heating_up",
@@ -320,44 +367,44 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     gate_reasons,
                 )
             else:
-                if improved:
-                    extra["candidate_send"] = True
-                    extra["candidate_improved"] = True
-                    extra["candidate_improved_keys"] = improved_keys
-                    out.append(
-                        Event(
-                            type="heating_up",
-                            source=e.source,
-                            token=e.token,
-                            creator=ts.creator,
-                            confidence=e.confidence,
-                            reasons=e.reasons,
-                            extra=extra,
-                            signature=e.signature,
-                        )
-                    )
+                pass
 
         if e.confidence >= 0.80 and e.token and not ts.is_promoted:
             dex_summary = extra.get("dex_summary") if isinstance(extra, dict) else None
             has_dex_pool = bool(dex_summary)
             if not has_dex_pool:
-                logger.info("[promote-skip] reason=no_dex_pool token=%s", e.token)
+                logger.info("[promotion-block] reason=no_dex_pool token=%s", e.token)
                 return out
-            if attention_score < ATTENTION_CANDIDATE_THRESHOLD:
-                logger.info(
-                    "[promote-skip] reason=attention_low token=%s attention=%.2f threshold=%.2f",
-                    e.token,
-                    attention_score,
-                    ATTENTION_CANDIDATE_THRESHOLD,
-                )
+            liq = float((dex_summary or {}).get("liquidity_usd") or 0.0)
+            buyers_15m = int(attn_metrics.get("unique_buyers_15m") or 0)
+            lp_drain = bool(extra.get("lp_drain"))
+            creator_sell = bool(extra.get("creator_sold"))
+            if liq < PROM_MIN_LIQ_USD:
+                logger.info("[promotion-block] reason=liq_low token=%s liq=%.0f", e.token, liq)
                 return out
-            if risk_score >= RISK_VETO_THRESHOLD:
-                logger.info(
-                    "[promote-skip] reason=risk_veto token=%s risk=%.2f threshold=%.2f",
-                    e.token,
-                    risk_score,
-                    RISK_VETO_THRESHOLD,
-                )
+            if buyers_15m < 30:
+                logger.info("[promotion-block] reason=buyers_low token=%s buyers_15m=%s", e.token, buyers_15m)
+                return out
+            if attention_score < PROMOTION_MIN_ATTENTION:
+                logger.info("[promotion-block] reason=attention_low token=%s attention=%.2f", e.token, attention_score)
+                return out
+            if risk_score >= PROMOTION_MAX_RISK:
+                logger.info("[promotion-block] reason=risk_high token=%s risk=%.2f", e.token, risk_score)
+                return out
+            if lp_drain:
+                logger.info("[promotion-block] reason=lp_drain token=%s", e.token)
+                return out
+            if creator_sell:
+                logger.info("[promotion-block] reason=creator_sell token=%s", e.token)
+                return out
+
+            confirm_count = update_promo_confirm(e.token, True)
+            logger.info(
+                "[promotion-check] token=%s confirm_count=%s",
+                e.token,
+                confirm_count,
+            )
+            if confirm_count < 2:
                 return out
             gate_pass, gate_reasons = evaluate_alert_gate(
                 "promoted",
@@ -371,7 +418,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 )
                 return out
             logger.info(
-                "[promoted] token=%s score=%.3f threshold=%.3f",
+                "[promotion-validated] token=%s score=%.3f threshold=%.3f",
                 e.token,
                 e.confidence,
                 0.80,

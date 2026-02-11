@@ -14,21 +14,30 @@ def _pct_improve(prev: float, curr: float, pct: float) -> bool:
 def metrics_improved(
     prev: Dict[str, Any],
     curr: Dict[str, Any],
-    pct_threshold: float,
+    attention_delta: float,
+    buyer_delta: float,
+    liq_pct: float,
+    score_delta: float,
 ) -> Tuple[bool, List[str]]:
-    keys = [
-        ("attention_score", "attention"),
-        ("unique_buyers_5m", "buyers"),
-        ("liquidity", "liquidity"),
-        ("score", "score"),
-    ]
     improved = []
-    for key, label in keys:
-        try:
-            prev_v = float(prev.get(key) or 0)
-            curr_v = float(curr.get(key) or 0)
-        except Exception:
-            continue
-        if _pct_improve(prev_v, curr_v, pct_threshold):
-            improved.append(label)
+    try:
+        if float(curr.get("attention_score") or 0) - float(prev.get("attention_score") or 0) >= attention_delta:
+            improved.append("attention")
+    except Exception:
+        pass
+    try:
+        if float(curr.get("unique_buyers_5m") or 0) - float(prev.get("unique_buyers_5m") or 0) >= buyer_delta:
+            improved.append("buyers")
+    except Exception:
+        pass
+    try:
+        if _pct_improve(float(prev.get("liquidity") or 0), float(curr.get("liquidity") or 0), liq_pct):
+            improved.append("liquidity")
+    except Exception:
+        pass
+    try:
+        if float(curr.get("score") or 0) - float(prev.get("score") or 0) >= score_delta:
+            improved.append("score")
+    except Exception:
+        pass
     return (len(improved) > 0), improved

@@ -470,7 +470,7 @@ def send_discord(e: Event) -> None:
         print("[discord] send exception", ex)
 
 
-def send_candidate_discord(e: Event) -> None:
+def send_candidate_discord(e: Event, message_id: str | None = None) -> str | None:
     if not ENABLE_DISCORD:
         return
     if not DISCORD_CANDIDATE_WEBHOOK:
@@ -484,13 +484,25 @@ def send_candidate_discord(e: Event) -> None:
 
     if DRY_RUN:
         print("[DRY_RUN] suppressed Candidate Discord send", json.dumps(payload)[:400])
-        return
+        return None
 
     try:
-        r = requests.post(DISCORD_CANDIDATE_WEBHOOK, json=payload, timeout=8)
+        if message_id:
+            url = f"{DISCORD_CANDIDATE_WEBHOOK}/messages/{message_id}"
+            r = requests.patch(url, json=payload, timeout=8)
+        else:
+            url = f"{DISCORD_CANDIDATE_WEBHOOK}?wait=true"
+            r = requests.post(url, json=payload, timeout=8)
         if r.status_code >= 300:
             print("[discord] candidate send failed", r.status_code, r.text[:200])
         else:
             print("[discord] candidate send ok", r.status_code)
+            if not message_id:
+                try:
+                    data = r.json()
+                    return data.get("id")
+                except Exception:
+                    return None
     except Exception as ex:
         print("[discord] candidate send exception", ex)
+    return None

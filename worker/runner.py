@@ -38,7 +38,15 @@ async def event_loop(q: asyncio.Queue) -> None:
             elif de.type == "candidate":
                 if isinstance(de.extra, dict) and de.extra.get("candidate_send") is False:
                     continue
-                send_candidate_discord(de)
+                message_id = None
+                if isinstance(de.extra, dict):
+                    if de.extra.get("candidate_edit") and de.extra.get("candidate_message_id"):
+                        message_id = de.extra.get("candidate_message_id")
+                msg_id = send_candidate_discord(de, message_id=message_id)
+                if msg_id:
+                    from app.services.state_service import update_candidate_message_id, mark_candidate_alert_sent
+                    update_candidate_message_id(de.token, msg_id)
+                    mark_candidate_alert_sent(de.token)
 
         q.task_done()
 

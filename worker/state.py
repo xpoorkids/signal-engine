@@ -60,6 +60,16 @@ class EngineState:
         print(f"[attention] unique_buyers_5m token={token} count={count}", flush=True)
         return count
 
+    def unique_buyers_15m(self, token: Optional[str]) -> int:
+        if not token:
+            return 0
+        trades = self._buyer_trades.get(token, [])
+        if not trades:
+            return 0
+        now = time.time()
+        cutoff = now - 900
+        return len({buyer for ts, buyer in trades if ts >= cutoff})
+
     def has_basic_liquidity(self, token: Optional[str]) -> bool:
         return True
 

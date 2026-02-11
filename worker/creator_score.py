@@ -6,49 +6,49 @@ from typing import Dict, Any
 from app.services.state_service import get_creator_stats
 
 
-def score_creator(creator: str | None, funding_clustered: bool | None = None) -> Dict[str, Any]:
+def compute_creator_score(
+    creator: str | None,
+    stats: Dict[str, Any] | None = None,
+    funded_by_cluster: bool | None = None,
+    prior_profitable: bool | None = None,
+    wallet_age_days: float | None = None,
+) -> Dict[str, Any]:
     if not creator:
-        return {
-            "score": 0.0,
-            "reasons": ["creator_unknown"],
-            "stats": {},
-        }
+        return {"score": 0.0, "reasons": ["creator_unknown"], "stats": {}}
 
-    stats = get_creator_stats(creator)
+    if stats is None:
+        stats = get_creator_stats(creator)
+
     deploys_24h = int(stats.get("deploys_24h") or 0)
     deploys_lifetime = int(stats.get("deploys_lifetime") or 0)
     first_seen = int(stats.get("first_seen") or 0)
     now = int(time.time())
-    age_days = (now - first_seen) / 86400 if first_seen else 0.0
+    age_days = wallet_age_days
+    if age_days is None:
+        age_days = (now - first_seen) / 86400 if first_seen else 0.0
 
-    score = 1.0
+    score = 0.5
     reasons = []
 
-    if deploys_24h >= 10:
-        score -= 0.5
-        reasons.append("deploys_24h>=10")
-    elif deploys_24h >= 5:
+    if deploys_24h > 5:
         score -= 0.3
-        reasons.append("deploys_24h>=5")
-
-    if deploys_lifetime >= 100:
-        score -= 0.3
-        reasons.append("deploys_lifetime>=100")
-    elif deploys_lifetime >= 50:
+        reasons.append("deploys_24h>5")
+    if deploys_lifetime < 2:
         score -= 0.2
-        reasons.append("deploys_lifetime>=50")
+        reasons.append("deploys_lifetime<2")
+    if funded_by_cluster is True:
+        score -= 0.4
+        reasons.append("funded_by_cluster")
 
-    if age_days > 0:
-        if age_days < 1:
-            score -= 0.4
-            reasons.append("wallet_age<1d")
-        elif age_days < 7:
-            score -= 0.2
-            reasons.append("wallet_age<7d")
-
-    if funding_clustered is True:
-        score -= 0.2
-        reasons.append("funding_clustered")
+    if prior_profitable is True:
+        score += 0.3
+        reasons.append("prior_profitable")
+    if age_days and age_days > 30:
+        score += 0.2
+        reasons.append("wallet_age>30d")
+    if deploys_24h <= 1 and deploys_lifetime <= 5:
+        score += 0.2
+        reasons.append("low_deploy_frequency")
 
     score = max(0.0, min(1.0, score))
     return {
@@ -57,6 +57,6 @@ def score_creator(creator: str | None, funding_clustered: bool | None = None) ->
         "stats": {
             "deploys_24h": deploys_24h,
             "deploys_lifetime": deploys_lifetime,
-            "wallet_age_days": round(age_days, 2),
+            "wallet_age_days": round(age_days or 0.0, 2),
         },
     }

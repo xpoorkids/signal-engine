@@ -7,7 +7,7 @@ from worker.config import (
     RISK_VETO_THRESHOLD,
     CAND_MIN_TOKEN_AGE_SEC,
     CAND_MIN_CURVE_LIQ_USD,
-    CAND_MIN_ATTENTION,
+    EARLY_ATTENTION_MIN,
 )
 
 
@@ -145,8 +145,8 @@ def admission_check_candidate(
     if age_sec < CAND_MIN_TOKEN_AGE_SEC:
         reasons.append(f"age<{CAND_MIN_TOKEN_AGE_SEC}s")
 
-    if not attention_unavailable and attention_score < CAND_MIN_ATTENTION:
-        reasons.append(f"attention<{CAND_MIN_ATTENTION:.2f}")
+    if not attention_unavailable and attention_score < EARLY_ATTENTION_MIN:
+        reasons.append(f"attention<{EARLY_ATTENTION_MIN:.2f}")
 
     if risk_score >= RISK_VETO_THRESHOLD:
         reasons.append("risk_veto")
