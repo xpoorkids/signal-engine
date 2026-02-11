@@ -7,7 +7,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-from collections import deque
+from collections import deque, defaultdict
 from datetime import datetime, timezone
 from worker.config import (
     ENABLE_LOGS_SUB,
@@ -65,6 +65,7 @@ _LOG_SWAP_PATTERNS = [
 # signature-level dedup cache
 _recent_buy_signatures: Dict[Tuple[str, str], float] = {}
 DEDUP_TTL_SECONDS = 60
+buy_size_method_counts = defaultdict(int)
 
 
 def _is_buy_log(logs: list[str]) -> bool:
@@ -657,6 +658,20 @@ class LogSwapProcessor:
             print(f"[dedup-skip] sig={signature} token={mint}", flush=True)
             return
         _recent_buy_signatures[dedup_key] = now
+        method_key = method or "fallback"
+        if method_key == "inner_sol_transfer":
+            method_key = "inner"
+        buy_size_method_counts[method_key] += 1
+        buy_size_method_counts["_total"] += 1
+        if buy_size_method_counts["_total"] % 100 == 0:
+            print(
+                "[buy-size-stats] "
+                f"sol={buy_size_method_counts['sol']} "
+                f"wsol={buy_size_method_counts['wsol']} "
+                f"inner={buy_size_method_counts['inner']} "
+                f"fallback={buy_size_method_counts['fallback']}",
+                flush=True,
+            )
         print(
             f"[buy-size] token={mint} sig={signature} buyer={buyer_signer or buy.get('buyer')} "
             f"sol={sol_spent} method={method}",
