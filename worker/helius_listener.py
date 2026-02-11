@@ -517,7 +517,9 @@ class LogSwapProcessor:
         if not buys:
             return
         primary_mint = buys[0].get("mint") if buys else None
-        buyer_signer, buyer_index, sol_spent, method, fee_lamports = self._find_buyer_signer(tx, primary_mint)
+        buyer_signer, buyer_index, sol_spent, method, fee_lamports = self._find_buyer_signer(
+            signature, tx, primary_mint
+        )
         for buy in buys:
             await self._emit_trade_buy(
                 signature,
@@ -532,6 +534,7 @@ class LogSwapProcessor:
 
     def _find_buyer_signer(
         self,
+        signature: str,
         tx: Dict[str, Any],
         mint: Optional[str],
     ) -> Tuple[Optional[str], Optional[int], float, str, int]:
@@ -628,7 +631,7 @@ class LogSwapProcessor:
             pass
 
         print(
-            f"[buy-size-miss] sig={tx.get('signature') or ''} token={mint or ''} "
+            f"[buy-size-miss] sig={signature or ''} token={mint or ''} "
             f"buyer={best_owner} signer_candidates={signer_candidates} has_wsol_prepost={has_wsol_prepost} inner_transfer_sum={inner_transfer_sum}",
             flush=True,
         )
@@ -647,6 +650,13 @@ class LogSwapProcessor:
     ) -> None:
         now = time.time()
         mint = buy.get("mint")
+        if sol_spent is None or sol_spent <= 0 or method == "fallback":
+            print(
+                f"[skip-buy] reason=unknown_size sig={signature} token={mint} "
+                f"buyer={buyer_signer or buy.get('buyer')} method={method}",
+                flush=True,
+            )
+            return
         dedup_key = (signature, mint)
         expired = [
             k for k, ts in _recent_buy_signatures.items()
