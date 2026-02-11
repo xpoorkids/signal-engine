@@ -366,8 +366,6 @@ async def listen(q: asyncio.Queue) -> None:
                     PUMPFUN_PROGRAM_ID,
                     RAYDIUM_AMM_PROGRAM_ID,
                 ],
-                "failed": False,
-                "vote": False,
             },
             {
                 "commitment": "confirmed",
