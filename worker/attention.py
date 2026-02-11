@@ -22,19 +22,20 @@ _recent_buyers_10s: Dict[str, deque[tuple[str, float]]] = defaultdict(deque)
 _recent_wallet_buys_15s: Dict[str, deque[tuple[str, float]]] = defaultdict(deque)
 
 
-def _compute_burst_weight(delta: float) -> int:
-    if delta < 0.2:
+def _compute_burst_weight(sol_spent: float) -> int:
+    if sol_spent < 0.2:
         return 1
-    if delta < 1:
+    if sol_spent < 1:
         return 2
     return 4
 
 
-def register_buyer(mint: str, buyer: str, delta: float | None = None) -> int:
+def register_buyer(mint: str, buyer: str, sol_spent: float | None = None) -> int:
     if not mint or not buyer:
         return 1
-    weight = _compute_burst_weight(float(delta or 0.0))
-    print(f"[burst-weight] token={mint} delta={float(delta or 0.0)} weight={weight}", flush=True)
+    weight = _compute_burst_weight(float(sol_spent or 0.0))
+    print(f"[buy-size] token={mint} sol_spent={float(sol_spent or 0.0)}", flush=True)
+    print(f"[burst-weight] token={mint} delta={float(sol_spent or 0.0)} weight={weight}", flush=True)
 
     now = time.time()
     dq = _recent_wallet_buys_15s[mint]

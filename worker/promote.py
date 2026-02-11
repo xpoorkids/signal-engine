@@ -146,18 +146,19 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
 
         buyer = e.extra.get("buyer") if isinstance(e.extra, dict) else None
         if buyer:
+            sol_spent = None
             delta_raw = None
             decimals = None
             if isinstance(e.extra, dict):
+                sol_spent = e.extra.get("sol_spent")
                 delta_raw = e.extra.get("delta_raw")
                 decimals = e.extra.get("decimals")
-            delta = None
             try:
-                if delta_raw is not None:
-                    delta = float(delta_raw) / (10 ** int(decimals or 0))
+                if sol_spent is not None:
+                    sol_spent = float(sol_spent)
             except Exception:
-                delta = None
-            weight = register_buyer(e.token, buyer, delta)
+                sol_spent = None
+            weight = register_buyer(e.token, buyer, sol_spent)
             state.record_buyer(e.token, buyer, ts=e.ts, weight=weight)
 
         attention_score = 0.0

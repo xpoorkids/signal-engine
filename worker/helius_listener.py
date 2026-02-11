@@ -515,10 +515,53 @@ class LogSwapProcessor:
         buys = self._detect_positive_deltas(tx)
         if not buys:
             return
+        buyer_signer, sol_spent = self._find_buyer_signer(tx)
         for buy in buys:
-            await self._emit_trade_buy(signature, tx, buy)
+            await self._emit_trade_buy(signature, tx, buy, buyer_signer, sol_spent)
 
-    async def _emit_trade_buy(self, signature: str, tx: Dict[str, Any], buy: Dict[str, Any]) -> None:
+    def _find_buyer_signer(self, tx: Dict[str, Any]) -> Tuple[Optional[str], float]:
+        try:
+            meta = tx.get("meta") or {}
+            pre_balances = meta.get("preBalances") or []
+            post_balances = meta.get("postBalances") or []
+            fee = int(meta.get("fee") or 0)
+            message = (tx.get("transaction") or {}).get("message") or {}
+            keys = message.get("accountKeys") or []
+        except Exception:
+            return None, 0.0
+
+        best_owner = None
+        best_spent = 0
+        for idx, k in enumerate(keys):
+            try:
+                is_signer = k.get("signer") if isinstance(k, dict) else False
+                is_writable = k.get("writable") if isinstance(k, dict) else False
+                owner = k.get("pubkey") if isinstance(k, dict) else None
+            except Exception:
+                continue
+            if not is_signer or not is_writable or owner is None:
+                continue
+            try:
+                pre = int(pre_balances[idx])
+                post = int(post_balances[idx])
+            except Exception:
+                continue
+            lamports_spent = pre - post - fee
+            if lamports_spent <= 0:
+                continue
+            if lamports_spent > best_spent:
+                best_spent = lamports_spent
+                best_owner = owner
+        return best_owner, best_spent / 1_000_000_000 if best_spent > 0 else 0.0
+
+    async def _emit_trade_buy(
+        self,
+        signature: str,
+        tx: Dict[str, Any],
+        buy: Dict[str, Any],
+        buyer_signer: Optional[str],
+        sol_spent: float,
+    ) -> None:
         now = time.time()
         mint = buy.get("mint")
         dedup_key = (signature, mint)
@@ -541,9 +584,10 @@ class LogSwapProcessor:
             confidence=0.0,
             reasons=["balance_increase_detected"],
             extra={
-                "buyer": buy.get("buyer"),
+                "buyer": buyer_signer or buy.get("buyer"),
                 "delta_raw": buy.get("delta_raw"),
                 "decimals": buy.get("decimals"),
+                "sol_spent": sol_spent,
                 "ts": int(time.time()),
             },
         )
