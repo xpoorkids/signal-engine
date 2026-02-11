@@ -144,6 +144,29 @@ def extract_new_mints_from_token_balances(tx: dict) -> list[str]:
     return new_mints
 
 
+def extract_mints_from_token_balances(tx: dict) -> list[str]:
+    """
+    Extract all mints seen in postTokenBalances (used for trade detection).
+    """
+    try:
+        meta = tx.get("meta")
+        if not meta:
+            return []
+        post = meta.get("postTokenBalances") or []
+    except Exception:
+        return []
+
+    out = []
+    for b in post:
+        try:
+            mint = b.get("mint")
+        except Exception:
+            continue
+        if mint and mint not in out:
+            out.append(mint)
+    return out
+
+
 def _first_signer(tx: dict) -> str | None:
     try:
         message = tx.get("transaction", {}).get("message", {})
@@ -516,6 +539,31 @@ async def listen(q: asyncio.Queue) -> None:
                         print("[pump] HIT mint", mint, flush=True)
 
                     buyer = _first_signer(tx)
+
+                    try:
+                        logs = (tx.get("meta") or {}).get("logMessages") or []
+                        if logs and _is_buy_log(logs):
+                            trade_mints = extract_mints_from_token_balances(tx)
+                            trade_mint = trade_mints[0] if trade_mints else mint
+                            if trade_mint and buyer:
+                                sig = result.get("signature")
+                                print(
+                                    f"[buyer-detected] token={trade_mint} wallet={buyer}",
+                                    flush=True,
+                                )
+                                await emit_event(
+                                    Event(
+                                        type="trade_buy",
+                                        source="tx",
+                                        signature=sig,
+                                        token=trade_mint,
+                                        confidence=0.0,
+                                        reasons=["buy_detected_in_tx_logs"],
+                                        extra={"buyer": buyer},
+                                    )
+                                )
+                    except Exception as e:
+                        print("[buyer-detected] tx parse failed:", e, flush=True)
 
                     # Temporarily widen the net (WS-only proof): emit when pump program is seen
                     if is_pump_program:
