@@ -261,6 +261,8 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             else:
                 if attention_unavailable:
                     logger.info("[candidate-warning] attention_unavailable token=%s", e.token)
+                if not extra.get("bonding_curve") and extra.get("bonding_curve_liquidity") is None:
+                    logger.info("[candidate-warning] curve_liq_unknown token=%s", e.token)
                 logger.info("[candidate-lifecycle] token=%s lifecycle=%s", e.token, lifecycle)
                 logger.info(
                     "[candidate-attention] token=%s attention=%.2f risk=%.2f attn_reasons=%s",
