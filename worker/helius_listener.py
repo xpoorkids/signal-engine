@@ -356,23 +356,6 @@ def _resolve_tx_from_sig(sig: str) -> dict | None:
 async def listen(q: asyncio.Queue) -> None:
     if not HELIUS_KEY:
         print("[helius] missing HELIUS_API_KEY", flush=True)
-    tx_sub = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "transactionSubscribe",
-        "params": [
-            {
-                "accountInclude": [
-                    PUMPFUN_PROGRAM_ID,
-                    RAYDIUM_AMM_PROGRAM_ID,
-                ],
-            },
-            {
-                "commitment": "confirmed",
-                "encoding": "jsonParsed",
-            },
-        ],
-    }
     logs_sub = {
         "jsonrpc": "2.0",
         "id": 99,
@@ -407,8 +390,6 @@ async def listen(q: asyncio.Queue) -> None:
                 max_queue=None,
             ) as ws:
                 print("[helius] connected", flush=True)
-                print(f"[ws-subscribe-request] id={tx_sub.get('id')} method={tx_sub.get('method')}", flush=True)
-                await ws.send(json.dumps(tx_sub))
                 if ENABLE_LOGS_SUB:
                     print(f"[ws-subscribe-request] id={logs_sub.get('id')} method=logsSubscribe", flush=True)
                     await ws.send(json.dumps(logs_sub))
@@ -421,14 +402,12 @@ async def listen(q: asyncio.Queue) -> None:
                         print("[helius] recv/parse failed:", e, flush=True)
                         continue
 
-                    if msg.get("id") in (tx_sub.get("id"), logs_sub.get("id")):
+                    if msg.get("id") == logs_sub.get("id"):
                         if "result" in msg:
                             print(
                                 f"[ws-subscribe-response] id={msg.get('id')} result={msg.get('result')}",
                                 flush=True,
                             )
-                            if msg.get("id") == tx_sub.get("id"):
-                                print(f"[tx-sub-id] sub_id={msg.get('result')}", flush=True)
                         elif "error" in msg:
                             err = msg.get("error") or {}
                             print(
@@ -482,6 +461,10 @@ async def listen(q: asyncio.Queue) -> None:
                                             mint, buyer = _resolve_mint_and_buyer_from_sig(sig)
                                             if mint and buyer:
                                                 recent_buy_signatures[sig] = now
+                                                print(
+                                                    f"[log-buy-detected] token={mint} buyer={buyer}",
+                                                    flush=True,
+                                                )
                                                 print(
                                                     f"[buyer-detected] token={mint} wallet={buyer}",
                                                     flush=True,
