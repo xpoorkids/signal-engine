@@ -14,6 +14,8 @@ class TokenState:
     is_promoted: bool = False
     last_alert_ts: float = 0.0
     last_reason: str = ""
+    symbol: Optional[str] = None
+    name: Optional[str] = None
 
 
 @dataclass
@@ -82,7 +84,8 @@ class EngineState:
         trades.append((now, buyer))
         if buyer not in seen_buyers:
             print(f"[attention] new_buyer token={token} buyer={buyer}", flush=True)
-        count = len({b for _, b in trades})
+        cutoff = now - 300
+        count = len({b for t, b in trades if t >= cutoff})
         print(f"[buyer-count] token={token} unique_buyers_5m={count}", flush=True)
         cutoff = now - 600
         if len(trades) > 1000:

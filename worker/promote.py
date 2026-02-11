@@ -37,6 +37,7 @@ from worker.dex import dex_enrich_token, select_best_pair, summarize_pair
 from worker.forensics import analyze_risk
 from worker.execution import estimate_edge
 from worker.attention import compute_attention
+from worker.metadata import fetch_token_metadata
 from worker.alert_gate import evaluate_alert_gate, admission_check_candidate
 from worker.creator_score import compute_creator_score
 from worker.progression import metrics_improved
@@ -85,6 +86,27 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             reason=e.type,
             creator=e.creator,
         )
+        if e.type == "token_resolved":
+            meta = fetch_token_metadata(e.token)
+            if meta:
+                symbol = meta.get("symbol") or ""
+                name = meta.get("name") or ""
+                if symbol:
+                    ts.symbol = symbol
+                    e.extra["symbol"] = symbol
+                if name:
+                    ts.name = name
+                    e.extra["name"] = name
+                logger.info(
+                    "[token-metadata] token=%s symbol=%s name=%s",
+                    e.token,
+                    symbol or "unknown",
+                    name or "unknown",
+                )
+        if ts.symbol and not e.extra.get("symbol"):
+            e.extra["symbol"] = ts.symbol
+        if ts.name and not e.extra.get("name"):
+            e.extra["name"] = ts.name
         if e.creator and e.type == "token_resolved" and ts.signals == 1:
             record_creator_deploy(e.creator)
 
