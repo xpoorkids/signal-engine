@@ -405,9 +405,6 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 return out
 
         if ENABLE_WALLET and ts.creator:
-"
-"
-
             extra["wallet_risk"] = await score_wallet_risk(ts.creator)
             wr = extra.get("wallet_risk")
             if wr and wr.get("score", 1.0) < 0.3:
