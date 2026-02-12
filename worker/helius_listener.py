@@ -754,23 +754,40 @@ async def listen(q: asyncio.Queue) -> None:
     last_emit_ts = time.time()
     last_heartbeat_ts = 0.0
     reconnect_count = 0
-    reconnect_window_start = time.time()
+    ws = None
 
     while True:
         try:
+            print("[ws-connecting]", flush=True)
             async with websockets.connect(
-                HELIUS_WS,
+                HELIUS_WS_URL,
                 ping_interval=20,
                 ping_timeout=20,
+                close_timeout=5,
                 max_queue=None,
             ) as ws:
-                print("[helius] connected", flush=True)
+                print("[ws-connected]", flush=True)
                 if ENABLE_LOGS_SUB:
-                    print(f"[ws-subscribe-request] id={logs_sub.get('id')} method=logsSubscribe", flush=True)
                     await ws.send(json.dumps(logs_sub))
-                    print("[logs] subscribed to ALL logs (confirmed)", flush=True)
+                    print("[ws-subscribed]", flush=True)
+                    if reconnect_count > 0:
+                        print("[ws-reconnect-success]", flush=True)
 
-                async for raw in ws:
+                connection_start_time = time.time()
+
+                while True:
+                    now = time.time()
+                    if now - connection_start_time > 240:
+                        print("[ws-proactive-reconnect]", flush=True)
+                        break
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                    except asyncio.TimeoutError:
+                        if now - last_heartbeat_ts >= 60:
+                            print("[ws-heartbeat] connected=True", flush=True)
+                            last_heartbeat_ts = now
+                        continue
+
                     try:
                         msg = json.loads(raw)
                     except Exception as e:
@@ -783,7 +800,6 @@ async def listen(q: asyncio.Queue) -> None:
                                 f"[ws-subscribe-response] id={msg.get('id')} result={msg.get('result')}",
                                 flush=True,
                             )
-                            print("[ws-reconnected]", flush=True)
                         elif "error" in msg:
                             err = msg.get("error") or {}
                             print(
@@ -905,7 +921,6 @@ async def listen(q: asyncio.Queue) -> None:
                                             token=mint,
                                             confidence=0.55,
                                             reasons=["mint_resolved_from_logs_retry"],
-                                            extra={"buyer": buyer},
                                         )
                                     )
                         continue
@@ -1137,16 +1152,16 @@ async def listen(q: asyncio.Queue) -> None:
                                     )
                                 )
         except Exception as e:
-            now = time.time()
-            if now - reconnect_window_start > 300:
-                reconnect_window_start = now
-                reconnect_count = 0
             reconnect_count += 1
-            print(f"[ws-reconnect] attempt={reconnect_count}", flush=True)
-            if reconnect_count > 5 and now - reconnect_window_start <= 300:
-                print("[ws-instability-warning]", flush=True)
-            print("[helius] ws error, reconnecting:", e, flush=True)
-            await asyncio.sleep(15)
+            print(f"[ws-error] {e} reconnect_count={reconnect_count}", flush=True)
+        finally:
+            try:
+                if ws:
+                    await ws.close()
+            except Exception:
+                pass
+
+        await asyncio.sleep(1)
 
 
 async def start_helius_listeners(q: asyncio.Queue) -> None:
