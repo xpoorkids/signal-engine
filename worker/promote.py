@@ -367,7 +367,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             return out
 
         age_bypassed = False
-        if ENGINE_MODE == "sniper":
+        if ENGINE_MODE == "balanced":
             if (
                 elite_score >= SNIPER_MIN_ELITE_SCORE
                 and unique_10s >= SNIPER_MIN_UNIQUE_10S
