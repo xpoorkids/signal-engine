@@ -48,6 +48,7 @@ def _get_helius_rpc_url() -> str:
 HELIUS_RPC = _get_helius_rpc_url()
 
 _last_rpc_log_ts = 0.0
+LAST_WS_ACTIVITY = time.time()
 
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -755,6 +756,7 @@ async def listen(q: asyncio.Queue) -> None:
     last_heartbeat_ts = 0.0
     reconnect_count = 0
     ws = None
+    stall_timeout = 45
 
     while True:
         try:
@@ -777,6 +779,10 @@ async def listen(q: asyncio.Queue) -> None:
 
                 while True:
                     now = time.time()
+                    if now - LAST_WS_ACTIVITY > stall_timeout:
+                        print("[ws-stall] no messages received, forcing reconnect", flush=True)
+                        await ws.close()
+                        raise RuntimeError("WS stall detected")
                     if now - connection_start_time > 240:
                         print("[ws-proactive-reconnect]", flush=True)
                         break
@@ -793,6 +799,7 @@ async def listen(q: asyncio.Queue) -> None:
                     except Exception as e:
                         print("[helius] recv/parse failed:", e, flush=True)
                         continue
+                    globals()["LAST_WS_ACTIVITY"] = time.time()
 
                     if msg.get("id") == logs_sub.get("id"):
                         if "result" in msg:
