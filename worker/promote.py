@@ -355,14 +355,11 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         if liquidity_unknown:
             if (
                 ENGINE_MODE == "balanced"
-                and unique_10s >= 3
+                and unique_10s >= 2
                 and burst_10s >= 6
                 and elite_score >= 8
             ):
-                print(
-                    f"[liq-unknown-bypass] token={e.token} unique_10s={unique_10s} burst10s={burst_10s}",
-                    flush=True,
-                )
+                print(f"[liq-unknown-bypass] token={e.token}", flush=True)
             else:
                 hard_fail = True
 
