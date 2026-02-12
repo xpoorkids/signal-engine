@@ -752,6 +752,9 @@ async def listen(q: asyncio.Queue) -> None:
     last_pending_check = 0.0
     last_report_ts = time.time()
     last_emit_ts = time.time()
+    last_heartbeat_ts = 0.0
+    reconnect_count = 0
+    reconnect_window_start = time.time()
 
     while True:
         try:
@@ -780,6 +783,7 @@ async def listen(q: asyncio.Queue) -> None:
                                 f"[ws-subscribe-response] id={msg.get('id')} result={msg.get('result')}",
                                 flush=True,
                             )
+                            print("[ws-reconnected]", flush=True)
                         elif "error" in msg:
                             err = msg.get("error") or {}
                             print(
@@ -801,6 +805,9 @@ async def listen(q: asyncio.Queue) -> None:
 
                     method = msg.get("method")
                     now = time.time()
+                    if now - last_heartbeat_ts >= 60:
+                        print("[ws-heartbeat] connected=True", flush=True)
+                        last_heartbeat_ts = now
                     if now - last_report_ts > 30:
                         print(
                             f"[helius] summary tx_msgs={ws_tx_count} logs_msgs={log_count} emits={emit_count}",
@@ -1130,6 +1137,14 @@ async def listen(q: asyncio.Queue) -> None:
                                     )
                                 )
         except Exception as e:
+            now = time.time()
+            if now - reconnect_window_start > 300:
+                reconnect_window_start = now
+                reconnect_count = 0
+            reconnect_count += 1
+            print(f"[ws-reconnect] attempt={reconnect_count}", flush=True)
+            if reconnect_count > 5 and now - reconnect_window_start <= 300:
+                print("[ws-instability-warning]", flush=True)
             print("[helius] ws error, reconnecting:", e, flush=True)
             await asyncio.sleep(15)
 
