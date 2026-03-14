@@ -138,26 +138,26 @@ def _section_lines(lines: list[str], indent: int = 2) -> str:
 
 def _candidate_header(attention_score: float, risk_score: float) -> str:
     if attention_score >= 0.85:
-        regime = "Radar (Hot)"
+        regime = "HOT"
     elif attention_score >= 0.70:
-        regime = "Radar (Active)"
+        regime = "ACTIVE"
     elif risk_score < RADAR_QUIET_RISK_MAX:
-        regime = "Radar (Quiet)"
+        regime = "QUIET"
     elif risk_score < 0.50:
-        regime = "Radar (Active)"
+        regime = "ACTIVE"
     else:
-        regime = "Radar (Active)"
-    return f"[RADAR  WATCH]  {regime}"
+        regime = "ACTIVE"
+    return f"RADAR / {regime}"
 
 
 def _promoted_header(final_score: float) -> str:
     if final_score >= 0.80:
-        regime = "Signal (Strong)"
+        regime = "STRONG"
     elif final_score >= 0.75:
-        regime = "Signal (Normal)"
+        regime = "NORMAL"
     else:
-        regime = "Signal (Normal)"
-    return f"[SIGNAL  VALIDATED]  {regime}"
+        regime = "NORMAL"
+    return f"SIGNAL / {regime}"
 
 
 def _wallet_signal_lines(risk_flags: dict) -> str:
@@ -269,15 +269,8 @@ def _build_overview_lines(
     lines: list[str],
 ) -> list[str]:
     return [
-        "Name",
-        f"  {name}",
-        "",
-        "Ticker",
-        f"  ${symbol}",
-        "",
-        "Contract",
-        f"  `{full_addr}`",
-        "",
+        f"**{name}**  `${symbol}`",
+        f"`{full_addr}`",
         *lines,
     ]
 
@@ -288,14 +281,14 @@ def _build_market_snapshot_lines(
     liq_mc: str,
 ) -> list[str]:
     return [
-        f"Liquidity {liq}",
-        f"Market Cap {mc}",
-        f"Liq / MC {liq_mc}",
+        f"Liquidity: {liq}",
+        f"Market Cap: {mc}",
+        f"Liq / MC: {liq_mc}",
     ]
 
 
-def _divider_field() -> dict:
-    return {"name": " ", "value": " ", "inline": False}
+def _summary_field(name: str, value: str) -> dict:
+    return {"name": name, "value": value, "inline": True}
 
 
 def _format_candidate_like(e: Event, description: str) -> dict:
@@ -320,24 +313,23 @@ def _format_candidate_like(e: Event, description: str) -> dict:
         liq_mc = "—"
 
     fields = [
+        _summary_field("Attention", f"`{attention_score:.2f}`"),
+        _summary_field("Confidence", f"`{confidence_pct}`"),
+        _summary_field("Lifecycle", f"`{_lifecycle_label(metrics.get('lifecycle'))}`"),
         {
-            "name": "Overview",
+            "name": "Token",
             "value": _section_lines(
                 _build_overview_lines(
                     symbol,
                     name,
                     full_addr,
                     [
-                        _label_value("Attention", f"{attention_score:.2f}"),
                         _label_value("Risk", f"{risk_score:.2f}"),
-                        _label_value("Confidence", confidence_pct),
-                        _label_value("Lifecycle", _lifecycle_label(metrics.get("lifecycle"))),
                     ],
                 )
             ),
             "inline": False,
         },
-        _divider_field(),
         {
             "name": "Market",
             "value": _section_lines(
@@ -349,13 +341,11 @@ def _format_candidate_like(e: Event, description: str) -> dict:
             ),
             "inline": False,
         },
-        _divider_field(),
         {
-            "name": "Wallet Signals",
+            "name": "Signals",
             "value": _section_lines([_attention_signal_lines(e, metrics.get("risk_flags"))]),
             "inline": False,
         },
-        _divider_field(),
         {
             "name": "Links",
             "value": _section_lines(
@@ -370,10 +360,10 @@ def _format_candidate_like(e: Event, description: str) -> dict:
 
     embed = {
         "title": _candidate_header(attention_score, risk_score),
-        "description": description,
+        "description": f"{description}\n",
         "color": AMBER,
         "fields": fields,
-        "footer": {"text": "Signal Engine  Radar Mode  High Risk Market"},
+        "footer": {"text": "Signal Engine / Radar"},
     }
     return {"embeds": [embed]}
 
@@ -401,26 +391,25 @@ def format_discord(e: Event) -> dict:
             liq_mc = "—"
 
         fields = [
+            _summary_field("Final Score", f"`{e.confidence:.2f}`"),
+            _summary_field("Confidence", f"`{confidence_pct}`"),
+            _summary_field("Lifecycle", f"`{_lifecycle_label(metrics.get('lifecycle'))}`"),
             {
-                "name": "Overview",
+                "name": "Token",
                 "value": _section_lines(
                     _build_overview_lines(
                         symbol,
                         name,
                         full_addr,
                         [
-                            _label_value("Final Score", f"{e.confidence:.2f} (0.75)"),
-                            _label_value("Confidence", confidence_pct),
                             _label_value("Risk", f"{rscore:.2f}"),
                             _label_value("Attention", f"{ascore:.2f}"),
-                            _label_value("Lifecycle", _lifecycle_label(metrics.get("lifecycle"))),
                         ],
                     )
                 ),
                 "inline": False,
             }
         ]
-        fields.append(_divider_field())
         fields.append(
             {
                 "name": "Market",
@@ -434,16 +423,14 @@ def format_discord(e: Event) -> dict:
                 "inline": False,
             }
         )
-        fields.append(_divider_field())
         fields.append(
             {
-                "name": "Wallet Signals",
+                "name": "Signals",
                 "value": _section_lines([_attention_signal_lines(e, metrics.get("risk_flags"))]),
                 "inline": False,
             }
         )
         if reasons:
-            fields.append(_divider_field())
             fields.append(
                 {
                     "name": "Why Promoted",
@@ -451,7 +438,6 @@ def format_discord(e: Event) -> dict:
                     "inline": False,
                 }
             )
-        fields.append(_divider_field())
         fields.append(
             {
                 "name": "Links",
@@ -467,10 +453,10 @@ def format_discord(e: Event) -> dict:
 
         embed = {
             "title": _promoted_header(e.confidence),
-            "description": "Validated by layered gates.",
+            "description": "Validated by layered gates.\n",
             "color": DARK_RED,
             "fields": fields,
-            "footer": {"text": "Signal Engine  Validated Tier  Size Appropriately"},
+            "footer": {"text": "Signal Engine / Validated"},
         }
         return {"embeds": [embed]}
 
