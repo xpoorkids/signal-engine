@@ -13,6 +13,7 @@ from worker.metadata import fetch_token_metadata
 
 AMBER = 0xF4C430
 DARK_RED = 0xC0392B
+SLATE = 0x203040
 
 
 def _full_addr(addr: str | None) -> str:
@@ -156,7 +157,7 @@ def _candidate_header(attention_score: float, risk_score: float) -> str:
         regime = "ACTIVE"
     else:
         regime = "ACTIVE"
-    return f"RADAR / {regime}"
+    return f"SE // {regime}"
 
 
 def _promoted_header(final_score: float) -> str:
@@ -166,7 +167,17 @@ def _promoted_header(final_score: float) -> str:
         regime = "NORMAL"
     else:
         regime = "NORMAL"
-    return f"SIGNAL / {regime}"
+    return f"SE // VALIDATED {regime}"
+
+
+def _conviction_label(attention_score: float, risk_score: float, lifecycle: str) -> str:
+    if lifecycle == "dex" and attention_score >= 0.85 and risk_score <= 0.15:
+        return "Momentum confirmed"
+    if attention_score >= 0.80:
+        return "Strong coordination"
+    if attention_score >= 0.65:
+        return "Early follow-through"
+    return "Developing flow"
 
 
 def _wallet_signal_lines(risk_flags: dict) -> str:
@@ -262,6 +273,33 @@ def _links_lines(token: str, metrics: dict) -> str:
     if socials:
         lines.append(" | ".join(socials))
     return _section_lines(lines)
+
+
+def _reason_stack(e: Event) -> str:
+    reasons = []
+    if isinstance(e.reasons, list):
+        reasons.extend(str(r) for r in e.reasons if isinstance(r, str))
+    extra = e.extra if isinstance(e.extra, dict) else {}
+    attn_reasons = extra.get("attention_reasons") if isinstance(extra.get("attention_reasons"), list) else []
+    for reason in attn_reasons:
+        if isinstance(reason, str):
+            reasons.append(reason)
+    seen = []
+    for reason in reasons:
+        if reason not in seen and not reason.startswith("source_unavailable"):
+            seen.append(reason)
+    if not seen:
+        return "- flow + structure"
+    return "\n".join(f"- {reason.replace('_', ' ')}" for reason in seen[:4])
+
+
+def _market_tape(metrics: dict) -> str:
+    liq = _fmt_usd(metrics.get("liq"))
+    mc = _fmt_usd(metrics.get("market_cap"))
+    vol5 = _fmt_usd(metrics.get("volume_m5"))
+    age = _fmt_age_minutes(metrics.get("age"))
+    chg5 = _format_change_pct(metrics.get("price_change_m5")) or "—"
+    return f"`LIQ {liq}` `MC {mc}` `VOL5 {vol5}` `AGE {age}` `M5 {chg5}`"
 
 
 def _token_labels_from_event(e: Event) -> tuple[str, str]:
@@ -380,6 +418,7 @@ def _format_candidate_like(e: Event, description: str) -> dict:
         _summary_field("Attention", f"`{attention_score:.2f}`"),
         _summary_field("Confidence", f"`{confidence_pct}`"),
         _summary_field("Lifecycle", f"`{_lifecycle_label(metrics.get('lifecycle'))}`"),
+        _summary_field("Conviction", f"`{_conviction_label(attention_score, risk_score, str(metrics.get('lifecycle') or ''))}`"),
         {
             "name": "Token",
             "value": _section_lines(
@@ -392,6 +431,11 @@ def _format_candidate_like(e: Event, description: str) -> dict:
                     ],
                 )
             ),
+            "inline": False,
+        },
+        {
+            "name": "Tape",
+            "value": _section_lines([_market_tape(metrics)]),
             "inline": False,
         },
         {
@@ -421,6 +465,11 @@ def _format_candidate_like(e: Event, description: str) -> dict:
             "inline": True,
         },
         {
+            "name": "Why It Triggered",
+            "value": _section_lines([_reason_stack(e)]),
+            "inline": False,
+        },
+        {
             "name": "Links",
             "value": _links_lines(token, metrics),
             "inline": False,
@@ -430,9 +479,9 @@ def _format_candidate_like(e: Event, description: str) -> dict:
     embed = {
         "title": _candidate_header(attention_score, risk_score),
         "description": f"{description}\n",
-        "color": AMBER,
+        "color": SLATE if attention_score < 0.85 else AMBER,
         "fields": fields,
-        "footer": {"text": "Signal Engine / Radar"},
+        "footer": {"text": "Signal Engine / Radar Deck"},
     }
     return {"embeds": [embed]}
 
@@ -463,6 +512,7 @@ def format_discord(e: Event) -> dict:
             _summary_field("Final Score", f"`{e.confidence:.2f}`"),
             _summary_field("Confidence", f"`{confidence_pct}`"),
             _summary_field("Lifecycle", f"`{_lifecycle_label(metrics.get('lifecycle'))}`"),
+            _summary_field("Conviction", f"`{_conviction_label(ascore, rscore, str(metrics.get('lifecycle') or ''))}`"),
             {
                 "name": "Token",
                 "value": _section_lines(
@@ -479,6 +529,13 @@ def format_discord(e: Event) -> dict:
                 "inline": False,
             }
         ]
+        fields.append(
+            {
+                "name": "Tape",
+                "value": _section_lines([_market_tape(metrics)]),
+                "inline": False,
+            }
+        )
         fields.append(
             {
                 "name": "Market",
@@ -513,6 +570,13 @@ def format_discord(e: Event) -> dict:
                 "inline": True,
             }
         )
+        fields.append(
+            {
+                "name": "Why It Triggered",
+                "value": _section_lines([_reason_stack(e)]),
+                "inline": False,
+            }
+        )
         if reasons:
             fields.append(
                 {
@@ -534,7 +598,7 @@ def format_discord(e: Event) -> dict:
             "description": "Validated by layered gates.\n",
             "color": DARK_RED,
             "fields": fields,
-            "footer": {"text": "Signal Engine / Validated"},
+            "footer": {"text": "Signal Engine / Alpha Deck"},
         }
         return {"embeds": [embed]}
 
