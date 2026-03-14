@@ -425,7 +425,19 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         reasons.append(f"narrative:{','.join(hits[:2])}")
 
     x_score = 0.0
-    if ENABLE_X_SIGNAL and token:
+    should_query_x = (
+        ENABLE_X_SIGNAL
+        and token
+        and (
+            local >= 0.20
+            or tracked_score > 0.0
+            or narrative_score > 0.0
+            or dex_boost > 0.0
+            or birdeye_score > 0.0
+            or pumpportal_score > 0.0
+        )
+    )
+    if should_query_x:
         extra = getattr(e, "extra", {}) if hasattr(e, "extra") else {}
         x_data = fetch_x_signal(
             token,

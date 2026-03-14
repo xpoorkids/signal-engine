@@ -7,7 +7,7 @@ from worker.config import X_BEARER_TOKEN, X_QUERY_TEMPLATE, X_SEARCH_MAX_RESULTS
 from worker.metadata import fetch_token_metadata
 
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-_CACHE_TTL_SEC = 60
+_CACHE_TTL_SEC = 300
 
 
 def _build_query(token: str, symbol: str, name: str) -> str:

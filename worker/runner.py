@@ -11,6 +11,7 @@ from worker.config import (
     ENABLE_DEX,
     EARLY_DEDUPE_TTL_SEC,
     ALERT_COOLDOWN_SEC,
+    HEATING_UP_ALERT_COOLDOWN_SEC,
 )
 from worker.state import EngineState, is_sig_new, can_alert
 from worker.events import Event
@@ -64,7 +65,8 @@ async def event_loop(q: asyncio.Queue) -> None:
             derived = await process_event(state, e)
             for de in derived:
                 if de.type in ("heating_up", "promoted"):
-                    if de.token and can_alert(state, de.token, ALERT_COOLDOWN_SEC):
+                    cooldown_sec = HEATING_UP_ALERT_COOLDOWN_SEC if de.type == "heating_up" else ALERT_COOLDOWN_SEC
+                    if de.token and can_alert(state, f"{de.type}:{de.token}", cooldown_sec):
                         if isinstance(de.extra, dict) and de.extra.get("candidate_send") is False:
                             continue
                         if de.type == "heating_up" and not _should_send_heating_up(de):

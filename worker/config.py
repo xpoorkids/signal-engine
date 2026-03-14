@@ -98,6 +98,7 @@ X_SEARCH_MAX_RESULTS = int(os.getenv("X_SEARCH_MAX_RESULTS", "10"))
 # Dedupe / cooldown
 EARLY_DEDUPE_TTL_SEC = int(os.getenv("EARLY_DEDUPE_TTL_SEC", "600"))
 ALERT_COOLDOWN_SEC = int(os.getenv("ALERT_COOLDOWN_SEC", "120"))
+HEATING_UP_ALERT_COOLDOWN_SEC = int(os.getenv("HEATING_UP_ALERT_COOLDOWN_SEC", "900"))
 
 # Alert admission gate (layered quality filters)
 ENABLE_ALERT_GATE = env_bool("ENABLE_ALERT_GATE", "1")
