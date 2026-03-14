@@ -21,6 +21,33 @@ import worker.scanner as scanner
 from app.services.state_service import record_wallet_signal, init as state_init
 
 
+def _should_send_heating_up(de: Event) -> bool:
+    extra = de.extra if isinstance(de.extra, dict) else {}
+    metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
+    lifecycle = str(extra.get("lifecycle") or "")
+    dex_summary = extra.get("dex_summary") if isinstance(extra.get("dex_summary"), dict) else {}
+    tracked_hits = int(metrics.get("tracked_wallet_hits") or 0)
+    kol_hits = int(metrics.get("kol_wallet_hits") or 0)
+    x_mentions = int(metrics.get("x_tweet_count") or 0)
+    x_authors = int(metrics.get("x_unique_authors") or 0)
+    boosts = int(metrics.get("dexscreener_boosts_count") or 0)
+    liq = float((dex_summary or {}).get("liquidity_usd") or 0.0)
+    strong_quality = (
+        kol_hits >= 1
+        or tracked_hits >= 2
+        or (x_mentions >= 5 and x_authors >= 3)
+        or boosts >= 1
+        or (lifecycle == "dex" and liq >= 8000)
+    )
+    if not strong_quality:
+        print(
+            f"[heating-up-skip] token={de.token} lifecycle={lifecycle or 'unknown'} "
+            f"tracked={tracked_hits} kol={kol_hits} x_mentions={x_mentions} x_authors={x_authors} boosts={boosts} liq={liq:.0f}",
+            flush=True,
+        )
+    return strong_quality
+
+
 async def event_loop(q: asyncio.Queue) -> None:
     state = EngineState()
     state_init()
@@ -39,6 +66,8 @@ async def event_loop(q: asyncio.Queue) -> None:
                 if de.type in ("heating_up", "promoted"):
                     if de.token and can_alert(state, de.token, ALERT_COOLDOWN_SEC):
                         if isinstance(de.extra, dict) and de.extra.get("candidate_send") is False:
+                            continue
+                        if de.type == "heating_up" and not _should_send_heating_up(de):
                             continue
                         buyer = de.extra.get("buyer") if isinstance(de.extra, dict) else None
                         if isinstance(buyer, str) and buyer:
