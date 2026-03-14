@@ -74,6 +74,32 @@ def summarize_pair(pair: Dict[str, Any]) -> Dict[str, Any]:
     price_change = pair.get("priceChange") or {}
 
     m5_txns = txns.get("m5") or {}
+    info = pair.get("info") or {}
+    socials = info.get("socials") or []
+    websites = info.get("websites") or []
+
+    website_url = None
+    twitter_url = None
+    telegram_url = None
+    for item in websites:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").lower()
+        url = item.get("url")
+        if isinstance(url, str) and url:
+            if website_url is None or label == "website":
+                website_url = url
+    for item in socials:
+        if not isinstance(item, dict):
+            continue
+        social_type = str(item.get("type") or "").lower()
+        url = item.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        if social_type in ("twitter", "x") and not twitter_url:
+            twitter_url = url
+        elif social_type == "telegram" and not telegram_url:
+            telegram_url = url
 
     return {
         "pair_address": pair.get("pairAddress"),
@@ -89,4 +115,7 @@ def summarize_pair(pair: Dict[str, Any]) -> Dict[str, Any]:
         "age_minutes": age_minutes,
         "fdv": pair.get("fdv"),
         "market_cap": pair.get("marketCap"),
+        "website_url": website_url,
+        "twitter_url": twitter_url,
+        "telegram_url": telegram_url,
     }

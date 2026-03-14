@@ -81,11 +81,20 @@ def _extract_metrics(e: Event) -> dict:
         "age": age,
         "unique_buyers_5m": attention_metrics.get("unique_buyers_5m"),
         "unique_buyers_15m": attention_metrics.get("unique_buyers_15m"),
+        "volume_m5": dex_summary.get("volume_m5"),
+        "volume_h1": dex_summary.get("volume_h1"),
+        "txns_m5_buys": dex_summary.get("txns_m5_buys"),
+        "txns_m5_sells": dex_summary.get("txns_m5_sells"),
+        "price_change_m5": dex_summary.get("price_change_m5"),
+        "price_change_h1": dex_summary.get("price_change_h1"),
         "price_change_h24": dex_summary.get("price_change_h24"),
         "market_cap": dex_summary.get("market_cap") or dex_summary.get("fdv"),
         "risk_flags": risk_flags,
         "price_points": price_points,
         "lifecycle": lifecycle,
+        "website_url": dex_summary.get("website_url"),
+        "twitter_url": dex_summary.get("twitter_url"),
+        "telegram_url": dex_summary.get("telegram_url"),
     }
 
 
@@ -198,6 +207,61 @@ def _attention_signal_lines(e: Event, risk_flags: dict) -> str:
     if x_tweet_count > 0:
         lines.append(f"- x_mentions: {x_tweet_count} / authors: {x_unique_authors}")
     return "\n".join(lines[:5]) if lines else "- organic holder distribution"
+
+
+def _security_lines(e: Event, metrics: dict, risk_score: float) -> str:
+    extra = e.extra if isinstance(e.extra, dict) else {}
+    lines = [f"- risk_score: {risk_score:.2f}"]
+    elite = extra.get("elite_score")
+    if elite is not None:
+        lines.append(f"- elite_score: {elite}")
+    lifecycle = metrics.get("lifecycle")
+    if lifecycle:
+        lines.append(f"- lifecycle: {lifecycle}")
+    buys = metrics.get("txns_m5_buys")
+    sells = metrics.get("txns_m5_sells")
+    if buys is not None or sells is not None:
+        lines.append(f"- m5 flow: B {buys or 0} / S {sells or 0}")
+    return "\n".join(lines[:5])
+
+
+def _stats_lines(metrics: dict) -> str:
+    lines = []
+    age = _fmt_age_minutes(metrics.get("age"))
+    if age != "—":
+        lines.append(f"- age: {age}")
+    vol_m5 = _fmt_usd(metrics.get("volume_m5"))
+    if vol_m5 != "—":
+        lines.append(f"- vol 5m: {vol_m5}")
+    vol_h1 = _fmt_usd(metrics.get("volume_h1"))
+    if vol_h1 != "—":
+        lines.append(f"- vol 1h: {vol_h1}")
+    chg_m5 = _format_change_pct(metrics.get("price_change_m5"))
+    if chg_m5:
+        lines.append(f"- chg 5m: {chg_m5}")
+    chg_h1 = _format_change_pct(metrics.get("price_change_h1"))
+    if chg_h1:
+        lines.append(f"- chg 1h: {chg_h1}")
+    return "\n".join(lines[:5]) if lines else "- early / pending"
+
+
+def _links_lines(token: str, metrics: dict) -> str:
+    lines = [
+        f"[Dexscreener](https://dexscreener.com/solana/{token}) | [Birdeye](https://birdeye.so/token/{token}?chain=solana)"
+    ]
+    twitter_url = metrics.get("twitter_url")
+    website_url = metrics.get("website_url")
+    telegram_url = metrics.get("telegram_url")
+    socials = []
+    if isinstance(twitter_url, str) and twitter_url:
+        socials.append(f"[X]({twitter_url})")
+    if isinstance(website_url, str) and website_url:
+        socials.append(f"[Web]({website_url})")
+    if isinstance(telegram_url, str) and telegram_url:
+        socials.append(f"[TG]({telegram_url})")
+    if socials:
+        lines.append(" | ".join(socials))
+    return _section_lines(lines)
 
 
 def _token_labels_from_event(e: Event) -> tuple[str, str]:
@@ -342,18 +406,23 @@ def _format_candidate_like(e: Event, description: str) -> dict:
             "inline": False,
         },
         {
+            "name": "Stats",
+            "value": _section_lines([_stats_lines(metrics)]),
+            "inline": True,
+        },
+        {
             "name": "Signals",
             "value": _section_lines([_attention_signal_lines(e, metrics.get("risk_flags"))]),
-            "inline": False,
+            "inline": True,
+        },
+        {
+            "name": "Security",
+            "value": _section_lines([_security_lines(e, metrics, risk_score)]),
+            "inline": True,
         },
         {
             "name": "Links",
-            "value": _section_lines(
-                [
-                    f"[Dexscreener](https://dexscreener.com/solana/{token}) | "
-                    f"[Birdeye](https://birdeye.so/token/{token}?chain=solana)",
-                ]
-            ),
+            "value": _links_lines(token, metrics),
             "inline": False,
         },
     ]
@@ -425,9 +494,23 @@ def format_discord(e: Event) -> dict:
         )
         fields.append(
             {
+                "name": "Stats",
+                "value": _section_lines([_stats_lines(metrics)]),
+                "inline": True,
+            }
+        )
+        fields.append(
+            {
                 "name": "Signals",
                 "value": _section_lines([_attention_signal_lines(e, metrics.get("risk_flags"))]),
-                "inline": False,
+                "inline": True,
+            }
+        )
+        fields.append(
+            {
+                "name": "Security",
+                "value": _section_lines([_security_lines(e, metrics, rscore)]),
+                "inline": True,
             }
         )
         if reasons:
@@ -441,12 +524,7 @@ def format_discord(e: Event) -> dict:
         fields.append(
             {
                 "name": "Links",
-                "value": _section_lines(
-                    [
-                        f"[Dexscreener](https://dexscreener.com/solana/{token}) | "
-                        f"[Birdeye](https://birdeye.so/token/{token}?chain=solana)",
-                    ]
-                ),
+                "value": _links_lines(token, metrics),
                 "inline": False,
             }
         )
