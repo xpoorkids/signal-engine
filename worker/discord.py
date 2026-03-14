@@ -187,12 +187,16 @@ def _attention_signal_lines(e: Event, risk_flags: dict) -> str:
     tracked_hits = int(attention_metrics.get("tracked_wallet_hits") or 0)
     kol_hits = int(attention_metrics.get("kol_wallet_hits") or 0)
     narrative_hits = attention_metrics.get("narrative_hits") if isinstance(attention_metrics.get("narrative_hits"), list) else []
+    x_tweet_count = int(attention_metrics.get("x_tweet_count") or 0)
+    x_unique_authors = int(attention_metrics.get("x_unique_authors") or 0)
     if tracked_hits > 0:
         lines.append(f"- smart_wallets: {tracked_hits}")
     if kol_hits > 0:
         lines.append(f"- kol_wallets: {kol_hits}")
     if narrative_hits:
         lines.append(f"- narrative: {', '.join(str(x) for x in narrative_hits[:2])}")
+    if x_tweet_count > 0:
+        lines.append(f"- x_mentions: {x_tweet_count} / authors: {x_unique_authors}")
     return "\n".join(lines[:5]) if lines else "- organic holder distribution"
 
 

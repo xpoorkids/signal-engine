@@ -28,6 +28,7 @@ ENABLE_RISK_VETO = env_bool("ENABLE_RISK_VETO", "0")
 ENABLE_ATTENTION_BONUS = env_bool("ENABLE_ATTENTION_BONUS", "0")
 ENABLE_PUMPORTAL = env_bool("ENABLE_PUMPORTAL", "0")
 ENABLE_BIRDEYE = env_bool("ENABLE_BIRDEYE", "0")
+ENABLE_X_SIGNAL = env_bool("ENABLE_X_SIGNAL", "0")
 ENABLE_ATTENTION_CANDIDATE = env_bool("ENABLE_ATTENTION_CANDIDATE", "1")
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
@@ -37,6 +38,7 @@ HELIUS_WS_URL = os.getenv("HELIUS_WS_URL", "").strip()
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "").strip()
 HELIUS_RPC_URL = os.getenv("HELIUS_RPC_URL", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
+X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "").strip()
 
 PUMPFUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8NFybJ9eQk6UkDBeo3xjT2f1gk"
 RAYDIUM_AMM_PROGRAM_ID = "RVKd61ztZW9nhE7ztUj8iDSHPkS7cBvCqYJbF5v7Cwo"
@@ -90,6 +92,8 @@ RADAR_QUIET_RISK_MAX = float(os.getenv("RADAR_QUIET_RISK_MAX", "0.25"))
 TRACKED_SMART_WALLETS = set(env_csv("TRACKED_SMART_WALLETS"))
 KOL_WALLETS = set(env_csv("KOL_WALLETS"))
 NARRATIVE_KEYWORDS = [item.lower() for item in env_csv("NARRATIVE_KEYWORDS")]
+X_QUERY_TEMPLATE = os.getenv("X_QUERY_TEMPLATE", '"{name}" OR "${symbol}" -is:retweet -is:reply lang:en').strip()
+X_SEARCH_MAX_RESULTS = int(os.getenv("X_SEARCH_MAX_RESULTS", "10"))
 
 # Dedupe / cooldown
 EARLY_DEDUPE_TTL_SEC = int(os.getenv("EARLY_DEDUPE_TTL_SEC", "600"))

@@ -10,6 +10,7 @@ import requests
 from worker.config import (
     ENABLE_PUMPORTAL,
     ENABLE_BIRDEYE,
+    ENABLE_X_SIGNAL,
     BIRDEYE_API_KEY,
     TRACKED_SMART_WALLETS,
     KOL_WALLETS,
@@ -17,6 +18,7 @@ from worker.config import (
 )
 from worker.token_state import _ts
 from app.services.state_service import get_dynamic_tracked_wallets, get_dynamic_kol_wallets
+from worker.x_signal import fetch_x_signal
 
 DEXSCREENER_ORDERS_URL = "https://api.dexscreener.com/orders/v1/solana/{token}"
 DEX_CACHE_TTL_SEC = 30
@@ -335,6 +337,9 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         "tracked_wallet_hits": 0,
         "kol_wallet_hits": 0,
         "narrative_hits": [],
+        "x_tweet_count": 0,
+        "x_unique_authors": 0,
+        "x_likes": 0,
     }
 
     token = getattr(e, "token", None)
@@ -419,7 +424,30 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         narrative_score = min(0.10, len(hits) * 0.05)
         reasons.append(f"narrative:{','.join(hits[:2])}")
 
-    attention_score = local + dex_boost + birdeye_score + pumpportal_score + tracked_score + narrative_score
+    x_score = 0.0
+    if ENABLE_X_SIGNAL and token:
+        extra = getattr(e, "extra", {}) if hasattr(e, "extra") else {}
+        x_data = fetch_x_signal(
+            token,
+            str((extra or {}).get("symbol") or ""),
+            str((extra or {}).get("name") or ""),
+        )
+        if x_data:
+            metrics["x_tweet_count"] = int(x_data.get("tweet_count") or 0)
+            metrics["x_unique_authors"] = int(x_data.get("unique_authors") or 0)
+            metrics["x_likes"] = int(x_data.get("likes") or 0)
+            if metrics["x_tweet_count"] >= 3:
+                x_score += 0.05
+            if metrics["x_unique_authors"] >= 3:
+                x_score += 0.05
+            if metrics["x_likes"] >= 20:
+                x_score += 0.05
+            if x_score > 0:
+                reasons.append("x_social_momentum")
+        else:
+            reasons.append("source_unavailable:x")
+
+    attention_score = local + dex_boost + birdeye_score + pumpportal_score + tracked_score + narrative_score + x_score
     attention_score += _acceleration_boost(token or "")
     attention_score *= _anti_wash_multiplier(token or "")
     attention_score = max(0.0, min(attention_score, 1.0))
