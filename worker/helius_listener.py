@@ -17,6 +17,7 @@ from worker.config import (
     HELIUS_RPC_URL,
     PUMPFUN_PROGRAM_ID,
     RAYDIUM_AMM_PROGRAM_ID,
+    MIN_BUY_SOL_FOR_ATTENTION_SNIPER,
 )
 from worker.events import Event
 
@@ -662,7 +663,14 @@ class LogSwapProcessor:
         now = time.time()
         mint = buy.get("mint")
         buyer = buyer_signer or buy.get("buyer")
-        if not buyer or sol_spent is None or sol_spent <= 0 or method == "fallback":
+        if buyer and (sol_spent is None or sol_spent <= 0) and method == "fallback":
+            sol_spent = float(MIN_BUY_SOL_FOR_ATTENTION_SNIPER)
+            print(
+                f"[buy-size-fallback] sig={signature} token={mint} buyer={buyer} "
+                f"sol={sol_spent} delta_raw={buy.get('delta_raw')} decimals={buy.get('decimals')}",
+                flush=True,
+            )
+        if not buyer or sol_spent is None or sol_spent <= 0:
             print(
                 f"[buy-size-miss] sig={signature} token={mint} buyer={buyer} "
                 f"signer_candidates={signer_candidates} has_wsol_prepost={has_wsol_prepost} inner_transfer_sum={inner_transfer_sum}",
