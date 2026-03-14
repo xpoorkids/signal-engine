@@ -1023,8 +1023,8 @@ async def listen(q: asyncio.Queue) -> None:
                     try:
                         logs = (tx.get("meta") or {}).get("logMessages") or []
                         if logs and _is_buy_log(logs):
-                            trade_mints = extract_mints_from_token_balances(tx)
-                            trade_mint = trade_mints[0] if trade_mints else mint
+                            positive_deltas = extract_buyers_from_balance_deltas(tx)
+                            trade_mint = positive_deltas[0][0] if positive_deltas else mint
                             if trade_mint and buyer:
                                 sig = result.get("signature")
                                 print(
