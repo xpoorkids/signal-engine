@@ -37,9 +37,9 @@ def _should_send_heating_up(de: Event) -> bool:
     strong_quality = (
         kol_hits >= 1
         or tracked_hits >= 2
-        or (x_mentions >= 5 and x_authors >= 3)
         or boosts >= 1
-        or (lifecycle == "dex" and liq >= 8000)
+        or (lifecycle == "dex" and liq >= 15000)
+        or (x_mentions >= 10 and x_authors >= 10 and lifecycle == "dex")
     )
     if not strong_quality:
         print(
