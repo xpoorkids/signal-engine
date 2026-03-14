@@ -7,7 +7,14 @@ import threading
 
 import requests
 
-from worker.config import ENABLE_PUMPORTAL, ENABLE_BIRDEYE, BIRDEYE_API_KEY
+from worker.config import (
+    ENABLE_PUMPORTAL,
+    ENABLE_BIRDEYE,
+    BIRDEYE_API_KEY,
+    TRACKED_SMART_WALLETS,
+    KOL_WALLETS,
+    NARRATIVE_KEYWORDS,
+)
 from worker.token_state import _ts
 
 DEXSCREENER_ORDERS_URL = "https://api.dexscreener.com/orders/v1/solana/{token}"
@@ -19,6 +26,31 @@ DEXSCREENER_BOOST_THRESHOLD = 1
 PUMPORTAL_TRADE_BURST_THRESHOLD = 20
 
 _DEX_CACHE: Dict[str, tuple[float, Any]] = {}
+
+
+def _recent_buyers(state: Any, token: str, window_sec: int = 300) -> set[str]:
+    if not token:
+        return set()
+    try:
+        trades = getattr(state, "_buyer_trades", {}).get(token, [])
+    except Exception:
+        trades = []
+    if not trades:
+        return set()
+    cutoff = time.time() - window_sec
+    return {buyer for ts, buyer, _ in trades if ts >= cutoff}
+
+
+def _narrative_hits(e: Any) -> list[str]:
+    if not NARRATIVE_KEYWORDS:
+        return []
+    extra = getattr(e, "extra", {}) if hasattr(e, "extra") else {}
+    symbol = str((extra or {}).get("symbol") or "").lower()
+    name = str((extra or {}).get("name") or "").lower()
+    haystack = f"{symbol} {name}".strip()
+    if not haystack:
+        return []
+    return [kw for kw in NARRATIVE_KEYWORDS if kw in haystack]
 
 
 
@@ -299,6 +331,9 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         "dexscreener_boosts_count": 0,
         "pumportal_trade_burst": 0,
         "birdeye_trending": False,
+        "tracked_wallet_hits": 0,
+        "kol_wallet_hits": 0,
+        "narrative_hits": [],
     }
 
     token = getattr(e, "token", None)
@@ -360,7 +395,28 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         if ENABLE_PUMPORTAL:
             reasons.append("source_unavailable:pumpportal")
 
-    attention_score = local + dex_boost + birdeye_score + pumpportal_score
+    tracked_score = 0.0
+    recent_buyers = _recent_buyers(state, token or "")
+    if recent_buyers:
+        tracked_hits = len(recent_buyers & TRACKED_SMART_WALLETS)
+        kol_hits = len(recent_buyers & KOL_WALLETS)
+        metrics["tracked_wallet_hits"] = tracked_hits
+        metrics["kol_wallet_hits"] = kol_hits
+        if tracked_hits > 0:
+            tracked_score += min(0.15, tracked_hits * 0.05)
+            reasons.append("tracked_wallet_flow")
+        if kol_hits > 0:
+            tracked_score += min(0.20, kol_hits * 0.10)
+            reasons.append("kol_wallet_flow")
+
+    narrative_score = 0.0
+    hits = _narrative_hits(e)
+    if hits:
+        metrics["narrative_hits"] = hits[:3]
+        narrative_score = min(0.10, len(hits) * 0.05)
+        reasons.append(f"narrative:{','.join(hits[:2])}")
+
+    attention_score = local + dex_boost + birdeye_score + pumpportal_score + tracked_score + narrative_score
     attention_score += _acceleration_boost(token or "")
     attention_score *= _anti_wash_multiplier(token or "")
     attention_score = max(0.0, min(attention_score, 1.0))

@@ -179,6 +179,23 @@ def _wallet_signal_lines(risk_flags: dict) -> str:
     return "\n".join(lines)
 
 
+def _attention_signal_lines(e: Event, risk_flags: dict) -> str:
+    base = _wallet_signal_lines(risk_flags).splitlines()
+    lines = [line for line in base if line]
+    extra = e.extra if isinstance(e.extra, dict) else {}
+    attention_metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
+    tracked_hits = int(attention_metrics.get("tracked_wallet_hits") or 0)
+    kol_hits = int(attention_metrics.get("kol_wallet_hits") or 0)
+    narrative_hits = attention_metrics.get("narrative_hits") if isinstance(attention_metrics.get("narrative_hits"), list) else []
+    if tracked_hits > 0:
+        lines.append(f"- smart_wallets: {tracked_hits}")
+    if kol_hits > 0:
+        lines.append(f"- kol_wallets: {kol_hits}")
+    if narrative_hits:
+        lines.append(f"- narrative: {', '.join(str(x) for x in narrative_hits[:2])}")
+    return "\n".join(lines[:5]) if lines else "- organic holder distribution"
+
+
 def _token_labels_from_event(e: Event) -> tuple[str, str]:
     symbol = ""
     name = ""
@@ -331,7 +348,7 @@ def _format_candidate_like(e: Event, description: str) -> dict:
         _divider_field(),
         {
             "name": "Wallet Signals",
-            "value": _section_lines([_wallet_signal_lines(metrics.get("risk_flags"))]),
+            "value": _section_lines([_attention_signal_lines(e, metrics.get("risk_flags"))]),
             "inline": False,
         },
         _divider_field(),
@@ -417,7 +434,7 @@ def format_discord(e: Event) -> dict:
         fields.append(
             {
                 "name": "Wallet Signals",
-                "value": _section_lines([_wallet_signal_lines(metrics.get("risk_flags"))]),
+                "value": _section_lines([_attention_signal_lines(e, metrics.get("risk_flags"))]),
                 "inline": False,
             }
         )

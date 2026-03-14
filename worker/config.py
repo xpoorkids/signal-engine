@@ -5,6 +5,11 @@ def env_bool(name: str, default: str = "0") -> bool:
     return os.getenv(name, default).lower() in ("1", "true", "yes", "y", "on")
 
 
+def env_csv(name: str, default: str = "") -> list[str]:
+    raw = os.getenv(name, default)
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 DRY_RUN = env_bool("DRY_RUN", "1")
 
 ENABLE_WS = env_bool("ENABLE_WS", "1")
@@ -82,6 +87,9 @@ BLACKLIST_SECONDS = int(os.getenv("BLACKLIST_SECONDS", "600"))
 
 # Discord embed regime thresholds
 RADAR_QUIET_RISK_MAX = float(os.getenv("RADAR_QUIET_RISK_MAX", "0.25"))
+TRACKED_SMART_WALLETS = set(env_csv("TRACKED_SMART_WALLETS"))
+KOL_WALLETS = set(env_csv("KOL_WALLETS"))
+NARRATIVE_KEYWORDS = [item.lower() for item in env_csv("NARRATIVE_KEYWORDS")]
 
 # Dedupe / cooldown
 EARLY_DEDUPE_TTL_SEC = int(os.getenv("EARLY_DEDUPE_TTL_SEC", "600"))
