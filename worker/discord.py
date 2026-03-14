@@ -8,6 +8,7 @@ from worker.config import (
 )
 from worker.events import Event
 from worker.config import RADAR_QUIET_RISK_MAX
+from worker.metadata import fetch_token_metadata
 
 
 AMBER = 0xF4C430
@@ -178,12 +179,40 @@ def _wallet_signal_lines(risk_flags: dict) -> str:
     return "\n".join(lines)
 
 
-def _symbol_from_event(e: Event) -> str:
+def _token_labels_from_event(e: Event) -> tuple[str, str]:
+    symbol = ""
+    name = ""
     if isinstance(e.extra, dict):
         sym = e.extra.get("symbol")
         if isinstance(sym, str) and sym.strip():
-            return sym.strip().upper()
-    return "UNK"
+            symbol = sym.strip().upper()
+        raw_name = e.extra.get("name")
+        if isinstance(raw_name, str) and raw_name.strip():
+            name = raw_name.strip()
+    if e.token and (not symbol or not name):
+        meta = fetch_token_metadata(e.token)
+        if meta:
+            if not symbol:
+                symbol = str(meta.get("symbol") or "").strip().upper()
+            if not name:
+                name = str(meta.get("name") or "").strip()
+    if not symbol:
+        symbol = "UNK"
+    if not name:
+        name = symbol
+    return symbol, name
+
+
+def _display_confidence_score(e: Event, attention_score: float) -> float:
+    try:
+        raw = float(e.confidence)
+    except Exception:
+        raw = 0.0
+    if raw > 0:
+        return max(0.0, min(1.0, raw))
+    if e.type in ("candidate", "heating_up"):
+        return max(0.0, min(1.0, attention_score))
+    return 0.0
 
 
 def _fmt_title(e: Event) -> str:
@@ -214,11 +243,15 @@ def _lifecycle_label(raw: str | None) -> str:
 
 def _build_overview_lines(
     symbol: str,
+    name: str,
     full_addr: str,
     lines: list[str],
 ) -> list[str]:
     return [
-        "Token",
+        "Name",
+        f"  {name}",
+        "",
+        "Ticker",
         f"  ${symbol}",
         "",
         "Contract",
@@ -246,7 +279,7 @@ def _divider_field() -> dict:
 
 def _format_candidate_like(e: Event, description: str) -> dict:
     token = e.token or "unknown"
-    symbol = _symbol_from_event(e)
+    symbol, name = _token_labels_from_event(e)
     full_addr = _full_addr(token)
     attention_score = 0.0
     risk_score = 0.0
@@ -255,7 +288,7 @@ def _format_candidate_like(e: Event, description: str) -> dict:
         risk_score = float(e.extra.get("risk_score") or 0.0)
 
     metrics = _extract_metrics(e)
-    confidence_pct = render_confidence_pct(e.confidence)
+    confidence_pct = render_confidence_pct(_display_confidence_score(e, attention_score))
     mc_value = metrics.get("market_cap")
     liq_value = metrics.get("liq")
     liq_mc = "—"
@@ -271,6 +304,7 @@ def _format_candidate_like(e: Event, description: str) -> dict:
             "value": _section_lines(
                 _build_overview_lines(
                     symbol,
+                    name,
                     full_addr,
                     [
                         _label_value("Attention", f"{attention_score:.2f}"),
@@ -325,7 +359,7 @@ def _format_candidate_like(e: Event, description: str) -> dict:
 
 def format_discord(e: Event) -> dict:
     token = e.token or "unknown"
-    symbol = _symbol_from_event(e)
+    symbol, name = _token_labels_from_event(e)
     full_addr = _full_addr(token)
 
     if e.type == "promoted":
@@ -335,7 +369,7 @@ def format_discord(e: Event) -> dict:
         rscore = float(e.extra.get("risk_score") or 0.0) if isinstance(e.extra, dict) else 0.0
         ascore = float(e.extra.get("attention_score") or 0.0) if isinstance(e.extra, dict) else 0.0
         metrics = _extract_metrics(e)
-        confidence_pct = render_confidence_pct(e.confidence)
+        confidence_pct = render_confidence_pct(_display_confidence_score(e, ascore))
         mc_value = metrics.get("market_cap")
         liq_value = metrics.get("liq")
         liq_mc = "—"
@@ -351,6 +385,7 @@ def format_discord(e: Event) -> dict:
                 "value": _section_lines(
                     _build_overview_lines(
                         symbol,
+                        name,
                         full_addr,
                         [
                             _label_value("Final Score", f"{e.confidence:.2f} (0.75)"),
