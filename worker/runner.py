@@ -12,6 +12,7 @@ from worker.config import (
     EARLY_DEDUPE_TTL_SEC,
     ALERT_COOLDOWN_SEC,
     HEATING_UP_ALERT_COOLDOWN_SEC,
+    CANDIDATE_ALERT_COOLDOWN_SEC,
 )
 from worker.state import EngineState, is_sig_new, can_alert
 from worker.events import Event
@@ -76,6 +77,9 @@ async def event_loop(q: asyncio.Queue) -> None:
                             record_wallet_signal(buyer, de.token or "", de.type)
                         send_discord(de)
                 elif de.type == "candidate":
+                    if de.token and not can_alert(state, f"candidate:{de.token}", CANDIDATE_ALERT_COOLDOWN_SEC):
+                        print(f"[candidate-cooldown-skip] token={de.token}", flush=True)
+                        continue
                     if isinstance(de.extra, dict) and de.extra.get("candidate_send") is False:
                         continue
                     message_id = None

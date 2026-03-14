@@ -429,11 +429,10 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         ENABLE_X_SIGNAL
         and token
         and (
-            local >= 0.20
-            or tracked_score > 0.0
-            or narrative_score > 0.0
-            or dex_boost > 0.0
-            or birdeye_score > 0.0
+            tracked_score > 0.0
+            or (dex_boost > 0.0 and local >= 0.25)
+            or (narrative_score > 0.0 and local >= 0.25)
+            or (birdeye_score > 0.0 and local >= 0.20)
             or pumpportal_score > 0.0
         )
     )
