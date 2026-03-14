@@ -441,11 +441,14 @@ def send_discord(e: Event) -> None:
 
     try:
         r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=8)
+        print(f"[discord-http] status={r.status_code} token={e.token}", flush=True)
         if r.status_code >= 300:
+            print(f"[discord-http-error] status={r.status_code} token={e.token} body={r.text[:200]}", flush=True)
             print("[discord] send failed", r.status_code, r.text[:200])
         else:
             print("[discord] send ok", r.status_code)
     except Exception as ex:
+        print(f"[discord-http-error] token={e.token} error={ex}", flush=True)
         print("[discord] send exception", ex)
 
 

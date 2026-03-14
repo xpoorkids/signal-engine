@@ -29,6 +29,7 @@ from worker.config import (
     SNIPER_MIN_BURST10S,
     SNIPER_MIN_ELITE_SCORE,
     AGE_BYPASS_TTL_SECONDS,
+    DISCORD_WEBHOOK_URL,
     DECAY_WINDOW_SECONDS,
     BLACKLIST_SECONDS,
     CREATOR_RISK_WEIGHT,
@@ -273,6 +274,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
 
         # Elite layer: structural safety + score + age bypass + decay
         hard_fail = False
+        hard_fail_from_authority_checks = False
         try:
             mint_auth, freeze_auth = ELITE.auth_check(e.token)
             print(
@@ -282,9 +284,11 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             if mint_auth:
                 print(f"[risk-gate] token={e.token} reason=mint_authority_active", flush=True)
                 hard_fail = True
+                hard_fail_from_authority_checks = True
             if freeze_auth:
                 print(f"[risk-gate] token={e.token} reason=freeze_authority_active", flush=True)
                 hard_fail = True
+                hard_fail_from_authority_checks = True
         except Exception:
             pass
 
@@ -384,6 +388,38 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             age_bypassed = False
         extra["age_bypass_until"] = st.age_bypass_until if age_bypassed else 0.0
 
+        sniper_conditions_met = (
+            ENGINE_MODE == "balanced"
+            and unique_10s >= SNIPER_MIN_UNIQUE_10S
+            and burst_10s >= 6
+            and elite_score >= 8
+            and not hard_fail_from_authority_checks
+        )
+        if sniper_conditions_met:
+            if now_wall > st.age_bypass_until:
+                st.age_bypass_until = now_wall + AGE_BYPASS_TTL_SECONDS
+                extra["age_bypass_until"] = st.age_bypass_until
+            print(
+                f"[discord-sniper] token={e.token} elite={elite_score} unique_10s={unique_10s} burst10s={burst_10s}",
+                flush=True,
+            )
+            print(
+                f"[discord-send-attempt] tier=sniper url_set={1 if bool(DISCORD_WEBHOOK_URL) else 0} token={e.token}",
+                flush=True,
+            )
+            out.append(
+                Event(
+                    type="heating_up",
+                    source="engine",
+                    token=e.token,
+                    creator=ts.creator,
+                    confidence=e.confidence,
+                    reasons=e.reasons + ["sniper_route"],
+                    extra=dict(extra),
+                    signature=e.signature,
+                )
+            )
+
         accel_boost = 0.0
         if unique_10s == 3:
             accel_boost = 0.10
@@ -476,6 +512,11 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             )
             if not ok:
                 logger.info(
+                    "[pre-candidate-skip] token=%s sniper_conditions_met=%s",
+                    e.token,
+                    sniper_conditions_met,
+                )
+                logger.info(
                     "[candidate-skip] token=%s reasons=%s attention=%.2f risk=%.2f",
                     e.token,
                     gate_reasons,
@@ -502,8 +543,18 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 should_send = send_eligible and allow_rate
                 if not allow_rate:
                     if send_eligible:
+                        logger.info(
+                            "[pre-candidate-skip] token=%s sniper_conditions_met=%s",
+                            e.token,
+                            sniper_conditions_met,
+                        )
                         logger.info("[candidate-skip] reason=rate_limited token=%s", e.token)
                 elif not send_eligible:
+                    logger.info(
+                        "[pre-candidate-skip] token=%s sniper_conditions_met=%s",
+                        e.token,
+                        sniper_conditions_met,
+                    )
                     logger.info("[candidate-skip] reason=no_creator_or_improve token=%s", e.token)
 
                 extra["lifecycle"] = lifecycle
