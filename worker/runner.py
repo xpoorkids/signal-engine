@@ -65,36 +65,6 @@ async def run_worker() -> None:
     tasks = []
     q: asyncio.Queue = asyncio.Queue(maxsize=2000)
 
-    send_discord(
-        Event(
-            type="heating_up",
-            source="startup_test",
-            token="STARTUP_TEST_DISCORD",
-            creator="startup_test",
-            confidence=0.91,
-            reasons=["startup_test", "sniper_route"],
-            extra={
-                "symbol": "TEST",
-                "name": "Worker Startup Discord Test",
-                "elite_score": 14,
-                "attention_score": 0.92,
-                "risk_score": 0.05,
-                "attention_metrics": {
-                    "unique_buyers_5m": 12,
-                    "unique_buyers_15m": 18,
-                },
-                "dex_summary": {
-                    "liquidity_usd": 42000,
-                    "age_minutes": 1.2,
-                    "market_cap": 180000,
-                    "fdv": 180000,
-                    "price_change_h24": 22.4,
-                },
-                "lifecycle": "dex",
-            },
-        )
-    )
-
     tasks.append(asyncio.create_task(event_loop(q)))
     tasks.append(asyncio.create_task(heartbeat_loop()))
     if ENABLE_WS:

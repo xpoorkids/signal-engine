@@ -187,7 +187,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             buy_size_sol = float(sol_spent or 0.0)
             min_sol = (
                 MIN_BUY_SOL_FOR_ATTENTION_SNIPER
-                if ENGINE_MODE == "sniper"
+                if ENGINE_MODE in ("sniper", "balanced")
                 else MIN_BUY_SOL_FOR_ATTENTION_LONG
             )
             if buy_size_sol < min_sol:

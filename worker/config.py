@@ -60,7 +60,7 @@ CREATOR_RISK_WEIGHT = float(os.getenv("CREATOR_RISK_WEIGHT", "0.20"))
 EXECUTION_BONUS_CAP = float(os.getenv("EXECUTION_BONUS_CAP", "0.05"))
 MIN_EDGE_BPS = float(os.getenv("MIN_EDGE_BPS", "80"))
 
-ENGINE_MODE = os.getenv("ENGINE_MODE", "sniper")  # sniper | long_term
+ENGINE_MODE = os.getenv("ENGINE_MODE", "balanced")  # balanced | sniper | long_term
 
 # ignore dust buys for attention (still can log if you want)
 MIN_BUY_SOL_FOR_ATTENTION_SNIPER = float(os.getenv("MIN_BUY_SOL_FOR_ATTENTION_SNIPER", "0.01"))
