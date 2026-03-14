@@ -24,31 +24,38 @@ async def event_loop(q: asyncio.Queue) -> None:
     state = EngineState()
     while True:
         e: Event = await q.get()
-        if not is_sig_new(state, e.signature, EARLY_DEDUPE_TTL_SEC):
-            q.task_done()
-            continue
+        dedupe_sig = f"{e.signature}:{e.type}:{e.token or ''}" if e.signature else None
+        try:
+            print(f"[event-loop] recv type={e.type} token={e.token} sig={e.signature}", flush=True)
+            if not is_sig_new(state, dedupe_sig, EARLY_DEDUPE_TTL_SEC):
+                print(f"[event-loop-skip] reason=dedupe type={e.type} token={e.token} sig={e.signature}", flush=True)
+                q.task_done()
+                continue
 
-        derived = await process_event(state, e)
-        for de in derived:
-            if de.type in ("heating_up", "promoted"):
-                if de.token and can_alert(state, de.token, ALERT_COOLDOWN_SEC):
+            derived = await process_event(state, e)
+            for de in derived:
+                if de.type in ("heating_up", "promoted"):
+                    if de.token and can_alert(state, de.token, ALERT_COOLDOWN_SEC):
+                        if isinstance(de.extra, dict) and de.extra.get("candidate_send") is False:
+                            continue
+                        send_discord(de)
+                elif de.type == "candidate":
                     if isinstance(de.extra, dict) and de.extra.get("candidate_send") is False:
                         continue
-                    send_discord(de)
-            elif de.type == "candidate":
-                if isinstance(de.extra, dict) and de.extra.get("candidate_send") is False:
-                    continue
-                message_id = None
-                if isinstance(de.extra, dict):
-                    if de.extra.get("candidate_edit") and de.extra.get("candidate_message_id"):
-                        message_id = de.extra.get("candidate_message_id")
-                msg_id = send_candidate_discord(de, message_id=message_id)
-                if msg_id:
-                    from app.services.state_service import update_candidate_message_id, mark_candidate_alert_sent
-                    update_candidate_message_id(de.token, msg_id)
-                    mark_candidate_alert_sent(de.token)
-
-        q.task_done()
+                    message_id = None
+                    if isinstance(de.extra, dict):
+                        if de.extra.get("candidate_edit") and de.extra.get("candidate_message_id"):
+                            message_id = de.extra.get("candidate_message_id")
+                    msg_id = send_candidate_discord(de, message_id=message_id)
+                    if msg_id:
+                        from app.services.state_service import update_candidate_message_id, mark_candidate_alert_sent
+                        update_candidate_message_id(de.token, msg_id)
+                        mark_candidate_alert_sent(de.token)
+        except Exception as ex:
+            print(f"[event-loop-error] type={e.type} token={e.token} sig={e.signature} error={type(ex).__name__}:{ex}", flush=True)
+            traceback.print_exc()
+        finally:
+            q.task_done()
 
 
 async def heartbeat_loop() -> None:
