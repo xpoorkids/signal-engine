@@ -148,15 +148,15 @@ def _section_lines(lines: list[str], indent: int = 2) -> str:
 
 def _candidate_header(attention_score: float, risk_score: float) -> str:
     if attention_score >= 0.85:
-        regime = "HOT"
+        regime = "BREAKOUT"
     elif attention_score >= 0.70:
-        regime = "ACTIVE"
+        regime = "SETUP"
     elif risk_score < RADAR_QUIET_RISK_MAX:
-        regime = "QUIET"
+        regime = "WATCH"
     elif risk_score < 0.50:
-        regime = "ACTIVE"
+        regime = "SETUP"
     else:
-        regime = "ACTIVE"
+        regime = "SETUP"
     return f"SE // {regime}"
 
 
