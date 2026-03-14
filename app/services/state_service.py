@@ -99,6 +99,18 @@ def init():
         )
         """
         )
+        c.execute(
+            """
+        CREATE TABLE IF NOT EXISTS wallet_watchlist (
+            wallet TEXT PRIMARY KEY,
+            score REAL DEFAULT 0.0,
+            heating_hits INTEGER DEFAULT 0,
+            promoted_hits INTEGER DEFAULT 0,
+            last_token TEXT,
+            last_seen INTEGER DEFAULT 0
+        )
+        """
+        )
 
 
 def upsert_seen(token: str, metrics: dict):
@@ -452,6 +464,59 @@ def should_mute(token: str) -> int:
             return 0
         muted_until = row[0] or 0
         return muted_until if muted_until > now else 0
+
+
+def record_wallet_signal(wallet: str, token: str, tier: str) -> None:
+    if not wallet:
+        return
+    now = int(time.time())
+    heating_inc = 1 if tier == "heating_up" else 0
+    promoted_inc = 1 if tier == "promoted" else 0
+    score_inc = 1.0 if tier == "heating_up" else 3.0 if tier == "promoted" else 0.0
+    with _connect() as c:
+        c.execute(
+            """
+            INSERT INTO wallet_watchlist (wallet, score, heating_hits, promoted_hits, last_token, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(wallet) DO UPDATE SET
+                score=wallet_watchlist.score + excluded.score,
+                heating_hits=wallet_watchlist.heating_hits + excluded.heating_hits,
+                promoted_hits=wallet_watchlist.promoted_hits + excluded.promoted_hits,
+                last_token=excluded.last_token,
+                last_seen=excluded.last_seen
+        """,
+            (wallet, score_inc, heating_inc, promoted_inc, token, now),
+        )
+
+
+def get_dynamic_tracked_wallets(min_score: float = 2.0, limit: int = 200) -> set[str]:
+    with _connect() as c:
+        rows = c.execute(
+            """
+            SELECT wallet
+            FROM wallet_watchlist
+            WHERE score >= ?
+            ORDER BY score DESC, last_seen DESC
+            LIMIT ?
+        """,
+            (min_score, limit),
+        ).fetchall()
+    return {row[0] for row in rows if row and row[0]}
+
+
+def get_dynamic_kol_wallets(min_promoted_hits: int = 1, min_score: float = 3.0, limit: int = 100) -> set[str]:
+    with _connect() as c:
+        rows = c.execute(
+            """
+            SELECT wallet
+            FROM wallet_watchlist
+            WHERE promoted_hits >= ? AND score >= ?
+            ORDER BY promoted_hits DESC, score DESC, last_seen DESC
+            LIMIT ?
+        """,
+            (min_promoted_hits, min_score, limit),
+        ).fetchall()
+    return {row[0] for row in rows if row and row[0]}
 
 
 def adaptive_cooldown(base_cooldown: int, sent_count: int) -> int:

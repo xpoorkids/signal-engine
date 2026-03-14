@@ -16,6 +16,7 @@ from worker.config import (
     NARRATIVE_KEYWORDS,
 )
 from worker.token_state import _ts
+from app.services.state_service import get_dynamic_tracked_wallets, get_dynamic_kol_wallets
 
 DEXSCREENER_ORDERS_URL = "https://api.dexscreener.com/orders/v1/solana/{token}"
 DEX_CACHE_TTL_SEC = 30
@@ -398,8 +399,10 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
     tracked_score = 0.0
     recent_buyers = _recent_buyers(state, token or "")
     if recent_buyers:
-        tracked_hits = len(recent_buyers & TRACKED_SMART_WALLETS)
-        kol_hits = len(recent_buyers & KOL_WALLETS)
+        tracked_wallets = set(TRACKED_SMART_WALLETS) | get_dynamic_tracked_wallets()
+        kol_wallets = set(KOL_WALLETS) | get_dynamic_kol_wallets()
+        tracked_hits = len(recent_buyers & tracked_wallets)
+        kol_hits = len(recent_buyers & kol_wallets)
         metrics["tracked_wallet_hits"] = tracked_hits
         metrics["kol_wallet_hits"] = kol_hits
         if tracked_hits > 0:

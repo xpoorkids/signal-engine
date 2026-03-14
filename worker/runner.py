@@ -18,10 +18,12 @@ from worker.promote import process_event
 from worker.discord import send_discord, send_candidate_discord
 from worker.helius_listener import start_helius_listeners
 import worker.scanner as scanner
+from app.services.state_service import record_wallet_signal, init as state_init
 
 
 async def event_loop(q: asyncio.Queue) -> None:
     state = EngineState()
+    state_init()
     while True:
         e: Event = await q.get()
         dedupe_sig = f"{e.signature}:{e.type}:{e.token or ''}" if e.signature else None
@@ -38,6 +40,9 @@ async def event_loop(q: asyncio.Queue) -> None:
                     if de.token and can_alert(state, de.token, ALERT_COOLDOWN_SEC):
                         if isinstance(de.extra, dict) and de.extra.get("candidate_send") is False:
                             continue
+                        buyer = de.extra.get("buyer") if isinstance(de.extra, dict) else None
+                        if isinstance(buyer, str) and buyer:
+                            record_wallet_signal(buyer, de.token or "", de.type)
                         send_discord(de)
                 elif de.type == "candidate":
                     if isinstance(de.extra, dict) and de.extra.get("candidate_send") is False:
