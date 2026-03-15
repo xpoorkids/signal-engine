@@ -21,6 +21,12 @@ from worker.discord import send_discord, send_candidate_discord
 from worker.helius_listener import start_helius_listeners
 import worker.scanner as scanner
 from app.services.state_service import record_wallet_signal, init as state_init
+from app.services.signal_learning_service import (
+    init as learning_init,
+    record_signal_event,
+    snapshot_worker,
+    daily_report_worker,
+)
 
 
 def _should_send_heating_up(de: Event) -> bool:
@@ -53,6 +59,7 @@ def _should_send_heating_up(de: Event) -> bool:
 async def event_loop(q: asyncio.Queue) -> None:
     state = EngineState()
     state_init()
+    learning_init()
     while True:
         e: Event = await q.get()
         dedupe_sig = f"{e.signature}:{e.type}:{e.token or ''}" if e.signature else None
@@ -76,6 +83,7 @@ async def event_loop(q: asyncio.Queue) -> None:
                         if isinstance(buyer, str) and buyer:
                             record_wallet_signal(buyer, de.token or "", de.type)
                         send_discord(de)
+                        record_signal_event(de)
                 elif de.type == "candidate":
                     if de.token and not can_alert(state, f"candidate:{de.token}", CANDIDATE_ALERT_COOLDOWN_SEC):
                         print(f"[candidate-cooldown-skip] token={de.token}", flush=True)
@@ -87,6 +95,11 @@ async def event_loop(q: asyncio.Queue) -> None:
                         if de.extra.get("candidate_edit") and de.extra.get("candidate_message_id"):
                             message_id = de.extra.get("candidate_message_id")
                     msg_id = send_candidate_discord(de, message_id=message_id)
+                    record_signal_event(
+                        de,
+                        external_ref=str(msg_id or message_id or ""),
+                        edited=bool(message_id),
+                    )
                     if msg_id:
                         from app.services.state_service import update_candidate_message_id, mark_candidate_alert_sent
                         update_candidate_message_id(de.token, msg_id)
@@ -112,8 +125,11 @@ async def run_worker() -> None:
     tasks = []
     q: asyncio.Queue = asyncio.Queue(maxsize=2000)
 
+    learning_init()
     tasks.append(asyncio.create_task(event_loop(q)))
     tasks.append(asyncio.create_task(heartbeat_loop()))
+    tasks.append(asyncio.create_task(snapshot_worker()))
+    tasks.append(asyncio.create_task(daily_report_worker()))
     if ENABLE_WS:
         tasks.append(asyncio.create_task(start_helius_listeners(q)))
     if ENABLE_DEX:
