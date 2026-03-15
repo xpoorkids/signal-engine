@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from app.services.review_service import review_contract
+from app.services.review_service import review_contract, render_review_html
 
 
 router = APIRouter()
@@ -12,9 +13,12 @@ class ReviewRequest(BaseModel):
 
 
 @router.get("/review/{token}")
-async def review_token(token: str):
+async def review_token(token: str, format: str = "html"):
     try:
-        return await review_contract(token)
+        review = await review_contract(token)
+        if str(format).lower() == "json":
+            return review
+        return HTMLResponse(content=render_review_html(review))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:

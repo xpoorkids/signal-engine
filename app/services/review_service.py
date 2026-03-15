@@ -1,3 +1,4 @@
+import html
 import re
 from typing import Any
 
@@ -25,6 +26,27 @@ def _int(value: Any) -> int:
         return int(value or 0)
     except Exception:
         return 0
+
+
+def _fmt_num(value: Any, decimals: int = 0, prefix: str = "") -> str:
+    try:
+        num = float(value)
+    except Exception:
+        return "—"
+    if decimals:
+        return f"{prefix}{num:,.{decimals}f}"
+    return f"{prefix}{num:,.0f}"
+
+
+def _fmt_pct(value: Any, decimals: int = 0) -> str:
+    try:
+        num = float(value)
+    except Exception:
+        return "—"
+    sign = "+" if num > 0 else ""
+    if decimals:
+        return f"{sign}{num:.{decimals}f}%"
+    return f"{sign}{num:.0f}%"
 
 
 def _review_attention(dex_summary: dict[str, Any], x_signal: dict[str, Any] | None) -> tuple[float, list[str]]:
@@ -241,3 +263,340 @@ async def review_contract(token: str) -> dict[str, Any]:
         },
         "discord_preview": format_discord(event),
     }
+
+
+def render_review_html(review: dict[str, Any]) -> str:
+    market = review.get("market") if isinstance(review.get("market"), dict) else {}
+    security = review.get("security") if isinstance(review.get("security"), dict) else {}
+    social = review.get("social") if isinstance(review.get("social"), dict) else {}
+    links = review.get("links") if isinstance(review.get("links"), dict) else {}
+
+    name = html.escape(str(review.get("name") or "UNK"))
+    symbol = html.escape(str(review.get("symbol") or "UNK"))
+    token = html.escape(str(review.get("token") or ""))
+    lifecycle = str(review.get("lifecycle") or "unknown")
+    lifecycle_label = "DEX" if lifecycle == "dex" else "BONDING CURVE"
+    attention = float(review.get("attention_score") or 0.0)
+    risk = float(review.get("risk_score") or 0.0)
+    elite = int(review.get("elite_score") or 0)
+
+    if attention >= 0.85:
+        stage = "BREAKOUT"
+    elif attention >= 0.70:
+        stage = "SETUP"
+    else:
+        stage = "WATCH"
+
+    attention_reasons = review.get("attention_reasons") if isinstance(review.get("attention_reasons"), list) else []
+    risk_reasons = review.get("risk_reasons") if isinstance(review.get("risk_reasons"), list) else []
+    reasons = attention_reasons + risk_reasons
+    if not reasons:
+        reasons = ["pending_signals"]
+
+    x_count = _int(social.get("tweet_count"))
+    x_authors = _int(social.get("unique_authors"))
+    x_likes = _int(social.get("likes"))
+    holder_risk = security.get("holder_risk") if isinstance(security.get("holder_risk"), dict) else {}
+
+    def chip(label: str, value: str, tone: str = "") -> str:
+        tone_class = f" chip-{tone}" if tone else ""
+        return f'<div class="chip{tone_class}"><span>{html.escape(label)}</span><strong>{html.escape(value)}</strong></div>'
+
+    def stat(label: str, value: str) -> str:
+        return f'<div class="stat"><span>{html.escape(label)}</span><strong>{html.escape(value)}</strong></div>'
+
+    def link_button(label: str, url: Any) -> str:
+        if not isinstance(url, str) or not url:
+            return ""
+        safe_url = html.escape(url, quote=True)
+        return f'<a class="link-btn" href="{safe_url}" target="_blank" rel="noopener noreferrer">{html.escape(label)}</a>'
+
+    reason_items = "".join(
+        f"<li>{html.escape(str(reason).replace('_', ' '))}</li>" for reason in reasons[:8]
+    )
+
+    html_out = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Signal Engine Review // {symbol}</title>
+  <style>
+    :root {{
+      --bg: #08111a;
+      --panel: rgba(11, 24, 36, 0.88);
+      --panel-2: rgba(16, 33, 48, 0.92);
+      --line: rgba(123, 162, 196, 0.18);
+      --text: #e8f0f7;
+      --muted: #8ea4b8;
+      --gold: #f3bd3f;
+      --teal: #49dcb1;
+      --red: #ff6b6b;
+      --blue: #7cb7ff;
+      --shadow: 0 20px 60px rgba(0,0,0,0.45);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: "Segoe UI", "SF Pro Display", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(243,189,63,0.18), transparent 28%),
+        radial-gradient(circle at top right, rgba(73,220,177,0.12), transparent 24%),
+        linear-gradient(180deg, #071019 0%, #0b1723 100%);
+      color: var(--text);
+      min-height: 100vh;
+    }}
+    .shell {{
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px 18px 40px;
+    }}
+    .hero {{
+      display: grid;
+      grid-template-columns: 1.3fr .7fr;
+      gap: 18px;
+      margin-bottom: 18px;
+    }}
+    .card {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(10px);
+    }}
+    .hero-main {{
+      padding: 22px;
+      background:
+        linear-gradient(135deg, rgba(243,189,63,0.12), rgba(124,183,255,0.08)),
+        var(--panel);
+    }}
+    .eyebrow {{
+      color: var(--gold);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+    }}
+    .title-row {{
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-top: 10px;
+    }}
+    .title h1 {{
+      margin: 0;
+      font-size: clamp(28px, 4vw, 44px);
+      line-height: 1;
+    }}
+    .title .sub {{
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 14px;
+      word-break: break-all;
+    }}
+    .stage {{
+      border: 1px solid rgba(243,189,63,0.28);
+      color: var(--gold);
+      background: rgba(243,189,63,0.08);
+      padding: 10px 14px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }}
+    .chips {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 18px;
+    }}
+    .chip {{
+      padding: 12px 14px;
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+    }}
+    .chip span {{
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .12em;
+      margin-bottom: 6px;
+    }}
+    .chip strong {{
+      font-size: 18px;
+      font-weight: 700;
+    }}
+    .chip-good strong {{ color: var(--teal); }}
+    .chip-warn strong {{ color: var(--gold); }}
+    .chip-bad strong {{ color: var(--red); }}
+    .hero-side {{
+      padding: 22px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 18px;
+    }}
+    .hero-side h3, .section h3 {{
+      margin: 0 0 12px;
+      font-size: 13px;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }}
+    .tape {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }}
+    .stat {{
+      padding: 12px 14px;
+      border-radius: 16px;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+    }}
+    .stat span {{
+      display: block;
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .11em;
+      margin-bottom: 6px;
+    }}
+    .stat strong {{
+      font-size: 18px;
+    }}
+    .grid {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+    }}
+    .section {{
+      padding: 20px;
+    }}
+    .list {{
+      margin: 0;
+      padding-left: 18px;
+      color: var(--text);
+    }}
+    .list li {{
+      margin: 0 0 8px;
+    }}
+    .muted {{
+      color: var(--muted);
+    }}
+    .link-row {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 10px;
+    }}
+    .link-btn {{
+      text-decoration: none;
+      color: var(--text);
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      padding: 10px 14px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 600;
+    }}
+    .footer {{
+      margin-top: 18px;
+      padding: 14px 18px;
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      background: rgba(7, 16, 25, 0.75);
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }}
+    @media (max-width: 980px) {{
+      .hero, .grid {{ grid-template-columns: 1fr; }}
+      .chips {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    }}
+    @media (max-width: 640px) {{
+      .shell {{ padding: 16px 12px 28px; }}
+      .title-row {{ flex-direction: column; }}
+      .chips, .tape {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="hero">
+      <section class="card hero-main">
+        <div class="eyebrow">Signal Engine Review</div>
+        <div class="title-row">
+          <div class="title">
+            <h1>{name} <span class="muted">${symbol}</span></h1>
+            <div class="sub">{token}</div>
+          </div>
+          <div class="stage">SE // {html.escape(stage)}</div>
+        </div>
+        <div class="chips">
+          {chip("Attention", f"{int(round(attention * 100))}%", "good" if attention >= 0.7 else "warn")}
+          {chip("Risk", f"{int(round(risk * 100))}%", "bad" if risk >= 0.4 else "warn" if risk >= 0.2 else "good")}
+          {chip("Elite", str(elite), "good" if elite >= 8 else "warn" if elite >= 4 else "bad")}
+          {chip("Lifecycle", lifecycle_label, "warn" if lifecycle == "bonding_curve" else "good")}
+        </div>
+      </section>
+      <aside class="card hero-side">
+        <div>
+          <h3>Tape</h3>
+          <div class="tape">
+            {stat("Liquidity", _fmt_num(market.get("liquidity_usd"), prefix="$"))}
+            {stat("Market Cap", _fmt_num(market.get("market_cap"), prefix="$"))}
+            {stat("Volume 5m", _fmt_num(market.get("volume_m5"), prefix="$"))}
+            {stat("Volume 1h", _fmt_num(market.get("volume_h1"), prefix="$"))}
+            {stat("M5 Change", _fmt_pct(market.get("price_change_m5"), 1))}
+            {stat("Age", _fmt_num(market.get("age_minutes"), 1) + "m" if market.get("age_minutes") is not None else "—")}
+          </div>
+        </div>
+        <div>
+          <h3>Links</h3>
+          <div class="link-row">
+            {link_button("DexScreener", links.get("dexscreener"))}
+            {link_button("Birdeye", links.get("birdeye"))}
+            {link_button("Website", links.get("website_url"))}
+            {link_button("X", links.get("twitter_url"))}
+            {link_button("Telegram", links.get("telegram_url"))}
+          </div>
+        </div>
+      </aside>
+    </div>
+    <div class="grid">
+      <section class="card section">
+        <h3>Why It Triggered</h3>
+        <ul class="list">{reason_items}</ul>
+      </section>
+      <section class="card section">
+        <h3>Security</h3>
+        <div class="tape">
+          {stat("Mint Auth", "ON" if security.get("mint_authority_active") else "OFF")}
+          {stat("Freeze Auth", "ON" if security.get("freeze_authority_active") else "OFF")}
+          {stat("LP Locked", "YES" if security.get("liquidity_locked") is True else "NO" if security.get("liquidity_locked") is False else "UNK")}
+          {stat("Holder Risk", str(holder_risk.get("risk") or "ok").upper())}
+        </div>
+        <div style="margin-top:12px" class="muted">{html.escape(str(holder_risk.get("reason") or "holder_ok"))}</div>
+      </section>
+      <section class="card section">
+        <h3>Social</h3>
+        <div class="tape">
+          {stat("X Mentions", str(x_count))}
+          {stat("Authors", str(x_authors))}
+          {stat("Likes", str(x_likes))}
+          {stat("24h Move", _fmt_pct(market.get("price_change_h24"), 1))}
+        </div>
+      </section>
+    </div>
+    <div class="footer">Signal Engine // Contract Intelligence Deck</div>
+  </div>
+</body>
+</html>"""
+    return html_out
