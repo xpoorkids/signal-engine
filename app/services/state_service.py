@@ -175,7 +175,7 @@ def record_candidate_sent(token: str) -> None:
         )
 
 
-def get_candidate_state(token: str) -> dict:
+def get_candidate_send_state(token: str) -> dict:
     with _connect() as c:
         row = c.execute(
             """

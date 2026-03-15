@@ -625,6 +625,33 @@ def generate_daily_learning_report(report_date: str | None = None) -> dict[str, 
     return report
 
 
+def get_learning_report(report_date: str) -> dict[str, Any] | None:
+    with _connect() as c:
+        row = c.execute(
+            "SELECT report_json FROM learning_reports WHERE report_date=?",
+            (report_date,),
+        ).fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        return json.loads(row[0])
+    except Exception:
+        return None
+
+
+def get_latest_learning_report() -> dict[str, Any] | None:
+    with _connect() as c:
+        row = c.execute(
+            "SELECT report_json FROM learning_reports ORDER BY report_date DESC LIMIT 1"
+        ).fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        return json.loads(row[0])
+    except Exception:
+        return None
+
+
 async def daily_report_worker() -> None:
     init()
     while True:

@@ -1,65 +1,124 @@
-┌──────────────────────────────────────────────────────────┐
-│                    DATA INGESTION                        │
-│                                                          │
-│  Helius WebSocket (REAL-TIME)                            │
-│   • Pump.fun                                             │
-│   • Raydium AMM                                          │
-│   • Orca Whirlpool                                      │
-│                                                          │
-│  Dexscreener (POLLING / ENRICHMENT)                      │
-│                                                          │
-└───────────────┬──────────────────────────────────────────┘
-                ▼
-┌──────────────────────────────────────────────────────────┐
-│               UNIFIED CANDIDATE PIPELINE                 │
-│                                                          │
-│  Canonical Candidate Object                              │
-│   • token mint                                           │
-│   • source (helius | dex)                                │
-│   • age_seconds                                          │
-│   • metrics (liq, vol, momentum)                         │
-│                                                          │
-└───────────────┬──────────────────────────────────────────┘
-                ▼
-┌──────────────────────────────────────────────────────────┐
-│               STATE + INTELLIGENCE LAYER                 │
-│                                                          │
-│  SQLite / Redis (engine.db)                              │
-│   • seen tokens                                          │
-│   • repeat counts                                       │
-│   • heating-up state 🔥                                  │
-│   • cooldowns                                           │
-│   • auto-mute                                           │
-│                                                          │
-│  Wallet Intelligence (Helius)                            │
-│   • holder concentration                                │
-│   • creator wallet                                      │
-│   • rug risk                                            │
-│                                                          │
-└───────────────┬──────────────────────────────────────────┘
-                ▼
-┌──────────────────────────────────────────────────────────┐
-│              DECISION / ESCALATION ENGINE                │
-│                                                          │
-│  Stages:                                                 │
-│   • early_ws                                             │
-│   • near_pass                                           │
-│   • heating_up 🔥                                       │
-│   • pass                                                │
-│   • rug                                                 │
-│                                                          │
-│  Deterministic + explainable                             │
-└───────────────┬──────────────────────────────────────────┘
-                ▼
-┌──────────────────────────────────────────────────────────┐
-│                PRESENTATION LAYER                        │
-│                                                          │
-│  Discord (Elite UX)                                      │
-│   • first hit = full embed                               │
-│   • repeats = collapsed                                 │
-│   • escalation = breakout                                │
-│   • wallet badges                                       │
-│   • confidence bars                                     │
-│                                                          │
-│  (future: web UI, API, CSV export)                       │
-└──────────────────────────────────────────────────────────┘
+# Signal Engine
+
+Production-oriented crypto signal engine for Solana token discovery, scoring, alerting, and post-alert learning.
+
+## What It Does
+
+- Ingests token activity from Helius and Dexscreener-derived enrichment paths.
+- Scores tokens with deterministic attention, risk, execution, creator, and promotion logic.
+- Publishes elite Discord alerts for candidate, watch, breakout, and risk-alert states.
+- Persists signal outcomes and generates learning reports without turning the engine into a black box.
+
+## System Shape
+
+### Core pipeline
+
+1. `worker.helius_listener` emits raw token/buy events.
+2. `worker.promote.process_event` enriches and scores events.
+3. `worker.runner` sends candidate/promoted/heating alerts to Discord.
+4. `app.services.signal_learning_service` records emitted signals and schedules post-alert snapshots.
+5. Daily learning reports summarize which setups and sessions performed best or worst.
+
+### Major subsystems
+
+- `worker/`
+  Runtime scoring, enrichment, promotion, Discord formatting, and alert dispatch.
+- `app/services/`
+  State, review APIs, presentation contracts, learning persistence, and HTTP-facing services.
+- `app/routes/`
+  FastAPI routes for health, scan, score, review, watch summaries, and learning reports.
+- `state/engine.db`
+  SQLite database for engine state, candidate state, wallet state, and learning tables.
+
+## New Learning Layer
+
+The engine remains deterministic. The learning layer observes outcomes around emitted signals.
+
+Tables added:
+
+- `signals`
+- `signal_snapshot_jobs`
+- `signal_snapshots`
+- `learning_reports`
+
+Features:
+
+- records every emitted candidate/heating/promoted alert
+- attaches session/daypart features
+- captures snapshots at `+5m`, `+15m`, `+1h`, `+4h`
+- classifies outcomes like `worked`, `failed`, `faded`, `strong_continuation`
+- generates daily learning summaries from real outcomes
+
+## HTTP Routes
+
+- `GET /health`
+- `POST /scan`
+- `POST /score`
+- `GET /packet/{symbol}`
+- `GET /watch/summary`
+- `GET /review/{token}`
+- `POST /review`
+- `GET /learning/report/latest`
+- `GET /learning/report/{report_date}`
+
+## Running Locally
+
+### Requirements
+
+- Python 3.11 preferred
+- environment variables configured in `.env`
+
+### Install
+
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+pip install pytest
+```
+
+### Run API
+
+```bash
+uvicorn app.main:app --reload
+```
+
+### Run worker
+
+```bash
+python -m worker.runner
+```
+
+## Validation
+
+### Syntax check
+
+```bash
+python -m compileall app worker tests ocr_token_alert_parser.py
+```
+
+### Unit tests
+
+```bash
+pytest -q tests/test_signal_metrics.py tests/test_signal_learning_service.py tests/test_learning_route.py
+```
+
+### Deterministic scan tests
+
+```bash
+python -m tests.scan_test
+python -m tests.scan_replay_test
+```
+
+## Design Rules
+
+- scoring remains explicit and reviewable
+- missing metrics never silently render as fake zeroes
+- Discord/UI presentation should reflect real computed values only
+- learning suggests improvements; it does not auto-rewrite the engine
+
+## Immediate Next Improvements
+
+- expose learning report summaries directly in Discord/admin surfaces
+- add richer regime analytics by weekday/session/lifecycle/risk bucket
+- add promotion outcome comparisons versus candidate-only alerts
+- add structured logging export for long-term storage and offline analysis
