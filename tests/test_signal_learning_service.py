@@ -156,6 +156,20 @@ def test_generate_daily_learning_report_summarizes_outcomes(tmp_path, monkeypatc
                 json.dumps({"outcome_label": "strong_continuation"}),
             ),
         )
+    sls.record_signal_decision(
+        token=event.token,
+        event_type="promoted",
+        stage="promoted",
+        decision="promotion_block",
+        reasons=["buyers_low", "attention<0.20"],
+        attention_score=0.83,
+        risk_score=0.18,
+        confidence_score=0.84,
+        lifecycle="dex",
+        ts_value=ts_value + 3600,
+        signal_id=signal_id,
+        source="test",
+    )
 
     report = sls.generate_daily_learning_report(report_date)
 
@@ -163,6 +177,10 @@ def test_generate_daily_learning_report_summarizes_outcomes(tmp_path, monkeypatc
     assert report["totals_by_type"]["promoted"] == 1
     assert report["outcomes_by_label"]["strong_continuation"] == 1
     assert report["sessions"]
+    assert report["tuning_snapshot"]["top_blockers"][0]["reason"] in {"attention<0.20", "buyers_low"}
+    assert report["tuning_snapshot"]["best_session_signal"]
+    assert "top_relax_calls" in report["tuning_snapshot"]
+    assert "worst_session_signal" in report["tuning_snapshot"]
 
     with sls._connect() as c:
         stored = c.execute(

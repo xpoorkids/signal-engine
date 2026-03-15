@@ -1826,6 +1826,15 @@ def generate_daily_learning_report(report_date: str | None = None) -> dict[str, 
             """,
             (start_ts, end_ts),
         ).fetchall()
+        decision_rows = c.execute(
+            """
+            SELECT signal_id, decision, reasons_json
+            FROM signal_decisions
+            WHERE created_ts >= ? AND created_ts < ?
+            ORDER BY created_ts ASC
+            """,
+            (start_ts, end_ts),
+        ).fetchall()
 
     latest_snapshot_by_signal: dict[str, dict[str, Any]] = {}
     for row in snapshot_rows:
@@ -1841,7 +1850,10 @@ def generate_daily_learning_report(report_date: str | None = None) -> dict[str, 
     totals_by_type: dict[str, int] = {}
     outcomes_by_label: dict[str, int] = {}
     sessions: dict[str, dict[str, Any]] = {}
+    session_signal_quality_map: dict[tuple[str, str], dict[str, Any]] = {}
     failing_clusters: list[dict[str, Any]] = []
+    top_blocker_counts: dict[str, int] = {}
+    reason_scorecards: dict[str, dict[str, Any]] = {}
 
     for row in signal_rows:
         signal_id, token, event_type, confidence_score, attention_score, risk_score, elite_score, session_bucket, local_daypart, is_weekend_utc, lifecycle = row
@@ -1865,6 +1877,23 @@ def generate_daily_learning_report(report_date: str | None = None) -> dict[str, 
             session_stats["avg_market_cap_change_pct"] += float(mc_change)
             session_stats["samples"] += 1
 
+        combo_key = (session_bucket or "unknown", event_type)
+        combo_stats = session_signal_quality_map.setdefault(
+            combo_key,
+            {
+                "session_bucket": session_bucket or "unknown",
+                "signal_type": event_type,
+                "total": 0,
+                "positive": 0,
+                "negative": 0,
+            },
+        )
+        combo_stats["total"] += 1
+        if outcome in {"worked", "strong_continuation"}:
+            combo_stats["positive"] += 1
+        if outcome in {"failed", "faded"}:
+            combo_stats["negative"] += 1
+
         if outcome in {"failed", "faded"}:
             failing_clusters.append(
                 {
@@ -1880,12 +1909,109 @@ def generate_daily_learning_report(report_date: str | None = None) -> dict[str, 
                 }
             )
 
+    for signal_id, decision, reasons_json in decision_rows:
+        try:
+            parsed = json.loads(reasons_json or "[]")
+            reasons = [str(item) for item in parsed] if isinstance(parsed, list) else []
+        except Exception:
+            reasons = []
+        latest = latest_snapshot_by_signal.get(signal_id, {})
+        outcome = str(latest.get("outcome_label") or "pending")
+        for reason in reasons:
+            top_blocker_counts[reason] = top_blocker_counts.get(reason, 0) + 1
+            card = reason_scorecards.setdefault(
+                reason,
+                {
+                    "reason": reason,
+                    "total": 0,
+                    "positive": 0,
+                    "negative": 0,
+                },
+            )
+            card["total"] += 1
+            if outcome in {"worked", "strong_continuation"}:
+                card["positive"] += 1
+            if outcome in {"failed", "faded"}:
+                card["negative"] += 1
+
     for stats in sessions.values():
         if stats["samples"] > 0:
             stats["avg_market_cap_change_pct"] = round(stats["avg_market_cap_change_pct"] / stats["samples"], 2)
         else:
             stats["avg_market_cap_change_pct"] = None
         del stats["samples"]
+
+    session_signal_quality: list[dict[str, Any]] = []
+    for item in session_signal_quality_map.values():
+        total = int(item["total"] or 0)
+        positive = int(item["positive"] or 0)
+        negative = int(item["negative"] or 0)
+        session_signal_quality.append(
+            {
+                **item,
+                "win_rate": round((positive / total) * 100.0, 1) if total else 0.0,
+                "fail_rate": round((negative / total) * 100.0, 1) if total else 0.0,
+            }
+        )
+    session_signal_quality.sort(key=lambda item: (-item["win_rate"], -item["total"], item["session_bucket"], item["signal_type"]))
+
+    reason_quality: list[dict[str, Any]] = []
+    for item in reason_scorecards.values():
+        total = int(item["total"] or 0)
+        positive = int(item["positive"] or 0)
+        negative = int(item["negative"] or 0)
+        reason_quality.append(
+            {
+                **item,
+                "positive_rate": round((positive / total) * 100.0, 1) if total else 0.0,
+                "fail_rate": round((negative / total) * 100.0, 1) if total else 0.0,
+            }
+        )
+    reason_quality.sort(key=lambda item: (-item["total"], item["reason"]))
+
+    threshold_guidance: list[dict[str, Any]] = []
+    for item in reason_quality:
+        total = int(item.get("total") or 0)
+        positive_rate = float(item.get("positive_rate") or 0.0)
+        fail_rate = float(item.get("fail_rate") or 0.0)
+        action = "hold"
+        if total >= 5 and positive_rate >= 60.0 and positive_rate >= fail_rate + 20.0:
+            action = "relax_slightly"
+        elif total >= 5 and fail_rate >= 60.0 and fail_rate >= positive_rate + 20.0:
+            action = "tighten"
+        elif total >= 3 and positive_rate >= 35.0 and fail_rate >= 35.0:
+            action = "review"
+        threshold_guidance.append(
+            {
+                "reason": item["reason"],
+                "action": action,
+                "sample_size": total,
+                "positive_rate": positive_rate,
+                "fail_rate": fail_rate,
+            }
+        )
+    threshold_guidance.sort(
+        key=lambda item: (
+            {"tighten": 0, "relax_slightly": 1, "review": 2, "hold": 3}.get(str(item["action"]), 4),
+            -int(item["sample_size"]),
+            str(item["reason"]),
+        )
+    )
+
+    tuning_snapshot = {
+        "top_blockers": [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(top_blocker_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+        ],
+        "top_relax_calls": [item for item in threshold_guidance if item["action"] == "relax_slightly"][:5],
+        "top_tighten_calls": [item for item in threshold_guidance if item["action"] == "tighten"][:5],
+        "top_review_calls": [item for item in threshold_guidance if item["action"] == "review"][:5],
+        "best_session_signal": session_signal_quality[:5],
+        "worst_session_signal": sorted(
+            session_signal_quality,
+            key=lambda item: (item["win_rate"], -item["total"], item["session_bucket"], item["signal_type"]),
+        )[:5],
+    }
 
     report = {
         "report_date": report_date,
@@ -1894,6 +2020,7 @@ def generate_daily_learning_report(report_date: str | None = None) -> dict[str, 
         "outcomes_by_label": outcomes_by_label,
         "sessions": sessions,
         "failing_clusters": failing_clusters[:20],
+        "tuning_snapshot": tuning_snapshot,
     }
 
     with _connect() as c:
