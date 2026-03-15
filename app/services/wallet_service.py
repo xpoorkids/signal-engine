@@ -2,19 +2,27 @@ import os
 
 import requests
 
-HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
-HELIUS_CLUSTER = os.getenv("HELIUS_CLUSTER", "mainnet-beta")
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "").strip()
+HELIUS_RPC_URL = os.getenv("HELIUS_RPC_URL", "").strip()
 
 TOP_HOLDER_WARN = float(os.getenv("WALLET_TOP_HOLDER_WARN", "0.08"))
 TOP10_WARN = float(os.getenv("WALLET_TOP10_WARN", "0.35"))
 
 
 def _helius_url():
-    return f"https://{HELIUS_CLUSTER}.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+    if HELIUS_RPC_URL:
+        if "api-key=" in HELIUS_RPC_URL or "apikey=" in HELIUS_RPC_URL or not HELIUS_API_KEY:
+            return HELIUS_RPC_URL
+        sep = "&" if "?" in HELIUS_RPC_URL else "?"
+        return f"{HELIUS_RPC_URL}{sep}api-key={HELIUS_API_KEY}"
+    if not HELIUS_API_KEY:
+        return ""
+    return f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
 
 def wallet_risk_score(token_mint: str) -> dict:
-    if not HELIUS_API_KEY:
+    helius_url = _helius_url()
+    if not helius_url:
         return {
             "enabled": False,
             "top_holder_pct": None,
@@ -30,9 +38,18 @@ def wallet_risk_score(token_mint: str) -> dict:
         "params": [token_mint],
     }
 
-    r = requests.post(_helius_url(), json=payload, timeout=12)
-    r.raise_for_status()
-    result = r.json().get("result", {})
+    try:
+        r = requests.post(helius_url, json=payload, timeout=12)
+        r.raise_for_status()
+        result = r.json().get("result", {})
+    except Exception:
+        return {
+            "enabled": True,
+            "top_holder_pct": None,
+            "top10_pct": None,
+            "risk": "warn",
+            "reason": "helius_unavailable",
+        }
     accounts = result.get("value", []) or []
 
     amounts = []

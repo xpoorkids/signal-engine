@@ -124,7 +124,16 @@ async def review_contract(token: str) -> dict[str, Any]:
 
     mint_authority, freeze_authority = ELITE.auth_check(token)
     liq_usd, liq_locked, liq_drop = ELITE.liq_check(token, dex_summary if dex_summary else None)
-    holder_risk = wallet_risk_score(token)
+    try:
+        holder_risk = wallet_risk_score(token)
+    except Exception:
+        holder_risk = {
+            "enabled": True,
+            "top_holder_pct": None,
+            "top10_pct": None,
+            "risk": "warn",
+            "reason": "helius_unavailable",
+        }
     x_signal = fetch_x_signal(
         token,
         str(metadata.get("symbol") or ""),
