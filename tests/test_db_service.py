@@ -14,3 +14,12 @@ def test_connect_sqlite_applies_wal_and_busy_timeout(tmp_path):
     assert str(journal_mode).lower() == "wal"
     assert int(busy_timeout) == 4321
     assert int(foreign_keys) == 1
+
+
+def test_connect_sqlite_creates_nested_parent_directories(tmp_path):
+    db_path = tmp_path / "nested" / "state" / "engine.db"
+
+    with connect_sqlite(db_path) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS smoke (id INTEGER PRIMARY KEY)")
+
+    assert db_path.exists()
