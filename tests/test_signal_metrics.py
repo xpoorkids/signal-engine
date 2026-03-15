@@ -88,11 +88,11 @@ def test_format_discord_missing_metrics_do_not_render_as_zero():
     )
 
     embed = format_discord(event)["embeds"][0]
-    token_field = _candidate_field(embed, "Token")
+    overview_field = _candidate_field(embed, "Overview")
     security_field = _candidate_field(embed, "Security")
     conviction_field = _candidate_field(embed, "Conviction")
 
-    assert "0.00" not in token_field
+    assert "0.00" not in overview_field
     assert "Insufficient data" in security_field
     assert "Not computed" in conviction_field
 
@@ -161,8 +161,50 @@ def test_format_discord_regression_sample_payload_keeps_real_risk():
     )
 
     embed = format_discord(event)["embeds"][0]
-    token_field = _candidate_field(embed, "Token")
+    overview_field = _candidate_field(embed, "Overview")
     security_field = _candidate_field(embed, "Security")
+    tape_field = _candidate_field(embed, "Tape")
 
-    assert "0.47" in token_field
-    assert "risk_score: 0.47" in security_field
+    assert "0.47" in overview_field
+    assert "Risk Score: 0.47" in security_field
+    assert "Structure:" in tape_field
+
+
+def test_format_discord_overview_uses_new_hierarchy():
+    event = Event(
+        type="candidate",
+        source="test",
+        token="So11111111111111111111111111111111111111112",
+        confidence=0.66,
+        extra={
+            "symbol": "PUMPERS",
+            "name": "Pumpers",
+            "lifecycle": "dex",
+            "risk_score": 0.50,
+            "attention_score": 0.51,
+            "elite_score": 10,
+            "metric_states": {
+                "risk_score": metric_state(0.50, status="computed"),
+                "attention_score": metric_state(0.51, status="computed"),
+            },
+            "risk_flags": {"holder_concentration": True},
+            "dex_summary": {
+                "liquidity_usd": 25482,
+                "market_cap": 21705,
+                "volume_m5": 141367,
+                "volume_h1": 141367,
+                "age_minutes": 3.2,
+                "price_change_m5": 190.0,
+                "price_change_h1": 190.0,
+                "txns_m5_buys": 1105,
+                "txns_m5_sells": 835,
+            },
+        },
+    )
+
+    embed = format_discord(event)["embeds"][0]
+
+    assert _candidate_field(embed, "Overview").count("Lifecycle") == 1
+    assert "Structure:" in _candidate_field(embed, "Tape")
+    assert "5m Volume:" in _candidate_field(embed, "Market")
+    assert "Risk" == embed["fields"][1]["name"]

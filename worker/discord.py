@@ -151,6 +151,69 @@ def _section_lines(lines: list[str], indent: int = 2) -> str:
     return "\n".join(f"{pad}{line}" for line in lines if line)
 
 
+def _metric_display(extra: dict | None, key: str, *, decimals: int = 2) -> str:
+    value = to_optional_float(get_metric_value(extra, key))
+    if value is not None:
+        return format_metric_number(value, decimals=decimals)
+    return metric_label(get_metric_meta(extra, key))
+
+
+def _score_band(score: float | None, *, invert: bool = False) -> str:
+    if score is None:
+        return "Unavailable"
+    value = 1.0 - score if invert else score
+    if value >= 0.80:
+        return "High"
+    if value >= 0.60:
+        return "Constructive"
+    if value >= 0.40:
+        return "Mixed"
+    return "Weak"
+
+
+def _summary_blurb(attention_score: float | None, risk_score: float | None, lifecycle: str) -> str:
+    if attention_score is None:
+        return "Signal quality incomplete. Monitor for fresh market structure."
+    if lifecycle == "dex" and attention_score >= 0.80 and risk_score is not None and risk_score <= 0.20:
+        return "Coordination and structure align. Tradable setup with confirmed liquidity."
+    if attention_score >= 0.70:
+        return "Early coordination detected. Watch for continued buyer breadth and stable liquidity."
+    if risk_score is not None and risk_score >= 0.50:
+        return "Interest is present, but risk remains elevated. Keep sizing defensive."
+    return "Market is forming. Wait for stronger participation or cleaner structure."
+
+
+def _token_risk_lines(extra: dict | None, lifecycle: str, risk_score: float | None, attention_score: float | None) -> list[str]:
+    return [
+        _label_value("Lifecycle", _lifecycle_label(lifecycle)),
+        _label_value("Attention", _metric_display(extra, "attention_score")),
+        _label_value("Risk", _metric_display(extra, "risk_score")),
+        _label_value("Conviction", _conviction_label(attention_score, risk_score, lifecycle)),
+    ]
+
+
+def _market_snapshot(metrics: dict) -> list[str]:
+    liq = _fmt_usd(metrics.get("liq"))
+    mc = _fmt_usd(metrics.get("market_cap"))
+    vol5 = _fmt_usd(metrics.get("volume_m5"))
+    age = _fmt_age_minutes(metrics.get("age"))
+    chg5 = _format_change_pct(metrics.get("price_change_m5")) or "—"
+    buys = metrics.get("txns_m5_buys")
+    sells = metrics.get("txns_m5_sells")
+    flow = "—" if buys is None and sells is None else f"B {buys if buys is not None else 'N/A'} / S {sells if sells is not None else 'N/A'}"
+    lines = [
+        f"Liquidity: {liq}",
+        f"Market Cap: {mc}",
+        f"5m Volume: {vol5}",
+        f"Age / M5: {age} / {chg5}",
+        f"5m Flow: {flow}",
+    ]
+    spark = render_sparkline(metrics.get("price_points"))
+    if spark:
+        lines.append(f"Price Path: {spark}")
+    return lines
+
+
 def _candidate_header(attention_score: float | None, risk_score: float | None) -> str:
     if attention_score is None:
         return "SE // MONITOR"
@@ -191,7 +254,7 @@ def _conviction_label(attention_score: float | None, risk_score: float | None, l
 
 def _wallet_signal_lines(risk_flags: dict) -> str:
     if not isinstance(risk_flags, dict):
-        return "organic holder distribution"
+        return "- organic holder distribution"
     order = [
         ("wallet_cluster", "wallet clustering"),
         ("holder_concentration", "holder concentration"),
@@ -226,7 +289,7 @@ def _attention_signal_lines(e: Event, risk_flags: dict) -> str:
         lines.append(f"- narrative: {', '.join(str(x) for x in narrative_hits[:2])}")
     if x_tweet_count > 0:
         lines.append(f"- x momentum: {x_tweet_count} mentions / {x_unique_authors} authors")
-    return "\n".join(lines[:5]) if lines else "- organic holder distribution"
+    return "\n".join(lines[:4]) if lines else "- organic holder distribution"
 
 
 def _pretty_reason(reason: str) -> str:
@@ -255,19 +318,20 @@ def _security_lines(e: Event, metrics: dict, risk_score: float | None) -> str:
     extra = e.extra if isinstance(e.extra, dict) else {}
     risk_meta = get_metric_meta(extra, "risk_score")
     if risk_score is None:
-        lines = [f"- risk_score: {metric_label(risk_meta)}"]
+        lines = [f"- Risk Score: {metric_label(risk_meta)}"]
     else:
-        lines = [f"- risk_score: {format_metric_number(risk_score, decimals=2)}"]
+        lines = [f"- Risk Score: {format_metric_number(risk_score, decimals=2)} ({_score_band(risk_score, invert=True)})"]
     elite = extra.get("elite_score")
     if elite is not None:
-        lines.append(f"- elite_score: {elite}")
+        elite_band = "Elite" if elite >= 10 else "Strong" if elite >= 8 else "Developing" if elite >= 5 else "Weak"
+        lines.append(f"- Elite Score: {elite} ({elite_band})")
     lifecycle = metrics.get("lifecycle")
     if lifecycle:
-        lines.append(f"- lifecycle: {lifecycle}")
+        lines.append(f"- Lifecycle: {_lifecycle_label(lifecycle)}")
     buys = metrics.get("txns_m5_buys")
     sells = metrics.get("txns_m5_sells")
     if buys is not None or sells is not None:
-        lines.append(f"- m5 flow: B {buys if buys is not None else 'N/A'} / S {sells if sells is not None else 'N/A'}")
+        lines.append(f"- 5m Flow: B {buys if buys is not None else 'N/A'} / S {sells if sells is not None else 'N/A'}")
     return "\n".join(lines[:5])
 
 
@@ -288,7 +352,7 @@ def _stats_lines(metrics: dict) -> str:
     chg_h1 = _format_change_pct(metrics.get("price_change_h1"))
     if chg_h1:
         lines.append(f"- chg 1h: {chg_h1}")
-    return "\n".join(lines[:5]) if lines else "- early / pending"
+    return "\n".join(lines[:4]) if lines else "- early / pending"
 
 
 def _links_lines(token: str, metrics: dict) -> str:
@@ -442,6 +506,7 @@ def _format_candidate_like(e: Event, description: str) -> dict:
     risk_score = to_optional_float(get_metric_value(e.extra, "risk_score")) if isinstance(e.extra, dict) else None
 
     metrics = _extract_metrics(e)
+    lifecycle = str(metrics.get("lifecycle") or "")
     confidence_pct = render_confidence_pct(_display_confidence_score(e, attention_score))
     mc_value = metrics.get("market_cap")
     liq_value = metrics.get("liq")
@@ -454,44 +519,32 @@ def _format_candidate_like(e: Event, description: str) -> dict:
 
     fields = [
         _summary_field("Attention", f"`{format_metric_number(attention_score, decimals=2, missing_label='N/A')}`"),
+        _summary_field("Risk", f"`{_metric_display(e.extra if isinstance(e.extra, dict) else {}, 'risk_score')}`"),
         _summary_field("Confidence", f"`{confidence_pct}`"),
-        _summary_field("Lifecycle", f"`{_lifecycle_label(metrics.get('lifecycle'))}`"),
         _summary_field("Conviction", f"`{_conviction_label(attention_score, risk_score, str(metrics.get('lifecycle') or ''))}`"),
         {
-            "name": "Token",
+            "name": "Overview",
             "value": _section_lines(
                 _build_overview_lines(
                     symbol,
                     name,
                     full_addr,
-                    [
-                        _label_value(
-                            "Risk",
-                            format_metric_number(
-                                risk_score,
-                                decimals=2,
-                                missing_label=metric_label(get_metric_meta(e.extra, "risk_score")),
-                            ),
-                        ),
-                    ],
+                    _token_risk_lines(e.extra if isinstance(e.extra, dict) else {}, lifecycle, risk_score, attention_score),
                 )
             ),
             "inline": False,
         },
         {
             "name": "Tape",
-            "value": _section_lines([_market_tape(metrics)]),
+            "value": _section_lines([
+                _market_tape(metrics),
+                f"Structure: attention {_score_band(attention_score)} / risk {_score_band(risk_score, invert=True)}",
+            ]),
             "inline": False,
         },
         {
             "name": "Market",
-            "value": _section_lines(
-                _build_market_snapshot_lines(
-                    _fmt_usd(metrics["liq"]),
-                    _fmt_usd(mc_value),
-                    liq_mc,
-                )
-            ),
+            "value": _section_lines(_market_snapshot(metrics) + [f"Liq / MC: {liq_mc}"]),
             "inline": False,
         },
         {
@@ -523,7 +576,7 @@ def _format_candidate_like(e: Event, description: str) -> dict:
 
     embed = {
         "title": _candidate_header(attention_score, risk_score),
-        "description": f"{description}\n",
+        "description": f"{description}\n{_summary_blurb(attention_score, risk_score, lifecycle)}\n",
         "color": SLATE if attention_score is None or attention_score < 0.85 else AMBER,
         "fields": fields,
         "footer": {"text": "Signal Engine / Radar Deck"},
@@ -543,6 +596,7 @@ def format_discord(e: Event) -> dict:
         rscore = to_optional_float(get_metric_value(e.extra, "risk_score")) if isinstance(e.extra, dict) else None
         ascore = to_optional_float(get_metric_value(e.extra, "attention_score")) if isinstance(e.extra, dict) else None
         metrics = _extract_metrics(e)
+        lifecycle = str(metrics.get("lifecycle") or "")
         confidence_pct = render_confidence_pct(_display_confidence_score(e, ascore))
         mc_value = metrics.get("market_cap")
         liq_value = metrics.get("liq")
@@ -555,20 +609,17 @@ def format_discord(e: Event) -> dict:
 
         fields = [
             _summary_field("Final Score", f"`{e.confidence:.2f}`"),
+            _summary_field("Risk", f"`{_metric_display(e.extra if isinstance(e.extra, dict) else {}, 'risk_score')}`"),
             _summary_field("Confidence", f"`{confidence_pct}`"),
-            _summary_field("Lifecycle", f"`{_lifecycle_label(metrics.get('lifecycle'))}`"),
             _summary_field("Conviction", f"`{_conviction_label(ascore, rscore, str(metrics.get('lifecycle') or ''))}`"),
             {
-                "name": "Token",
+                "name": "Overview",
                 "value": _section_lines(
                     _build_overview_lines(
                         symbol,
                         name,
                         full_addr,
-                        [
-                            _label_value("Risk", format_metric_number(rscore, decimals=2, missing_label=metric_label(get_metric_meta(e.extra, "risk_score")))),
-                            _label_value("Attention", format_metric_number(ascore, decimals=2, missing_label=metric_label(get_metric_meta(e.extra, "attention_score")))),
-                        ],
+                        _token_risk_lines(e.extra if isinstance(e.extra, dict) else {}, lifecycle, rscore, ascore),
                     )
                 ),
                 "inline": False,
@@ -577,20 +628,17 @@ def format_discord(e: Event) -> dict:
         fields.append(
             {
                 "name": "Tape",
-                "value": _section_lines([_market_tape(metrics)]),
+                "value": _section_lines([
+                    _market_tape(metrics),
+                    f"Structure: attention {_score_band(ascore)} / risk {_score_band(rscore, invert=True)}",
+                ]),
                 "inline": False,
             }
         )
         fields.append(
             {
                 "name": "Market",
-                "value": _section_lines(
-                    _build_market_snapshot_lines(
-                        _fmt_usd(metrics["liq"]),
-                        _fmt_usd(mc_value),
-                        liq_mc,
-                    )
-                ),
+                "value": _section_lines(_market_snapshot(metrics) + [f"Liq / MC: {liq_mc}"]),
                 "inline": False,
             }
         )
@@ -640,7 +688,7 @@ def format_discord(e: Event) -> dict:
 
         embed = {
             "title": _promoted_header(e.confidence),
-            "description": "Validated by layered gates.\n",
+            "description": f"Validated by layered gates.\n{_summary_blurb(ascore, rscore, lifecycle)}\n",
             "color": DARK_RED,
             "fields": fields,
             "footer": {"text": "Signal Engine / Alpha Deck"},
