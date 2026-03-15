@@ -12,7 +12,7 @@ from app.services.signal_learning_service import (
     render_learning_digest_html,
     render_learning_report_html,
 )
-from app.services.tuning_service import build_tuning_proposals
+from app.services.tuning_service import build_tuning_proposals, render_tuning_proposals_html
 
 
 router = APIRouter()
@@ -100,6 +100,11 @@ def learning_engine_health_dashboard(hours: int = 6):
 @router.get("/learning/tuning/proposals")
 def learning_tuning_proposals(hours: int = 72):
     return build_tuning_proposals(hours=max(1, hours))
+
+
+@router.get("/learning/tuning/proposals/dashboard")
+def learning_tuning_proposals_dashboard(hours: int = 72):
+    return HTMLResponse(content=render_tuning_proposals_html(hours=max(1, hours)))
 
 
 @router.get("/learning/diagnostics/dashboard")

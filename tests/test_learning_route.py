@@ -189,6 +189,10 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "proposals" in payload
     assert payload["proposal_count"] >= 1
 
+    dashboard_response = client.get("/learning/tuning/proposals/dashboard?hours=10000")
+    assert dashboard_response.status_code == 200
+    assert "Tuning Proposals" in dashboard_response.text
+
 
 def test_learning_diagnostics_dashboard_returns_html(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from app.services import signal_learning_service as sls
-from app.services.tuning_service import build_tuning_proposals
+from app.services.tuning_service import build_tuning_proposals, render_tuning_proposals_html
 
 
 def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkeypatch):
@@ -117,3 +117,7 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     assert mapped["dex_gate:liq<12000.0"]["action"] == "tighten"
     assert "aggressive" in proposals["preset_overrides"]
     assert "strict" in proposals["preset_overrides"]
+
+    html = render_tuning_proposals_html(hours=10_000)
+    assert "Tuning Proposals" in html
+    assert "Concrete Proposals" in html
