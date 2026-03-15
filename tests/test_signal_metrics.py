@@ -175,7 +175,7 @@ def test_format_discord_regression_sample_payload_keeps_real_risk():
     flow_field = _candidate_field(embed, "Flow + Structure")
 
     assert "**Token:** Test Token (`$TEST`)" in identity_field
-    assert "Risk Score: `0.47" in quality_field
+    assert "🟡 Risk Score: `0.47" in quality_field
     assert "Flow Bias:" in flow_field
     assert "**Contract:** `So11111111111111111111111111111111111111112`" in identity_field
 
@@ -244,12 +244,52 @@ def test_format_discord_overview_uses_new_hierarchy():
 
     assert embed["fields"][0]["name"] == "Command View"
     assert "**Token:** Pumpers (`$PUMPERS`)" in _candidate_field(embed, "Token Identity")
-    assert "Up 5m Buy Flow:" in _candidate_field(embed, "Flow + Structure")
+    assert "🟢 Up 5m Buy Flow:" in _candidate_field(embed, "Flow + Structure")
     assert "`LIQ $25,482`" in _candidate_field(embed, "Market Snapshot")
     assert "VOL5  $141.4K" == _candidate_field_name_contains(embed, "VOL5")
     assert "AGE  3.2m" == _candidate_field_name_contains(embed, "AGE")
     assert "\n" not in embed["description"].strip()
     assert "Watch-only" in embed["description"] or "Constructive setup" in embed["description"]
+
+
+def test_risk_alert_uses_colored_semantic_indicators():
+    event = Event(
+        type="candidate",
+        source="test",
+        token="So11111111111111111111111111111111111111112",
+        confidence=0.31,
+        extra={
+            "symbol": "RISKY",
+            "name": "Risky Token",
+            "lifecycle": "dex",
+            "risk_score": 0.70,
+            "attention_score": 0.56,
+            "elite_score": 9,
+            "metric_states": {
+                "risk_score": metric_state(0.70, status="computed"),
+                "attention_score": metric_state(0.56, status="computed"),
+            },
+            "risk_flags": {"holder_concentration": True},
+            "dex_summary": {
+                "market_cap": 17164,
+                "volume_m5": 29276,
+                "age_minutes": 2.0,
+                "price_change_m5": 534.0,
+                "txns_m5_buys": 298,
+                "txns_m5_sells": 180,
+            },
+        },
+    )
+
+    embed = format_discord(event)["embeds"][0]
+    flow_field = _candidate_field(embed, "Flow + Structure")
+    quality_field = _candidate_field(embed, "Quality")
+
+    assert "defensive" in embed["description"].lower() or "risk is elevated" in embed["description"].lower()
+    assert "LIQ  Unavailable" == _candidate_field_name_contains(embed, "LIQ")
+    assert "🟢 Flow Bias: `Buy-side`" in flow_field
+    assert "Attention mixed / risk high" in flow_field
+    assert "🔴 Risk Score: `0.70 (High)`" in quality_field
 
 
 def test_embed_field_count_stays_within_limits():

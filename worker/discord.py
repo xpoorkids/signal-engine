@@ -213,6 +213,8 @@ def _score_band(score: float | None, *, invert: bool = False) -> str:
 def _summary_blurb(attention_score: float | None, risk_score: float | None, lifecycle: str) -> str:
     if attention_score is None:
         return "Signal quality incomplete. Monitor for fresh market structure."
+    if risk_score is not None and risk_score >= 0.70:
+        return "Risk is elevated. Treat this as a defensive watch unless structure improves."
     if lifecycle == "dex" and attention_score >= 0.80 and risk_score is not None and risk_score <= 0.20:
         return "Coordination and structure align. Tradable setup with confirmed liquidity."
     if attention_score >= 0.70:
@@ -295,6 +297,59 @@ def _risk_band(risk_score: float | None) -> str:
     return "High"
 
 
+def _status_dot(color: str) -> str:
+    mapping = {
+        "green": "🟢",
+        "yellow": "🟡",
+        "red": "🔴",
+        "blue": "🔵",
+        "white": "⚪",
+    }
+    return mapping.get(color, "⚪")
+
+
+def _risk_dot(risk_score: float | None) -> str:
+    if risk_score is None:
+        return _status_dot("white")
+    if risk_score < 0.20:
+        return _status_dot("green")
+    if risk_score < 0.45:
+        return _status_dot("yellow")
+    if risk_score < 0.70:
+        return _status_dot("yellow")
+    return _status_dot("red")
+
+
+def _confidence_dot(confidence: float | None) -> str:
+    if confidence is None:
+        return _status_dot("white")
+    if confidence >= 0.80:
+        return _status_dot("green")
+    if confidence >= 0.45:
+        return _status_dot("yellow")
+    return _status_dot("red")
+
+
+def _flow_dot(flow_bias: str | None) -> str:
+    if flow_bias == "Buy-side":
+        return _status_dot("green")
+    if flow_bias == "Balanced":
+        return _status_dot("yellow")
+    if flow_bias == "Sell pressure":
+        return _status_dot("red")
+    return _status_dot("white")
+
+
+def _momentum_dot(label: str) -> str:
+    if label == "Confirming":
+        return _status_dot("green")
+    if label in {"Early", "Mixed"}:
+        return _status_dot("yellow")
+    if label == "Unconfirmed":
+        return _status_dot("red")
+    return _status_dot("white")
+
+
 def _confidence_band(confidence: float | None) -> str:
     if confidence is None:
         return "Unavailable"
@@ -332,14 +387,16 @@ def _build_flow_section(metrics: dict, attention_score: float | None, risk_score
     buys = metrics.get("txns_m5_buys")
     sells = metrics.get("txns_m5_sells")
     flow_bias = _flow_bias_label(buys if isinstance(buys, int) else None, sells if isinstance(sells, int) else None)
+    momentum = _momentum_label(attention_score, metrics)
+    structure = f"Attention {_score_band(attention_score).lower()} / risk {_risk_band(risk_score).lower()}"
     lines = []
     if buys is not None or sells is not None:
-        lines.append(f"- Up 5m Buy Flow: `{buys if buys is not None else 'N/A'}`")
-        lines.append(f"- Down 5m Sell Flow: `{sells if sells is not None else 'N/A'}`")
+        lines.append(f"- {_status_dot('green')} Up 5m Buy Flow: `{buys if buys is not None else 'N/A'}`")
+        lines.append(f"- {_status_dot('red')} Down 5m Sell Flow: `{sells if sells is not None else 'N/A'}`")
     if flow_bias:
-        lines.append(f"- Flow Bias: `{flow_bias}`")
-    lines.append(f"- Momentum: `{_momentum_label(attention_score, metrics)}`")
-    lines.append(f"- Structure: `{_score_band(attention_score)} attention / {_score_band(risk_score, invert=True)} risk`")
+        lines.append(f"- {_flow_dot(flow_bias)} Flow Bias: `{flow_bias}`")
+    lines.append(f"- {_momentum_dot(momentum)} Momentum: `{momentum}`")
+    lines.append(f"- Structure: `{structure}`")
     return "\n".join(lines[:5])
 
 
@@ -363,8 +420,8 @@ def _build_quality_section(e: Event, metrics: dict, risk_score: float | None, co
     risk_flags = extra.get("risk_flags") if isinstance(extra.get("risk_flags"), dict) else {}
     holder_note = "Concentrated" if risk_flags.get("holder_concentration") else "Organic / unknown"
     lines = [
-        f"- Confidence: `{render_confidence_pct(confidence_score)} ({_confidence_band(confidence_score)})`",
-        f"- Risk Score: `{_metric_display(extra, 'risk_score')} ({_risk_band(risk_score)})`",
+        f"- {_risk_dot(risk_score)} Risk Score: `{_metric_display(extra, 'risk_score')} ({_risk_band(risk_score)})`",
+        f"- {_confidence_dot(confidence_score)} Confidence: `{render_confidence_pct(confidence_score)} ({_confidence_band(confidence_score)})`",
         f"- Elite Score: `{elite if elite is not None else 'N/A'}`",
         f"- Tier: `{_quality_tier(to_optional_float(get_metric_value(extra, 'attention_score')), risk_score, elite)}`",
         f"- Holder Distribution: `{holder_note}`",
@@ -381,7 +438,8 @@ def _market_header_field(metrics: dict) -> dict:
 
 
 def _market_tile_fields(metrics: dict, liq_mc: str) -> list[dict]:
-    liq = format_currency_compact(metrics.get("liq"))
+    liq_value = metrics.get("liq")
+    liq = format_currency_compact(liq_value)
     mc = format_currency_compact(metrics.get("market_cap"))
     vol5 = format_currency_compact(metrics.get("volume_m5"))
     buys = metrics.get("txns_m5_buys")
@@ -389,9 +447,10 @@ def _market_tile_fields(metrics: dict, liq_mc: str) -> list[dict]:
     flow = "N/A" if buys is None and sells is None else f"B {buys if buys is not None else 'N/A'} / S {sells if sells is not None else 'N/A'}"
     age = _fmt_age_minutes(metrics.get("age"))
     chg5 = _format_change_pct(metrics.get("price_change_m5")) or "N/A"
+    liq_name = "LIQ  Unavailable" if liq_value is None else f"LIQ  {liq}"
     return [
         {
-            "name": f"LIQ  {liq}",
+            "name": liq_name,
             "value": _section_lines(
                 [
                     f"Market Cap: {mc}",
