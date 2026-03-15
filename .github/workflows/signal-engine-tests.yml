@@ -32,7 +32,7 @@ jobs:
         env:
           DRY_RUN: "1"
         run: |
-          pytest -q tests/test_signal_metrics.py tests/test_signal_learning_service.py tests/test_learning_route.py
+          pytest -q tests/test_signal_metrics.py tests/test_signal_learning_service.py tests/test_learning_route.py tests/test_state_service.py tests/test_db_service.py tests/test_tuning_service.py tests/test_candidate_gate_tuning.py
 
       - name: Run deterministic scan test
         env:

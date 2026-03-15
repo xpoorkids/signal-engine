@@ -1,10 +1,10 @@
 import argparse
 import json
-import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.services.db_service import connect_sqlite
 import worker.scanner as scanner
 
 
@@ -32,7 +32,7 @@ def main() -> None:
     if not DB_PATH.exists():
         raise SystemExit("state/engine.db not found")
 
-    with sqlite3.connect(DB_PATH) as c:
+    with connect_sqlite(DB_PATH) as c:
         rows = c.execute(
             """
             SELECT token, last_metrics, last_seen
