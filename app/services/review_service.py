@@ -2,6 +2,7 @@ import html
 import re
 from typing import Any
 
+from app.services.signal_metrics import get_metric_meta, metric_label, metric_state, to_optional_float
 from app.services.wallet_service import wallet_risk_score
 from worker.discord import format_discord
 from worker.dex import dex_enrich_token, select_best_pair, summarize_pair
@@ -356,6 +357,17 @@ async def review_contract(token: str) -> dict[str, Any]:
             "dex_summary": dex_summary,
             "lifecycle": lifecycle,
             "review_mode": True,
+            "metric_states": {
+                "attention_score": metric_state(attention_score, status="computed", reasons=attention_reasons),
+                "risk_score": metric_state(
+                    risk_score,
+                    status="computed",
+                    reasons=risk_reasons,
+                ),
+                "elite_score": metric_state(elite_score, status="computed"),
+                "confidence": metric_state(attention_score, status="computed"),
+                "lifecycle": metric_state(lifecycle, status="computed"),
+            },
         },
     )
 
@@ -405,6 +417,7 @@ async def review_contract(token: str) -> dict[str, Any]:
             "telegram_url": dex_summary.get("telegram_url"),
         },
         "discord_preview": format_discord(event),
+        "metric_states": event.extra.get("metric_states"),
     }
 
 
@@ -420,13 +433,13 @@ def render_review_html(review: dict[str, Any]) -> str:
     token = html.escape(str(review.get("token") or ""))
     lifecycle = str(review.get("lifecycle") or "unknown")
     lifecycle_label = "DEX" if lifecycle == "dex" else "BONDING CURVE"
-    attention = float(review.get("attention_score") or 0.0)
-    risk = float(review.get("risk_score") or 0.0)
-    elite = int(review.get("elite_score") or 0)
+    attention = to_optional_float(review.get("attention_score"))
+    risk = to_optional_float(review.get("risk_score"))
+    elite = review.get("elite_score") if isinstance(review.get("elite_score"), int) else None
 
-    if attention >= 0.85:
+    if attention is not None and attention >= 0.85:
         stage = "BREAKOUT"
-    elif attention >= 0.70:
+    elif attention is not None and attention >= 0.70:
         stage = "SETUP"
     else:
         stage = "WATCH"
@@ -686,10 +699,10 @@ def render_review_html(review: dict[str, Any]) -> str:
           <div class="stage">SE // {html.escape(stage)}</div>
         </div>
         <div class="chips">
-          {chip("Attention", f"{attention * 100:.1f}%", "good" if attention >= 0.7 else "warn")}
-          {chip("Risk", f"{risk * 100:.1f}%", "bad" if risk >= 0.4 else "warn" if risk >= 0.2 else "good")}
+          {chip("Attention", f"{attention * 100:.1f}%" if attention is not None else metric_label(get_metric_meta(review, "attention_score")), "good" if attention is not None and attention >= 0.7 else "warn")}
+          {chip("Risk", f"{risk * 100:.1f}%" if risk is not None else metric_label(get_metric_meta(review, "risk_score")), "bad" if risk is not None and risk >= 0.4 else "warn" if risk is not None and risk >= 0.2 else "good")}
           {chip("Rug", rug_verdict, "bad" if rug_verdict == "HIGH" else "warn" if rug_verdict == "WATCH" else "good")}
-          {chip("Elite", str(elite), "good" if elite >= 8 else "warn" if elite >= 4 else "bad")}
+          {chip("Elite", str(elite) if elite is not None else metric_label(get_metric_meta(review, "elite_score")), "good" if elite is not None and elite >= 8 else "warn" if elite is not None and elite >= 4 else "bad")}
           {chip("Lifecycle", lifecycle_label, "warn" if lifecycle == "bonding_curve" else "good")}
         </div>
       </section>
@@ -727,7 +740,7 @@ def render_review_html(review: dict[str, Any]) -> str:
         <div class="tape">
           {stat("Verdict", rug_verdict)}
           {stat("Rug Score", str(rug_score))}
-          {stat("Top Holder", _fmt_pct(_float(holder_risk.get("top_holder_pct")) * 100.0, 1))}
+          {stat("Top Holder", _fmt_pct((to_optional_float(holder_risk.get("top_holder_pct")) or 0.0) * 100.0, 1) if to_optional_float(holder_risk.get("top_holder_pct")) is not None else "N/A")}
           {stat("Vol / Liq", f"{(_float(market.get('volume_m5')) / _float(market.get('liquidity_usd'))):.1f}x" if _float(market.get('liquidity_usd')) > 0 else "--")}
         </div>
         <div style="margin-top:12px" class="muted">{html.escape(', '.join(rug_flags) if rug_flags else 'No major rug flags')}</div>
@@ -738,7 +751,7 @@ def render_review_html(review: dict[str, Any]) -> str:
           {stat("Mint Auth", "ON" if security.get("mint_authority_active") else "OFF")}
           {stat("Freeze Auth", "ON" if security.get("freeze_authority_active") else "OFF")}
           {stat("LP Locked", "YES" if security.get("liquidity_locked") is True else "NO" if security.get("liquidity_locked") is False else "UNK")}
-          {stat("Holder Risk", str(holder_risk.get("risk") or "ok").upper())}
+          {stat("Holder Risk", str(holder_risk.get("risk") or metric_label({"status": holder_risk.get("status"), "reason": holder_risk.get("reason")})).upper())}
         </div>
         <div style="margin-top:12px" class="muted">{html.escape(str(holder_risk.get("reason") or "holder_ok"))}</div>
       </section>

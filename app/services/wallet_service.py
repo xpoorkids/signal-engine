@@ -1,12 +1,15 @@
 import os
+import time
 
 import requests
 
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "").strip()
 HELIUS_RPC_URL = os.getenv("HELIUS_RPC_URL", "").strip()
+WALLET_RISK_CACHE_TTL_SEC = int(os.getenv("WALLET_RISK_CACHE_TTL_SEC", "120"))
 
 TOP_HOLDER_WARN = float(os.getenv("WALLET_TOP_HOLDER_WARN", "0.08"))
 TOP10_WARN = float(os.getenv("WALLET_TOP10_WARN", "0.35"))
+_CACHE: dict[str, tuple[float, dict]] = {}
 
 
 def _helius_url():
@@ -21,15 +24,23 @@ def _helius_url():
 
 
 def wallet_risk_score(token_mint: str) -> dict:
+    cached = _CACHE.get(token_mint)
+    now = time.time()
+    if cached and cached[0] > now:
+        return dict(cached[1])
+
     helius_url = _helius_url()
     if not helius_url:
-        return {
+        result = {
             "enabled": False,
             "top_holder_pct": None,
             "top10_pct": None,
-            "risk": "ok",
+            "risk": None,
             "reason": "helius_disabled",
+            "status": "disabled",
         }
+        _CACHE[token_mint] = (now + WALLET_RISK_CACHE_TTL_SEC, result)
+        return dict(result)
 
     payload = {
         "jsonrpc": "2.0",
@@ -43,13 +54,16 @@ def wallet_risk_score(token_mint: str) -> dict:
         r.raise_for_status()
         result = r.json().get("result", {})
     except Exception:
-        return {
+        output = {
             "enabled": True,
             "top_holder_pct": None,
             "top10_pct": None,
-            "risk": "warn",
+            "risk": None,
             "reason": "helius_unavailable",
+            "status": "insufficient_data",
         }
+        _CACHE[token_mint] = (now + WALLET_RISK_CACHE_TTL_SEC, output)
+        return dict(output)
     accounts = result.get("value", []) or []
 
     amounts = []
@@ -63,13 +77,16 @@ def wallet_risk_score(token_mint: str) -> dict:
             pass
 
     if not amounts:
-        return {
+        output = {
             "enabled": True,
             "top_holder_pct": None,
             "top10_pct": None,
-            "risk": "warn",
+            "risk": None,
             "reason": "no_holder_data",
+            "status": "insufficient_data",
         }
+        _CACHE[token_mint] = (now + WALLET_RISK_CACHE_TTL_SEC, output)
+        return dict(output)
 
     total_top10 = sum(amounts)
     top1 = amounts[0]
@@ -85,10 +102,13 @@ def wallet_risk_score(token_mint: str) -> dict:
         risk = "high"
         reason = f"top1_high_norm({top1_pct:.2f})"
 
-    return {
+    output = {
         "enabled": True,
         "top_holder_pct": float(top1_pct) if top1_pct is not None else None,
         "top10_pct": float(top10_pct),
         "risk": risk,
         "reason": reason,
+        "status": "computed",
     }
+    _CACHE[token_mint] = (now + WALLET_RISK_CACHE_TTL_SEC, output)
+    return dict(output)

@@ -57,6 +57,7 @@ from worker.alert_gate import evaluate_alert_gate, admission_check_candidate
 from worker.creator_score import compute_creator_score
 from worker.progression import metrics_improved
 from worker.recheck import schedule_rechecks, update_stop_counters, min_liquidity_gate
+from app.services.signal_metrics import compute_confidence_score, metric_state
 from app.services.state_service import (
     init as state_init,
     upsert_seen,
@@ -71,6 +72,7 @@ from app.services.state_service import (
     update_promo_confirm,
     should_mute,
 )
+from app.services.wallet_service import wallet_risk_score
 
 logger = logging.getLogger(__name__)
 logger.info("[PROMOTE FILE LOADED]")
@@ -135,31 +137,24 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
 
             record_creator_deploy(e.creator)
 
-        risk_score = 0.0
+        e.extra["metric_states"] = dict(e.extra.get("metric_states") or {})
+        risk_score = None
         risk_reasons: list[str] = []
         risk_flags: Dict[str, bool] = {}
-        if ENABLE_FORENSICS:
-            risk_score, risk_reasons, risk_flags = analyze_risk(e, state)
-            logger.info(
-                "[forensics] token=%s risk=%.2f reasons=%s flags=%s",
-                e.token,
-                risk_score,
-                risk_reasons,
-                risk_flags,
+        if not ENABLE_FORENSICS:
+            e.extra["metric_states"]["risk_score"] = metric_state(
+                None,
+                status="disabled",
+                reason="forensics_disabled",
             )
-            e.extra["risk_score"] = risk_score
-            e.extra["risk_reasons"] = risk_reasons
-            e.extra["risk_flags"] = risk_flags
 
         creator_score_info = {"score": 0.0, "reasons": ["creator_unknown"], "stats": {}}
         if e.creator:
             creator_score_info = compute_creator_score(e.creator)
             score_val = float(creator_score_info.get("score") or 0.0)
-            risk_score = max(0.0, risk_score - (score_val * CREATOR_RISK_WEIGHT))
             e.extra["creator_score"] = score_val
             e.extra["creator_reasons"] = creator_score_info.get("reasons") or []
             e.extra["creator_stats"] = creator_score_info.get("stats") or {}
-            e.extra["risk_score"] = risk_score
             logger.info(
                 "[creator-score] token=%s creator=%s score=%.2f reasons=%s stats=%s",
                 e.token,
@@ -200,7 +195,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 weight = register_buyer(e.token, buyer, buy_size_sol)
                 state.record_buyer(e.token, buyer, ts=e.ts, weight=weight)
 
-        attention_score = 0.0
+        attention_score = None
         attn_reasons: list[str] = []
         attn_metrics: Dict[str, Any] = {}
         if ENABLE_ATTENTION:
@@ -222,6 +217,17 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             e.extra["attention_score"] = attention_score
             e.extra["attention_reasons"] = attn_reasons
             e.extra["attention_metrics"] = attn_metrics
+            e.extra["metric_states"]["attention_score"] = metric_state(
+                attention_score,
+                status="computed",
+                reasons=attn_reasons,
+            )
+        else:
+            e.extra["metric_states"]["attention_score"] = metric_state(
+                None,
+                status="disabled",
+                reason="attention_disabled",
+            )
 
         edge_bps = 0.0
         edge_reasons: list[str] = []
@@ -238,15 +244,6 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             e.extra["edge_bps"] = edge_bps
             e.extra["edge_reasons"] = edge_reasons
             e.extra["size_cap_usd"] = size_cap_usd
-
-        if ENABLE_RISK_VETO and risk_score >= RISK_VETO_THRESHOLD:
-            logger.info(
-                "[promote-skip] reason=risk_veto token=%s risk=%.2f threshold=%.2f",
-                e.token,
-                risk_score,
-                RISK_VETO_THRESHOLD,
-            )
-            return [e]
 
         if e.type == "token_resolved":
             e.confidence = bump(e.confidence, CONF_WEIGHTS["token_resolved"], CAPS["heating"])
@@ -291,7 +288,8 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 hard_fail = True
                 hard_fail_from_authority_checks = True
         except Exception:
-            pass
+            mint_auth = None
+            freeze_auth = None
 
         try:
             liq_usd, liq_locked, liq_drop = ELITE.liq_check(e.token, dex_summary)
@@ -313,8 +311,9 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     print(f"[risk-gate] token={e.token} reason=liq_unlocked", flush=True)
                     hard_fail = True
         except Exception:
-            liq_usd = 0.0
+            liq_usd = None
             liq_locked = None
+            liq_drop = None
             liquidity_unknown = True
 
 
@@ -346,16 +345,73 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         except Exception:
             pass
 
-        capital_score = 1 if buy_size_sol < 0.2 else 2 if buy_size_sol < 1 else 3 if buy_size_sol < 3 else 5
-        velocity_score = 0 if unique_10s < 3 else 2 if unique_10s == 3 else 3 if unique_10s == 4 else 5
-        dist_score = -3 if wash_suppress else (1 if unique_30s >= 4 else 0)
-        safety_bonus = 0
-        elite_score = (capital_score * 2) + (velocity_score * 2) + dist_score + safety_bonus
-        print(
-            f"[elite-score] token={e.token} capital={capital_score} velocity={velocity_score} dist={dist_score} safety={safety_bonus} elite={elite_score}",
-            flush=True,
+        token_wallet_risk = wallet_risk_score(e.token)
+        if ENABLE_FORENSICS:
+            risk_score, risk_reasons, risk_flags, risk_metric = analyze_risk(
+                e,
+                state,
+                wallet_risk=token_wallet_risk,
+                mint_authority=mint_auth,
+                freeze_authority=freeze_auth,
+                liq_usd=liq_usd,
+                liq_locked=liq_locked,
+                liq_drop_spike=liq_drop,
+            )
+            creator_risk_offset = float(creator_score_info.get("score") or 0.0) * CREATOR_RISK_WEIGHT
+            if risk_score is not None:
+                risk_score = max(0.0, risk_score - creator_risk_offset)
+            e.extra["risk_score"] = risk_score
+            e.extra["risk_reasons"] = risk_reasons
+            e.extra["risk_flags"] = risk_flags
+            e.extra["token_wallet_risk"] = token_wallet_risk
+            e.extra["metric_states"]["risk_score"] = metric_state(
+                risk_score,
+                status=str(risk_metric.get("status") or "not_computed"),
+                reason=risk_metric.get("reason"),
+                reasons=risk_reasons,
+            )
+            logger.info(
+                "[risk-score] token=%s status=%s value=%s reasons=%s inputs=%s creator_offset=%.3f",
+                e.token,
+                risk_metric.get("status"),
+                risk_score,
+                risk_reasons,
+                risk_metric.get("inputs_used"),
+                creator_risk_offset,
+            )
+            extra["risk_score"] = risk_score
+            extra["risk_reasons"] = risk_reasons
+            extra["risk_flags"] = risk_flags
+            extra["token_wallet_risk"] = token_wallet_risk
+            extra["metric_states"] = dict(e.extra.get("metric_states") or {})
+
+        elite_score = ELITE.compute_elite_score(
+            token=e.token,
+            buy_size_sol=buy_size_sol,
+            unique_10s=unique_10s,
+            total_buys_30s=len(st.buys_30s),
+            unique_wallets_30s=unique_30s,
+            top_wallet_share=top_share,
+            liq_usd=0.0 if liq_usd is None else liq_usd,
+            liq_locked=liq_locked,
+            hard_fail=bool(hard_fail),
         )
         extra["elite_score"] = elite_score
+        extra["metric_states"] = dict(extra.get("metric_states") or e.extra.get("metric_states") or {})
+        extra["metric_states"]["elite_score"] = metric_state(elite_score, status="computed")
+        extra["metric_states"]["lifecycle"] = metric_state(
+            "dex" if dex_summary else "bonding_curve",
+            status="computed",
+        )
+
+        if ENABLE_RISK_VETO and risk_score is not None and risk_score >= RISK_VETO_THRESHOLD:
+            logger.info(
+                "[promote-skip] reason=risk_veto token=%s risk=%.2f threshold=%.2f",
+                e.token,
+                risk_score,
+                RISK_VETO_THRESHOLD,
+            )
+            return [e]
 
         if liquidity_unknown:
             if (
@@ -490,6 +546,8 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         )
         prev_attention = float(prev_metrics.get("attention_score") or 0.0) if isinstance(prev_metrics, dict) else 0.0
 
+        candidate_event_extra = None
+
         # ------------------------------------------------------------
         # Attention-driven candidate emission (Phase 1)
         # ------------------------------------------------------------
@@ -502,11 +560,11 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     isinstance(r, str) and r.startswith("source_unavailable")
                     for r in attn_reasons
                 )
-            elif attention_score <= 0.0:
+            elif attention_score is None or attention_score <= 0.0:
                 attention_unavailable = True
             ok, gate_reasons, lifecycle = admission_check_candidate(
-                attention_score,
-                risk_score,
+                0.0 if attention_score is None else attention_score,
+                0.0 if risk_score is None else risk_score,
                 extra,
                 dex_summary,
                 attention_unavailable,
@@ -518,7 +576,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     sniper_conditions_met,
                 )
                 logger.info(
-                    "[candidate-skip] token=%s reasons=%s attention=%.2f risk=%.2f",
+                    "[candidate-skip] token=%s reasons=%s attention=%s risk=%s",
                     e.token,
                     gate_reasons,
                     attention_score,
@@ -531,15 +589,15 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     logger.info("[candidate-warning] curve_liq_unknown token=%s", e.token)
                 logger.info("[candidate-lifecycle] token=%s lifecycle=%s", e.token, lifecycle)
                 logger.info(
-                    "[candidate-attention] token=%s attention=%.2f risk=%.2f attn_reasons=%s",
+                    "[candidate-attention] token=%s attention=%s risk=%s attn_reasons=%s",
                     e.token,
                     attention_score,
                     risk_score,
                     attn_reasons,
                 )
                 creator_ok = float(creator_score_info.get("score") or 0.0) >= EARLY_CREATOR_MIN
-                attention_improving = attention_score > prev_attention
-                send_eligible = creator_ok or attention_score >= 0.50
+                attention_improving = (attention_score or 0.0) > prev_attention
+                send_eligible = creator_ok or (attention_score or 0.0) >= 0.50
                 allow_rate = allow_candidate_rate_limit(EARLY_WATCH_RATE_LIMIT_PER_HOUR) if send_eligible else False
                 should_send = send_eligible and allow_rate
                 if not allow_rate:
@@ -577,7 +635,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 )
                 upsert_candidate_state(
                     e.token,
-                    attention_score,
+                    attention_score or 0.0,
                     e.confidence,
                     current_metrics.get("liquidity") or 0.0,
                     current_metrics.get("unique_buyers_5m") or 0,
@@ -587,7 +645,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 # Determine recheck stage
                 stage = "A"
                 if (
-                    attention_score >= 0.25
+                    (attention_score or 0.0) >= 0.25
                     or (attn_metrics.get("unique_buyers_5m") or 0) >= 5
                     or ("liquidity" in improved_keys)
                 ):
@@ -649,16 +707,10 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                                     stage,
                                 )
                             )
-                out.append(
-                    Event(
-                        type="candidate",
-                        source="engine",
-                        token=e.token,
-                        extra=dict(extra),
-                    )
-                )
+                candidate_event_extra = dict(extra)
 
-        if ENABLE_ATTENTION_BONUS:
+        attention_bonus_adjustment = 0.0
+        if ENABLE_ATTENTION_BONUS and attention_score is not None and risk_score is not None:
             now = time.time()
             in_window = now - ts.first_seen_ts <= (ATTENTION_WINDOW_MINUTES * 60)
             liquidity_ok = False
@@ -673,25 +725,23 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 and in_window
                 and liquidity_ok
             ):
-                base_confidence = e.confidence
                 attn_bonus = min(ATTENTION_BONUS_CAP, attention_score * ATTENTION_BONUS_CAP)
                 risk_penalty = risk_score * ATTENTION_BONUS_CAP
-                e.confidence = base_confidence + attn_bonus - risk_penalty
+                attention_bonus_adjustment = attn_bonus - risk_penalty
                 logger.info(
-                    "[score-adjust] base=%.3f attn_bonus=%.3f risk_penalty=%.3f final=%.3f",
-                    base_confidence,
+                    "[score-adjust] attn_bonus=%.3f risk_penalty=%.3f net=%.3f",
                     attn_bonus,
                     risk_penalty,
-                    e.confidence,
+                    attention_bonus_adjustment,
                 )
 
+        execution_bonus_adjustment = 0.0
         if ENABLE_EXECUTION and edge_bps >= MIN_EDGE_BPS:
-            exec_bonus = min(EXECUTION_BONUS_CAP, edge_bps / 10000.0)
-            e.confidence += exec_bonus
+            execution_bonus_adjustment = min(EXECUTION_BONUS_CAP, edge_bps / 10000.0)
             logger.info(
                 "[exec-bonus] edge_bps=%.1f exec_bonus=%.3f",
                 edge_bps,
-                exec_bonus,
+                execution_bonus_adjustment,
             )
 
         # Dynamic confidence scoring
@@ -700,24 +750,49 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             liq_usd = float((extra.get("dex_summary") or {}).get("liquidity_usd") or 0.0)
         liquidity_factor = min(liq_usd / PROM_MIN_LIQ_USD, 1.0) if PROM_MIN_LIQ_USD > 0 else 0.0
         creator_score = float(creator_score_info.get("score") or 0.0)
-        e.confidence = (
-            (attention_score * 0.40)
-            + ((1.0 - risk_score) * 0.30)
-            + (creator_score * 0.20)
-            + (liquidity_factor * 0.10)
+        e.confidence, confidence_components = compute_confidence_score(
+            attention_score=attention_score,
+            risk_score=risk_score,
+            creator_score=creator_score,
+            liquidity_factor=liquidity_factor,
         )
-        e.confidence = max(0.0, min(1.0, e.confidence))
+        e.confidence = max(0.0, min(1.0, e.confidence + attention_bonus_adjustment + execution_bonus_adjustment))
+        extra["metric_states"]["confidence"] = metric_state(e.confidence, status="computed")
         logger.info(
-            "[score-components] token=%s attention=%.3f risk=%.3f creator=%.3f liquidity_factor=%.3f final_score=%.3f",
+            "[score-components] token=%s attention=%s risk=%s creator=%.3f liquidity_factor=%.3f bonus_adj=%.3f exec_adj=%.3f final_score=%.3f fallbacks=%s",
             e.token,
             attention_score,
             risk_score,
             creator_score,
             liquidity_factor,
+            attention_bonus_adjustment,
+            execution_bonus_adjustment,
             e.confidence,
+            confidence_components,
         )
         ts.confidence = max(ts.confidence, e.confidence)
         logger.info("[score] computed token=%s score=%.3f", e.token, e.confidence)
+
+        for emitted_event in out:
+            if emitted_event.type == "heating_up" and emitted_event.token == e.token:
+                emitted_event.confidence = e.confidence
+                emitted_event.extra = dict(extra)
+                emitted_event.extra["metric_states"] = dict(extra.get("metric_states") or {})
+
+        if candidate_event_extra is not None:
+            candidate_event_extra["metric_states"] = dict(extra.get("metric_states") or {})
+            out.append(
+                Event(
+                    type="candidate",
+                    source="engine",
+                    token=e.token,
+                    creator=ts.creator,
+                    confidence=e.confidence,
+                    reasons=list(e.reasons),
+                    extra=candidate_event_extra,
+                    signature=e.signature,
+                )
+            )
 
         # Remove legacy heating_up sends; progression is handled via candidate updates.
         if 0.55 <= e.confidence < 0.80:
@@ -750,10 +825,10 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             if buyers_15m < 30:
                 logger.info("[promotion-block] reason=buyers_low token=%s buyers_15m=%s", e.token, buyers_15m)
                 return out
-            if attention_score < PROMOTION_MIN_ATTENTION:
-                logger.info("[promotion-block] reason=attention_low token=%s attention=%.2f", e.token, attention_score)
+            if attention_score is None or attention_score < PROMOTION_MIN_ATTENTION:
+                logger.info("[promotion-block] reason=attention_low token=%s attention=%s", e.token, attention_score)
                 return out
-            if risk_score >= PROMOTION_MAX_RISK:
+            if risk_score is not None and risk_score >= PROMOTION_MAX_RISK:
                 logger.info("[promotion-block] reason=risk_high token=%s risk=%.2f", e.token, risk_score)
                 return out
             if lp_drain:

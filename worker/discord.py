@@ -1,5 +1,12 @@
 ﻿import json
 import requests
+from app.services.signal_metrics import (
+    format_metric_number,
+    get_metric_meta,
+    get_metric_value,
+    metric_label,
+    to_optional_float,
+)
 from worker.config import (
     ENABLE_DISCORD,
     DISCORD_WEBHOOK_URL,
@@ -110,13 +117,11 @@ def _format_change_pct(value: float | int | None) -> str | None:
     return f"{sign}{num:.1f}%"
 
 
-def render_confidence_pct(score: float) -> str:
-    blocks = 5
-    try:
-        clamped = max(0.0, min(1.0, float(score)))
-    except Exception:
-        clamped = 0.0
-    _ = blocks
+def render_confidence_pct(score: float | None) -> str:
+    clamped = to_optional_float(score)
+    if clamped is None:
+        return "N/A"
+    clamped = max(0.0, min(1.0, clamped))
     return f"{int(round(clamped * 100))}%"
 
 
@@ -146,14 +151,16 @@ def _section_lines(lines: list[str], indent: int = 2) -> str:
     return "\n".join(f"{pad}{line}" for line in lines if line)
 
 
-def _candidate_header(attention_score: float, risk_score: float) -> str:
+def _candidate_header(attention_score: float | None, risk_score: float | None) -> str:
+    if attention_score is None:
+        return "SE // MONITOR"
     if attention_score >= 0.85:
         regime = "BREAKOUT"
     elif attention_score >= 0.70:
         regime = "SETUP"
-    elif risk_score < RADAR_QUIET_RISK_MAX:
+    elif risk_score is not None and risk_score < RADAR_QUIET_RISK_MAX:
         regime = "WATCH"
-    elif risk_score < 0.50:
+    elif risk_score is not None and risk_score < 0.50:
         regime = "SETUP"
     else:
         regime = "SETUP"
@@ -170,8 +177,10 @@ def _promoted_header(final_score: float) -> str:
     return f"SE // VALIDATED {regime}"
 
 
-def _conviction_label(attention_score: float, risk_score: float, lifecycle: str) -> str:
-    if lifecycle == "dex" and attention_score >= 0.85 and risk_score <= 0.15:
+def _conviction_label(attention_score: float | None, risk_score: float | None, lifecycle: str) -> str:
+    if attention_score is None:
+        return "Not computed"
+    if lifecycle == "dex" and attention_score >= 0.85 and risk_score is not None and risk_score <= 0.15:
         return "Momentum confirmed"
     if attention_score >= 0.80:
         return "Strong coordination"
@@ -242,9 +251,13 @@ def _pretty_reason(reason: str) -> str:
     return reason.replace("_", " ")
 
 
-def _security_lines(e: Event, metrics: dict, risk_score: float) -> str:
+def _security_lines(e: Event, metrics: dict, risk_score: float | None) -> str:
     extra = e.extra if isinstance(e.extra, dict) else {}
-    lines = [f"- risk_score: {risk_score:.2f}"]
+    risk_meta = get_metric_meta(extra, "risk_score")
+    if risk_score is None:
+        lines = [f"- risk_score: {metric_label(risk_meta)}"]
+    else:
+        lines = [f"- risk_score: {format_metric_number(risk_score, decimals=2)}"]
     elite = extra.get("elite_score")
     if elite is not None:
         lines.append(f"- elite_score: {elite}")
@@ -254,7 +267,7 @@ def _security_lines(e: Event, metrics: dict, risk_score: float) -> str:
     buys = metrics.get("txns_m5_buys")
     sells = metrics.get("txns_m5_sells")
     if buys is not None or sells is not None:
-        lines.append(f"- m5 flow: B {buys or 0} / S {sells or 0}")
+        lines.append(f"- m5 flow: B {buys if buys is not None else 'N/A'} / S {sells if sells is not None else 'N/A'}")
     return "\n".join(lines[:5])
 
 
@@ -357,18 +370,13 @@ def _token_labels_from_event(e: Event) -> tuple[str, str]:
     return symbol, name
 
 
-def _display_confidence_score(e: Event, attention_score: float) -> float:
-    try:
-        raw = float(e.confidence)
-    except Exception:
-        raw = 0.0
-    if e.type in ("candidate", "heating_up"):
-        if attention_score > 0:
-            return max(0.0, min(1.0, attention_score))
+def _display_confidence_score(e: Event, attention_score: float | None) -> float | None:
+    raw = to_optional_float(e.confidence)
+    if raw is not None:
         return max(0.0, min(1.0, raw))
-    if raw > 0:
-        return max(0.0, min(1.0, raw))
-    return 0.0
+    if attention_score is not None:
+        return max(0.0, min(1.0, attention_score))
+    return None
 
 
 def _fmt_title(e: Event) -> str:
@@ -430,11 +438,8 @@ def _format_candidate_like(e: Event, description: str) -> dict:
     token = e.token or "unknown"
     symbol, name = _token_labels_from_event(e)
     full_addr = _full_addr(token)
-    attention_score = 0.0
-    risk_score = 0.0
-    if isinstance(e.extra, dict):
-        attention_score = float(e.extra.get("attention_score") or 0.0)
-        risk_score = float(e.extra.get("risk_score") or 0.0)
+    attention_score = to_optional_float(get_metric_value(e.extra, "attention_score")) if isinstance(e.extra, dict) else None
+    risk_score = to_optional_float(get_metric_value(e.extra, "risk_score")) if isinstance(e.extra, dict) else None
 
     metrics = _extract_metrics(e)
     confidence_pct = render_confidence_pct(_display_confidence_score(e, attention_score))
@@ -448,7 +453,7 @@ def _format_candidate_like(e: Event, description: str) -> dict:
         liq_mc = "—"
 
     fields = [
-        _summary_field("Attention", f"`{attention_score:.2f}`"),
+        _summary_field("Attention", f"`{format_metric_number(attention_score, decimals=2, missing_label='N/A')}`"),
         _summary_field("Confidence", f"`{confidence_pct}`"),
         _summary_field("Lifecycle", f"`{_lifecycle_label(metrics.get('lifecycle'))}`"),
         _summary_field("Conviction", f"`{_conviction_label(attention_score, risk_score, str(metrics.get('lifecycle') or ''))}`"),
@@ -460,7 +465,14 @@ def _format_candidate_like(e: Event, description: str) -> dict:
                     name,
                     full_addr,
                     [
-                        _label_value("Risk", f"{risk_score:.2f}"),
+                        _label_value(
+                            "Risk",
+                            format_metric_number(
+                                risk_score,
+                                decimals=2,
+                                missing_label=metric_label(get_metric_meta(e.extra, "risk_score")),
+                            ),
+                        ),
                     ],
                 )
             ),
@@ -512,7 +524,7 @@ def _format_candidate_like(e: Event, description: str) -> dict:
     embed = {
         "title": _candidate_header(attention_score, risk_score),
         "description": f"{description}\n",
-        "color": SLATE if attention_score < 0.85 else AMBER,
+        "color": SLATE if attention_score is None or attention_score < 0.85 else AMBER,
         "fields": fields,
         "footer": {"text": "Signal Engine / Radar Deck"},
     }
@@ -528,8 +540,8 @@ def format_discord(e: Event) -> dict:
         reasons = []
         if e.reasons:
             reasons = e.reasons[:4]
-        rscore = float(e.extra.get("risk_score") or 0.0) if isinstance(e.extra, dict) else 0.0
-        ascore = float(e.extra.get("attention_score") or 0.0) if isinstance(e.extra, dict) else 0.0
+        rscore = to_optional_float(get_metric_value(e.extra, "risk_score")) if isinstance(e.extra, dict) else None
+        ascore = to_optional_float(get_metric_value(e.extra, "attention_score")) if isinstance(e.extra, dict) else None
         metrics = _extract_metrics(e)
         confidence_pct = render_confidence_pct(_display_confidence_score(e, ascore))
         mc_value = metrics.get("market_cap")
@@ -554,8 +566,8 @@ def format_discord(e: Event) -> dict:
                         name,
                         full_addr,
                         [
-                            _label_value("Risk", f"{rscore:.2f}"),
-                            _label_value("Attention", f"{ascore:.2f}"),
+                            _label_value("Risk", format_metric_number(rscore, decimals=2, missing_label=metric_label(get_metric_meta(e.extra, "risk_score")))),
+                            _label_value("Attention", format_metric_number(ascore, decimals=2, missing_label=metric_label(get_metric_meta(e.extra, "attention_score")))),
                         ],
                     )
                 ),

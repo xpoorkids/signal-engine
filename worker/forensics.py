@@ -1,56 +1,84 @@
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Any
+
+from app.services.signal_metrics import compute_risk_score
 
 
-def analyze_risk(e, state) -> Tuple[float, List[str], Dict[str, bool]]:
+def analyze_risk(
+    e,
+    state,
+    *,
+    wallet_risk: dict[str, Any] | None = None,
+    mint_authority: bool | None = None,
+    freeze_authority: bool | None = None,
+    liq_usd: float | None = None,
+    liq_locked: bool | None = None,
+    liq_drop_spike: bool | None = None,
+) -> Tuple[float | None, List[str], Dict[str, bool], dict[str, Any]]:
     """
     Returns:
       risk_score: float in [0, 1]
       risk_reasons: human-readable list of strings
       risk_flags: dictionary of boolean clusters
     """
-    risk_score = 0.0
-    risk_reasons: List[str] = []
     risk_flags: Dict[str, bool] = {}
-
-    # Wallet clustering (stub logic)
     try:
         cluster_ratio = state.wallet_cluster_ratio(e.token)
     except Exception:
-        cluster_ratio = 0.0
-    if cluster_ratio > 0.5:
-        risk_score += 0.35
-        risk_reasons.append("wallet_clustering_high")
+        cluster_ratio = None
+    if isinstance(cluster_ratio, (int, float)) and cluster_ratio > 0.4:
         risk_flags["wallet_cluster"] = True
 
-    # Liquidity stability (stub logic)
     try:
-        if not state.liquidity_stable(e.token, window_sec=1800):
-            risk_score += 0.30
-            risk_reasons.append("liquidity_unstable")
-            risk_flags["liquidity_unstable"] = True
+        liquidity_stable = state.liquidity_stable(e.token, window_sec=1800)
     except Exception:
-        pass
+        liquidity_stable = None
+    if liquidity_stable is False:
+        risk_flags["liquidity_unstable"] = True
 
-    # Top holder concentration (stub logic)
     try:
         top_ratio = state.top_holder_ratio(e.token)
     except Exception:
-        top_ratio = 0.0
-    if top_ratio > 0.25:
-        risk_score += 0.25
-        risk_reasons.append("holder_concentration")
+        top_ratio = None
+    if isinstance(top_ratio, (int, float)) and top_ratio > 0.18:
         risk_flags["holder_concentration"] = True
 
-    # Behavioral churn / cadence (stub logic)
     try:
-        if state.bot_trade_cadence(e.token):
-            risk_score += 0.20
-            risk_reasons.append("bot_like_trade_cadence")
-            risk_flags["bot_cadence"] = True
+        cadence = state.bot_trade_cadence(e.token)
     except Exception:
-        pass
+        cadence = None
+    if cadence:
+        risk_flags["bot_cadence"] = True
 
-    # clamp risk_score
-    risk_score = min(risk_score, 1.0)
+    metric = compute_risk_score(
+        wallet_cluster_ratio=cluster_ratio if isinstance(cluster_ratio, (int, float)) else None,
+        liquidity_stable=liquidity_stable if isinstance(liquidity_stable, bool) else None,
+        top_holder_ratio=top_ratio if isinstance(top_ratio, (int, float)) else None,
+        bot_trade_cadence=cadence if isinstance(cadence, bool) else None,
+        mint_authority=mint_authority,
+        freeze_authority=freeze_authority,
+        liq_usd=liq_usd,
+        liq_locked=liq_locked,
+        liq_drop_spike=liq_drop_spike,
+        wallet_risk=wallet_risk,
+    )
+    if liquidity_stable is False:
+        metric["reasons"] = list(metric.get("reasons") or []) + ["liquidity_unstable"]
+        value = metric.get("value")
+        metric["value"] = min(1.0, (0.0 if value is None else float(value)) + 0.20)
+    if metric.get("status") == "computed" and metric.get("value") is not None:
+        risk_score = float(metric["value"])
+    else:
+        risk_score = None
 
-    return risk_score, risk_reasons, risk_flags
+    if liquidity_stable is False:
+        risk_flags["liquidity_unstable"] = True
+    if metric.get("reasons"):
+        for reason in metric["reasons"]:
+            if reason in ("wallet_clustering_high", "wallet_clustering_watch"):
+                risk_flags["wallet_cluster"] = True
+            if reason.startswith("top_holder") or reason.startswith("wallet_top_holder"):
+                risk_flags["holder_concentration"] = True
+            if reason == "bot_like_trade_cadence":
+                risk_flags["bot_cadence"] = True
+
+    return risk_score, list(metric.get("reasons") or []), risk_flags, metric
