@@ -106,30 +106,63 @@ def _review_risk(
     freeze_authority: bool,
     wallet_risk: dict[str, Any],
     liq_usd: float,
+    dex_summary: dict[str, Any],
 ) -> tuple[float, list[str]]:
     score = 0.0
     reasons: list[str] = []
+    top_holder_pct = _float(wallet_risk.get("top_holder_pct")) * 100.0
+    holder_level = str(wallet_risk.get("risk") or "ok")
+    vol5 = _float(dex_summary.get("volume_m5"))
+    age = _float(dex_summary.get("age_minutes"))
 
     if mint_authority:
-        score += 0.40
+        score += 0.30
         reasons.append("mint_authority_active")
     if freeze_authority:
-        score += 0.35
+        score += 0.25
         reasons.append("freeze_authority_active")
     if liq_usd == 0:
-        score += 0.10
+        score += 0.08
         reasons.append("liquidity_unknown")
+    elif liq_usd < 2000:
+        score += 0.22
+        reasons.append("very_thin_liquidity")
     elif liq_usd < 5000:
         score += 0.15
         reasons.append("thin_liquidity")
+    elif liq_usd < 15000:
+        score += 0.08
+        reasons.append("subscale_liquidity")
 
-    holder_risk = str(wallet_risk.get("risk") or "ok")
-    if holder_risk == "high":
-        score += 0.25
-        reasons.append(str(wallet_risk.get("reason") or "holder_concentration_high"))
-    elif holder_risk == "warn":
+    if top_holder_pct >= 20:
+        score += 0.30
+        reasons.append("top_holder_20_plus")
+    elif top_holder_pct >= 15:
+        score += 0.22
+        reasons.append("top_holder_15_plus")
+    elif top_holder_pct >= 10:
         score += 0.15
+        reasons.append("top_holder_10_plus")
+    elif top_holder_pct >= 6:
+        score += 0.08
+        reasons.append("top_holder_6_plus")
+    elif holder_level == "high":
+        score += 0.20
+        reasons.append(str(wallet_risk.get("reason") or "holder_concentration_high"))
+    elif holder_level == "warn":
+        score += 0.10
         reasons.append(str(wallet_risk.get("reason") or "holder_concentration_warn"))
+
+    if liq_usd > 0 and vol5 >= liq_usd * 3.0:
+        score += 0.12
+        reasons.append("washy_volume_to_liquidity")
+    elif liq_usd > 0 and vol5 >= liq_usd * 1.5:
+        score += 0.06
+        reasons.append("elevated_volume_to_liquidity")
+
+    if age > 0 and age <= 10 and liq_usd < 8000:
+        score += 0.05
+        reasons.append("very_early_thin_book")
 
     return max(0.0, min(score, 1.0)), reasons
 
@@ -218,6 +251,7 @@ async def review_contract(token: str) -> dict[str, Any]:
         freeze_authority,
         holder_risk,
         liq_usd,
+        dex_summary,
     )
 
     lifecycle = "dex" if dex_summary else "bonding_curve"
@@ -602,8 +636,8 @@ def render_review_html(review: dict[str, Any]) -> str:
           <div class="stage">SE // {html.escape(stage)}</div>
         </div>
         <div class="chips">
-          {chip("Attention", f"{int(round(attention * 100))}%", "good" if attention >= 0.7 else "warn")}
-          {chip("Risk", f"{int(round(risk * 100))}%", "bad" if risk >= 0.4 else "warn" if risk >= 0.2 else "good")}
+          {chip("Attention", f"{attention * 100:.1f}%", "good" if attention >= 0.7 else "warn")}
+          {chip("Risk", f"{risk * 100:.1f}%", "bad" if risk >= 0.4 else "warn" if risk >= 0.2 else "good")}
           {chip("Rug", rug_verdict, "bad" if rug_verdict == "HIGH" else "warn" if rug_verdict == "WATCH" else "good")}
           {chip("Elite", str(elite), "good" if elite >= 8 else "warn" if elite >= 4 else "bad")}
           {chip("Lifecycle", lifecycle_label, "warn" if lifecycle == "bonding_curve" else "good")}
