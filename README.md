@@ -60,6 +60,12 @@ Features:
 - `POST /review`
 - `GET /learning/report/latest`
 - `GET /learning/report/{report_date}`
+- `GET /learning/tuning/proposals`
+- `GET /learning/tuning/proposals/dashboard`
+- `GET /learning/tuning/proposals/env`
+- `GET /learning/tuning/proposals/diff`
+- `GET /learning/tuning/profiles`
+- `GET /learning/tuning/profiles/dashboard`
 
 ## Running Locally
 

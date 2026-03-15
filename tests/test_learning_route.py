@@ -205,6 +205,25 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "text/plain" in diff_response.headers["content-type"]
     assert "EARLY_ATTENTION_MIN:" in diff_response.text
 
+    profiles_response = client.get("/learning/tuning/profiles?hours=10000")
+    assert profiles_response.status_code == 200
+    profiles_payload = profiles_response.json()
+    assert profiles_payload["base_profile"] == "balanced"
+    assert "strict" in profiles_payload["profiles"]
+
+    profiles_dashboard_response = client.get("/learning/tuning/profiles/dashboard?hours=10000")
+    assert profiles_dashboard_response.status_code == 200
+    assert "Tuning Profiles" in profiles_dashboard_response.text
+    assert "Balanced" in profiles_dashboard_response.text
+
+    strict_env_response = client.get("/learning/tuning/profiles/strict/env?hours=10000")
+    assert strict_env_response.status_code == 200
+    assert "PROM_MIN_LIQ_USD=" in strict_env_response.text
+
+    aggressive_diff_response = client.get("/learning/tuning/profiles/aggressive/diff?hours=10000")
+    assert aggressive_diff_response.status_code == 200
+    assert "EARLY_ATTENTION_MIN:" in aggressive_diff_response.text
+
 
 def test_learning_diagnostics_dashboard_returns_html(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"

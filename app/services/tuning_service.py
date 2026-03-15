@@ -6,6 +6,26 @@ from typing import Any
 from app.services.signal_learning_service import get_diagnostics_summary
 from worker import config as cfg
 
+PROFILE_CONFIG_KEYS: tuple[str, ...] = (
+    "CAND_MIN_TOKEN_AGE_SEC",
+    "EARLY_ATTENTION_MIN",
+    "EARLY_CREATOR_MIN",
+    "PROM_MIN_LIQ_USD",
+    "PROMOTION_MIN_ATTENTION",
+    "PROMOTION_MAX_RISK",
+    "PROMOTE_MIN_CONFIDENCE",
+    "ATTENTION_CANDIDATE_THRESHOLD",
+    "GATE_PROMOTE_MIN_LIQ",
+    "GATE_PROMOTE_MIN_VOL5M",
+    "GATE_PROMOTE_MIN_BUYS5M",
+)
+
+PROFILE_LABELS: dict[str, str] = {
+    "strict": "Tighter promotion and market-quality requirements.",
+    "balanced": "Current live baseline with no proposal overrides applied.",
+    "aggressive": "Relaxed early filters for faster candidate capture.",
+}
+
 
 def _proposal(
     *,
@@ -38,6 +58,10 @@ def _format_env_value(value: Any) -> str:
 
 def _format_diff_value(value: Any) -> str:
     return _format_env_value(value)
+
+
+def _profile_baseline() -> dict[str, Any]:
+    return {key: getattr(cfg, key) for key in PROFILE_CONFIG_KEYS}
 
 
 def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:
@@ -149,6 +173,38 @@ def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:
     }
 
 
+def build_tuning_profiles(hours: int = 72) -> dict[str, Any]:
+    proposal_payload = build_tuning_proposals(hours=max(1, hours))
+    overrides = proposal_payload.get("preset_overrides") if isinstance(proposal_payload.get("preset_overrides"), dict) else {}
+    baseline = _profile_baseline()
+    profiles: dict[str, dict[str, Any]] = {}
+    profile_diffs: dict[str, list[dict[str, Any]]] = {}
+
+    for profile_name in ("strict", "balanced", "aggressive"):
+        profile_values = dict(baseline)
+        profile_values.update(overrides.get(profile_name, {}) if isinstance(overrides.get(profile_name), dict) else {})
+        profiles[profile_name] = profile_values
+        profile_diffs[profile_name] = [
+            {
+                "config_key": key,
+                "current_value": baseline[key],
+                "proposed_value": profile_values[key],
+            }
+            for key in PROFILE_CONFIG_KEYS
+            if profile_values.get(key) != baseline.get(key)
+        ]
+
+    return {
+        "lookback_hours": proposal_payload.get("lookback_hours", hours),
+        "base_profile": "balanced",
+        "profile_keys": list(PROFILE_CONFIG_KEYS),
+        "profiles": profiles,
+        "profile_diffs": profile_diffs,
+        "profile_labels": dict(PROFILE_LABELS),
+        "proposal_count": proposal_payload.get("proposal_count", 0),
+    }
+
+
 def render_tuning_env_snippet(hours: int = 72) -> str:
     payload = build_tuning_proposals(hours=max(1, hours))
     proposals = payload.get("proposals") if isinstance(payload.get("proposals"), list) else []
@@ -193,6 +249,42 @@ def render_tuning_apply_diff(hours: int = 72) -> str:
             f"{_format_diff_value(item.get('current_value'))} -> {_format_diff_value(item.get('proposed_value'))} "
             f"[{item.get('action')} | {item.get('confidence')} | {item.get('reason')}]"
         )
+    return "\n".join(header + rows)
+
+
+def render_profile_env_snippet(profile_name: str, hours: int = 72) -> str:
+    payload = build_tuning_profiles(hours=max(1, hours))
+    profiles = payload.get("profiles") if isinstance(payload.get("profiles"), dict) else {}
+    profile = profiles.get(profile_name) if isinstance(profiles.get(profile_name), dict) else {}
+    lines = [
+        f"# Signal Engine {profile_name} profile",
+        f"# {PROFILE_LABELS.get(profile_name, 'Generated config profile.')}",
+        f"# Built from current config plus proposal overrides over the last {int(payload.get('lookback_hours') or hours)} hours",
+    ]
+    if not profile:
+        lines.append("# Profile data unavailable.")
+        return "\n".join(lines)
+    for key in PROFILE_CONFIG_KEYS:
+        if key in profile:
+            lines.append(f"{key}={_format_env_value(profile[key])}")
+    return "\n".join(lines)
+
+
+def render_profile_apply_diff(profile_name: str, hours: int = 72) -> str:
+    payload = build_tuning_profiles(hours=max(1, hours))
+    diffs = payload.get("profile_diffs") if isinstance(payload.get("profile_diffs"), dict) else {}
+    profile_diffs = diffs.get(profile_name) if isinstance(diffs.get(profile_name), list) else []
+    header = [
+        f"# {profile_name.title()} profile diff",
+        "# Compared against the current balanced baseline",
+    ]
+    if not profile_diffs:
+        header.append("- No config differences from baseline.")
+        return "\n".join(header)
+    rows = [
+        f"- {item['config_key']}: {_format_diff_value(item['current_value'])} -> {_format_diff_value(item['proposed_value'])}"
+        for item in profile_diffs
+    ]
     return "\n".join(header + rows)
 
 
@@ -342,6 +434,92 @@ def render_tuning_proposals_html(hours: int = 72) -> str:
         <tbody>{deferred_rows}</tbody>
       </table>
     </section>
+  </div>
+</body>
+</html>"""
+
+
+def render_tuning_profiles_html(hours: int = 72) -> str:
+    payload = build_tuning_profiles(hours=max(1, hours))
+    profiles = payload.get("profiles") if isinstance(payload.get("profiles"), dict) else {}
+    profile_diffs = payload.get("profile_diffs") if isinstance(payload.get("profile_diffs"), dict) else {}
+
+    cards = ""
+    for profile_name in ("strict", "balanced", "aggressive"):
+        env_snippet = render_profile_env_snippet(profile_name, hours=max(1, hours))
+        diff_text = render_profile_apply_diff(profile_name, hours=max(1, hours))
+        diff_count = len(profile_diffs.get(profile_name) or [])
+        cards += (
+            '<section class="panel">'
+            f"<h2>{html.escape(profile_name.title())}</h2>"
+            f"<p>{html.escape(PROFILE_LABELS.get(profile_name, 'Generated config profile.'))}</p>"
+            f"<p><strong>Changed keys vs balanced:</strong> {diff_count}</p>"
+            '<div class="export-grid">'
+            f"<div><h3>.env Profile</h3><pre>{html.escape(env_snippet)}</pre></div>"
+            f"<div><h3>Manual Diff</h3><pre>{html.escape(diff_text)}</pre></div>"
+            "</div>"
+            "</section>"
+        )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tuning Profiles</title>
+  <style>
+    :root {{
+      --bg: #081119;
+      --panel: rgba(11, 24, 38, 0.9);
+      --line: rgba(116, 153, 186, 0.16);
+      --text: #edf5fb;
+      --muted: #8ca4b8;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      color: var(--text);
+      font-family: "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #071018 0%, #09131c 100%);
+    }}
+    .shell {{ max-width: 1320px; margin: 0 auto; padding: 24px 18px 36px; }}
+    .panel {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      padding: 20px;
+      margin-top: 18px;
+    }}
+    .export-grid {{ display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap:16px; }}
+    pre {{
+      margin: 0;
+      padding: 16px;
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      background: rgba(6, 16, 24, 0.92);
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #d7e4ef;
+      font-size: 13px;
+      line-height: 1.5;
+    }}
+    h1 {{ margin: 0 0 8px; font-size: 34px; }}
+    h2 {{ margin: 0 0 12px; font-size: 22px; }}
+    h3 {{ margin: 0 0 10px; font-size: 18px; }}
+    p {{ margin: 0 0 12px; color: var(--muted); line-height: 1.5; }}
+    @media (max-width: 1020px) {{
+      .export-grid {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="panel">
+      <h1>Tuning Profiles</h1>
+      <p>Complete env-ready profile bundles generated from the current baseline and proposal overrides from the last {int(payload.get("lookback_hours") or hours)} hours.</p>
+    </section>
+    {cards}
   </div>
 </body>
 </html>"""

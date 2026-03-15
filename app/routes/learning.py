@@ -13,9 +13,13 @@ from app.services.signal_learning_service import (
     render_learning_report_html,
 )
 from app.services.tuning_service import (
+    build_tuning_profiles,
     build_tuning_proposals,
+    render_profile_apply_diff,
+    render_profile_env_snippet,
     render_tuning_apply_diff,
     render_tuning_env_snippet,
+    render_tuning_profiles_html,
     render_tuning_proposals_html,
 )
 
@@ -120,6 +124,26 @@ def learning_tuning_proposals_env(hours: int = 72):
 @router.get("/learning/tuning/proposals/diff")
 def learning_tuning_proposals_diff(hours: int = 72):
     return PlainTextResponse(content=render_tuning_apply_diff(hours=max(1, hours)))
+
+
+@router.get("/learning/tuning/profiles")
+def learning_tuning_profiles(hours: int = 72):
+    return build_tuning_profiles(hours=max(1, hours))
+
+
+@router.get("/learning/tuning/profiles/dashboard")
+def learning_tuning_profiles_dashboard(hours: int = 72):
+    return HTMLResponse(content=render_tuning_profiles_html(hours=max(1, hours)))
+
+
+@router.get("/learning/tuning/profiles/{profile_name}/env")
+def learning_tuning_profile_env(profile_name: str, hours: int = 72):
+    return PlainTextResponse(content=render_profile_env_snippet(profile_name, hours=max(1, hours)))
+
+
+@router.get("/learning/tuning/profiles/{profile_name}/diff")
+def learning_tuning_profile_diff(profile_name: str, hours: int = 72):
+    return PlainTextResponse(content=render_profile_apply_diff(profile_name, hours=max(1, hours)))
 
 
 @router.get("/learning/diagnostics/dashboard")

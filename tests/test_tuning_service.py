@@ -4,9 +4,13 @@ import json
 
 from app.services import signal_learning_service as sls
 from app.services.tuning_service import (
+    build_tuning_profiles,
     build_tuning_proposals,
+    render_profile_apply_diff,
+    render_profile_env_snippet,
     render_tuning_apply_diff,
     render_tuning_env_snippet,
+    render_tuning_profiles_html,
     render_tuning_proposals_html,
 )
 
@@ -138,3 +142,26 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     assert "EARLY_ATTENTION_MIN:" in apply_diff
     assert "PROM_MIN_LIQ_USD:" in apply_diff
     assert "->" in apply_diff
+
+    profiles = build_tuning_profiles(hours=10_000)
+    assert profiles["base_profile"] == "balanced"
+    assert "strict" in profiles["profiles"]
+    assert "aggressive" in profiles["profiles"]
+    assert profiles["profiles"]["balanced"]["EARLY_ATTENTION_MIN"] == proposals["preset_overrides"]["balanced"].get(
+        "EARLY_ATTENTION_MIN",
+        profiles["profiles"]["balanced"]["EARLY_ATTENTION_MIN"],
+    )
+    assert profiles["profile_diffs"]["strict"]
+    assert profiles["profile_diffs"]["aggressive"]
+
+    strict_env = render_profile_env_snippet("strict", hours=10_000)
+    assert "PROM_MIN_LIQ_USD=" in strict_env
+    assert "Signal Engine strict profile" in strict_env
+
+    aggressive_diff = render_profile_apply_diff("aggressive", hours=10_000)
+    assert "EARLY_ATTENTION_MIN:" in aggressive_diff
+
+    profiles_html = render_tuning_profiles_html(hours=10_000)
+    assert "Tuning Profiles" in profiles_html
+    assert "Balanced" in profiles_html
+    assert "Aggressive" in profiles_html
