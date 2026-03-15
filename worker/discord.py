@@ -298,14 +298,22 @@ def _links_lines(token: str, metrics: dict) -> str:
 
 
 def _reason_stack(e: Event) -> str:
-    reasons = []
-    if isinstance(e.reasons, list):
-        reasons.extend(str(r) for r in e.reasons if isinstance(r, str))
     extra = e.extra if isinstance(e.extra, dict) else {}
     attn_reasons = extra.get("attention_reasons") if isinstance(extra.get("attention_reasons"), list) else []
+    reasons = []
     for reason in attn_reasons:
         if isinstance(reason, str):
             reasons.append(reason)
+    generic_reasons = {
+        "token_resolved",
+        "dex_pair_found",
+        "sniper_route",
+        "promotion_gate_passed",
+    }
+    if isinstance(e.reasons, list):
+        for reason in e.reasons:
+            if isinstance(reason, str) and reason not in generic_reasons:
+                reasons.append(reason)
     seen = []
     for reason in reasons:
         if reason not in seen and not reason.startswith("source_unavailable"):
@@ -353,10 +361,12 @@ def _display_confidence_score(e: Event, attention_score: float) -> float:
         raw = float(e.confidence)
     except Exception:
         raw = 0.0
+    if e.type in ("candidate", "heating_up"):
+        if attention_score > 0:
+            return max(0.0, min(1.0, attention_score))
+        return max(0.0, min(1.0, raw))
     if raw > 0:
         return max(0.0, min(1.0, raw))
-    if e.type in ("candidate", "heating_up"):
-        return max(0.0, min(1.0, attention_score))
     return 0.0
 
 
