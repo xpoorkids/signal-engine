@@ -134,6 +134,56 @@ def _review_risk(
     return max(0.0, min(score, 1.0)), reasons
 
 
+def _rug_assessment(
+    dex_summary: dict[str, Any],
+    holder_risk: dict[str, Any],
+    mint_authority: bool,
+    freeze_authority: bool,
+    liq_locked: bool | None,
+) -> dict[str, Any]:
+    flags: list[str] = []
+    score = 0
+
+    liq = _float(dex_summary.get("liquidity_usd"))
+    vol5 = _float(dex_summary.get("volume_m5"))
+    top_holder_pct = _float(holder_risk.get("top_holder_pct")) * 100.0
+    holder_level = str(holder_risk.get("risk") or "ok")
+
+    if mint_authority:
+        score += 3
+        flags.append("mint_authority_active")
+    if freeze_authority:
+        score += 3
+        flags.append("freeze_authority_active")
+    if holder_level == "high" or top_holder_pct >= 12:
+        score += 3
+        flags.append("holder_concentration_high")
+    elif holder_level == "warn" or top_holder_pct >= 8:
+        score += 2
+        flags.append("holder_concentration_warn")
+    if liq_locked is False:
+        score += 2
+        flags.append("lp_not_locked")
+    if 0 < liq < 5000:
+        score += 2
+        flags.append("thin_liquidity")
+    if liq > 0 and vol5 >= liq * 2.0:
+        score += 2
+        flags.append("volume_without_liquidity")
+
+    verdict = "low"
+    if score >= 6:
+        verdict = "high"
+    elif score >= 3:
+        verdict = "watch"
+
+    return {
+        "score": score,
+        "verdict": verdict,
+        "flags": flags,
+    }
+
+
 async def review_contract(token: str) -> dict[str, Any]:
     token = (token or "").strip()
     if not _CA_RE.match(token):
@@ -171,6 +221,13 @@ async def review_contract(token: str) -> dict[str, Any]:
     )
 
     lifecycle = "dex" if dex_summary else "bonding_curve"
+    rug_check = _rug_assessment(
+        dex_summary,
+        holder_risk,
+        mint_authority,
+        freeze_authority,
+        liq_locked,
+    )
     elite_score = ELITE.compute_elite_score(
         token=token,
         buy_size_sol=0.0,
@@ -247,6 +304,7 @@ async def review_contract(token: str) -> dict[str, Any]:
             "liquidity_drop_spike": liq_drop,
             "holder_risk": holder_risk,
         },
+        "rug_check": rug_check,
         "social": x_signal or {
             "tweet_count": 0,
             "unique_authors": 0,
@@ -270,6 +328,7 @@ def render_review_html(review: dict[str, Any]) -> str:
     security = review.get("security") if isinstance(review.get("security"), dict) else {}
     social = review.get("social") if isinstance(review.get("social"), dict) else {}
     links = review.get("links") if isinstance(review.get("links"), dict) else {}
+    rug_check = review.get("rug_check") if isinstance(review.get("rug_check"), dict) else {}
 
     name = html.escape(str(review.get("name") or "UNK"))
     symbol = html.escape(str(review.get("symbol") or "UNK"))
@@ -297,6 +356,9 @@ def render_review_html(review: dict[str, Any]) -> str:
     x_authors = _int(social.get("unique_authors"))
     x_likes = _int(social.get("likes"))
     holder_risk = security.get("holder_risk") if isinstance(security.get("holder_risk"), dict) else {}
+    rug_score = _int(rug_check.get("score"))
+    rug_verdict = str(rug_check.get("verdict") or "low").upper()
+    rug_flags = rug_check.get("flags") if isinstance(rug_check.get("flags"), list) else []
 
     def chip(label: str, value: str, tone: str = "") -> str:
         tone_class = f" chip-{tone}" if tone else ""
@@ -542,6 +604,7 @@ def render_review_html(review: dict[str, Any]) -> str:
         <div class="chips">
           {chip("Attention", f"{int(round(attention * 100))}%", "good" if attention >= 0.7 else "warn")}
           {chip("Risk", f"{int(round(risk * 100))}%", "bad" if risk >= 0.4 else "warn" if risk >= 0.2 else "good")}
+          {chip("Rug", rug_verdict, "bad" if rug_verdict == "HIGH" else "warn" if rug_verdict == "WATCH" else "good")}
           {chip("Elite", str(elite), "good" if elite >= 8 else "warn" if elite >= 4 else "bad")}
           {chip("Lifecycle", lifecycle_label, "warn" if lifecycle == "bonding_curve" else "good")}
         </div>
@@ -574,6 +637,16 @@ def render_review_html(review: dict[str, Any]) -> str:
       <section class="card section">
         <h3>Why It Triggered</h3>
         <ul class="list">{reason_items}</ul>
+      </section>
+      <section class="card section">
+        <h3>Rug Check</h3>
+        <div class="tape">
+          {stat("Verdict", rug_verdict)}
+          {stat("Rug Score", str(rug_score))}
+          {stat("Top Holder", _fmt_pct(_float(holder_risk.get("top_holder_pct")) * 100.0, 1))}
+          {stat("Vol / Liq", f"{(_float(market.get('volume_m5')) / _float(market.get('liquidity_usd'))):.1f}x" if _float(market.get('liquidity_usd')) > 0 else "—")}
+        </div>
+        <div style="margin-top:12px" class="muted">{html.escape(', '.join(rug_flags) if rug_flags else 'no_major_rug_flags')}</div>
       </section>
       <section class="card section">
         <h3>Security</h3>
