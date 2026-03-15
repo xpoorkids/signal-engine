@@ -95,6 +95,7 @@ def test_format_discord_missing_metrics_do_not_render_as_zero():
     assert "0.00" not in identity_field
     assert "Insufficient data" in quality_field
     assert "Not computed" in command_view
+    assert "..." not in identity_field
 
 
 def test_review_html_missing_metrics_render_semantic_state():
@@ -168,6 +169,35 @@ def test_format_discord_regression_sample_payload_keeps_real_risk():
     assert "0.47" in identity_field
     assert "Risk Score: `0.47" in quality_field
     assert "Flow Bias:" in flow_field
+    assert "CA: `So11111111111111111111111111111111111111112`" in identity_field
+
+
+def test_format_discord_fetches_metadata_when_identity_missing(monkeypatch):
+    def _fake_fetch(_: str) -> dict[str, str]:
+        return {"symbol": "REAL", "name": "Real Token"}
+
+    monkeypatch.setattr("worker.discord.fetch_token_metadata", _fake_fetch)
+
+    event = Event(
+        type="candidate",
+        source="test",
+        token="So11111111111111111111111111111111111111112",
+        confidence=0.61,
+        extra={
+            "lifecycle": "dex",
+            "risk_score": 0.21,
+            "attention_score": 0.62,
+            "metric_states": {
+                "risk_score": metric_state(0.21, status="computed"),
+                "attention_score": metric_state(0.62, status="computed"),
+            },
+        },
+    )
+
+    embed = format_discord(event)["embeds"][0]
+    identity_field = _candidate_field(embed, "Token Identity")
+
+    assert "**Real Token**  `$REAL`" in identity_field
 
 
 def test_format_discord_overview_uses_new_hierarchy():

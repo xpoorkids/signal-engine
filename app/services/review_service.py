@@ -12,7 +12,6 @@ from app.services.signal_presentation import (
     quality_tier,
     risk_band,
     score_band,
-    shorten_address,
     signal_color,
     signal_title,
     signal_type,
@@ -596,8 +595,7 @@ def render_review_html(review: dict[str, Any]) -> str:
         (
             '<div class="stack">'
             f'<div><strong>{html.escape(vm.name)}</strong> <span class="mono">${html.escape(vm.symbol)}</span></div>'
-            f'<div class="mono">CA: {html.escape(shorten_address(vm.token))}</div>'
-            f'<div class="mono">{html.escape(vm.token)}</div>'
+            f'<div class="mono">CA: {html.escape(vm.token)}</div>'
             f"<div>Lifecycle: <strong>{lifecycle_label}</strong></div>"
             "</div>"
         ),

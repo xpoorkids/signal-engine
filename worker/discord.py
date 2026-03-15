@@ -15,6 +15,7 @@ from worker.config import (
     DRY_RUN,
 )
 from worker.events import Event
+from worker.metadata import fetch_token_metadata
 from worker.config import RADAR_QUIET_RISK_MAX
 
 
@@ -659,6 +660,22 @@ def _token_labels_from_event(e: Event) -> tuple[str, str]:
         raw_name = e.extra.get("name")
         if isinstance(raw_name, str) and raw_name.strip():
             name = raw_name.strip()
+        dex_summary = e.extra.get("dex_summary") if isinstance(e.extra.get("dex_summary"), dict) else {}
+        dex_symbol = dex_summary.get("symbol")
+        if not symbol and isinstance(dex_symbol, str) and dex_symbol.strip():
+            symbol = dex_symbol.strip().upper()
+        dex_name = dex_summary.get("name")
+        if not name and isinstance(dex_name, str) and dex_name.strip():
+            name = dex_name.strip()
+    if e.token and (not symbol or not name):
+        meta = fetch_token_metadata(e.token)
+        if isinstance(meta, dict):
+            meta_symbol = meta.get("symbol")
+            meta_name = meta.get("name")
+            if not symbol and isinstance(meta_symbol, str) and meta_symbol.strip():
+                symbol = meta_symbol.strip().upper()
+            if not name and isinstance(meta_name, str) and meta_name.strip():
+                name = meta_name.strip()
     if not symbol:
         symbol = "UNK"
     if not name:
@@ -709,8 +726,7 @@ def _build_overview_lines(
 ) -> list[str]:
     return [
         f"**{name}**  `${symbol}`",
-        f"CA: `{shorten_address(full_addr)}`",
-        f"`{full_addr}`",
+        f"CA: `{full_addr}`",
         *lines,
     ]
 

@@ -1,5 +1,8 @@
 import os
+from functools import lru_cache
+
 import requests
+
 from worker.config import HELIUS_API_KEY, HELIUS_RPC_URL
 
 HELIUS_KEY = HELIUS_API_KEY or os.getenv("HELIUS_API_KEY")
@@ -10,6 +13,7 @@ HELIUS_RPC = (
 )
 
 
+@lru_cache(maxsize=4096)
 def fetch_token_metadata(mint: str) -> dict | None:
     if not mint or not HELIUS_RPC:
         return None
