@@ -420,12 +420,101 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
             """,
             (cutoff,),
         ).fetchall()
+        outcome_rows = c.execute(
+            """
+            SELECT
+                s.signal_id,
+                s.token,
+                s.event_type,
+                s.session_bucket,
+                s.local_daypart,
+                s.alert_ts,
+                ss.horizon_minutes,
+                ss.outcome_label,
+                ss.market_cap_change_pct,
+                ss.liquidity_change_pct
+            FROM signals s
+            LEFT JOIN signal_snapshots ss
+              ON ss.signal_id = s.signal_id
+             AND ss.horizon_minutes = (
+                SELECT MAX(horizon_minutes)
+                FROM signal_snapshots ss2
+                WHERE ss2.signal_id = s.signal_id
+             )
+            WHERE s.alert_ts >= ?
+            ORDER BY s.alert_ts DESC
+            """,
+            (cutoff,),
+        ).fetchall()
 
     counts_by_decision: dict[str, int] = {}
     skip_reason_counts: dict[str, int] = {}
     stage_counts: dict[str, int] = {}
     sessions: dict[str, dict[str, int]] = {}
     recent_examples: list[dict[str, Any]] = []
+    outcome_by_token: dict[str, list[dict[str, Any]]] = {}
+    outcome_counts: dict[str, int] = {}
+    false_positives: list[dict[str, Any]] = []
+    session_outcomes: dict[str, dict[str, Any]] = {}
+    conversion_by_token: dict[str, set[str]] = {}
+
+    for row in outcome_rows:
+        (
+            signal_id,
+            token,
+            event_type,
+            session_bucket,
+            local_daypart,
+            alert_ts,
+            horizon_minutes,
+            outcome_label,
+            market_cap_change_pct,
+            liquidity_change_pct,
+        ) = row
+        token_key = token or "unknown"
+        session_key = session_bucket or "unknown"
+        outcome_label = outcome_label or "pending"
+        outcome_counts[outcome_label] = outcome_counts.get(outcome_label, 0) + 1
+        conversion_by_token.setdefault(token_key, set()).add(str(event_type or "unknown"))
+        outcome_entry = {
+            "signal_id": signal_id,
+            "token": token,
+            "event_type": event_type,
+            "session_bucket": session_key,
+            "local_daypart": local_daypart,
+            "alert_ts": alert_ts,
+            "horizon_minutes": horizon_minutes,
+            "outcome_label": outcome_label,
+            "market_cap_change_pct": market_cap_change_pct,
+            "liquidity_change_pct": liquidity_change_pct,
+        }
+        outcome_by_token.setdefault(token_key, []).append(outcome_entry)
+        session_stats = session_outcomes.setdefault(
+            session_key,
+            {"total": 0, "worked": 0, "failed": 0, "strong_continuation": 0, "mixed": 0, "pending": 0},
+        )
+        session_stats["total"] += 1
+        if outcome_label in session_stats:
+            session_stats[outcome_label] += 1
+        elif outcome_label in {"worked", "strong_continuation"}:
+            session_stats["worked"] += 1
+        elif outcome_label in {"failed", "faded"}:
+            session_stats["failed"] += 1
+        else:
+            session_stats["mixed"] += 1
+
+        if event_type in {"candidate", "promoted"} and outcome_label in {"failed", "faded"}:
+            false_positives.append(
+                {
+                    "token": token,
+                    "event_type": event_type,
+                    "outcome_label": outcome_label,
+                    "session_bucket": session_key,
+                    "market_cap_change_pct": market_cap_change_pct,
+                    "liquidity_change_pct": liquidity_change_pct,
+                    "horizon_minutes": horizon_minutes,
+                }
+            )
 
     for row in decision_rows:
         decision, reasons_json, session_bucket, local_daypart, attention_score, risk_score, confidence_score, created_ts, token, stage = row
@@ -471,6 +560,73 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
         for reason, count in sorted(skip_reason_counts.items(), key=lambda item: (-item[1], item[0]))[:15]
     ]
 
+    false_negatives: list[dict[str, Any]] = []
+    for row in decision_rows:
+        decision, reasons_json, session_bucket, local_daypart, attention_score, risk_score, confidence_score, created_ts, token, stage = row
+        if decision.endswith("sent"):
+            continue
+        token_outcomes = outcome_by_token.get(token or "")
+        if not token_outcomes:
+            continue
+        best_outcome = None
+        for outcome_entry in token_outcomes:
+            if outcome_entry["outcome_label"] in {"worked", "strong_continuation"}:
+                best_outcome = outcome_entry
+                break
+        if not best_outcome:
+            continue
+        reasons: list[str] = []
+        try:
+            parsed = json.loads(reasons_json or "[]")
+            if isinstance(parsed, list):
+                reasons = [str(item) for item in parsed]
+        except Exception:
+            reasons = []
+        false_negatives.append(
+            {
+                "token": token,
+                "stage": stage,
+                "decision": decision,
+                "reasons": reasons,
+                "outcome_label": best_outcome["outcome_label"],
+                "session_bucket": best_outcome["session_bucket"],
+                "market_cap_change_pct": best_outcome["market_cap_change_pct"],
+                "horizon_minutes": best_outcome["horizon_minutes"],
+            }
+        )
+
+    conversion = {
+        "candidate_tokens": 0,
+        "promoted_tokens": 0,
+        "candidate_to_promoted_tokens": 0,
+    }
+    for event_types in conversion_by_token.values():
+        if "candidate" in event_types:
+            conversion["candidate_tokens"] += 1
+        if "promoted" in event_types:
+            conversion["promoted_tokens"] += 1
+        if "candidate" in event_types and "promoted" in event_types:
+            conversion["candidate_to_promoted_tokens"] += 1
+
+    session_quality: list[dict[str, Any]] = []
+    for session_name, stats in session_outcomes.items():
+        total = int(stats.get("total") or 0)
+        positive = int(stats.get("worked") or 0) + int(stats.get("strong_continuation") or 0)
+        negative = int(stats.get("failed") or 0)
+        win_rate = round((positive / total) * 100.0, 1) if total else 0.0
+        fail_rate = round((negative / total) * 100.0, 1) if total else 0.0
+        session_quality.append(
+            {
+                "session_bucket": session_name,
+                "total": total,
+                "positive": positive,
+                "negative": negative,
+                "win_rate": win_rate,
+                "fail_rate": fail_rate,
+            }
+        )
+    session_quality.sort(key=lambda item: (-item["win_rate"], -item["total"], item["session_bucket"]))
+
     return {
         "lookback_hours": hours,
         "counts_by_decision": counts_by_decision,
@@ -478,6 +634,11 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
         "top_skip_reasons": top_skip_reasons,
         "sessions": sessions,
         "recent_examples": recent_examples,
+        "outcomes_by_label": outcome_counts,
+        "false_negatives": false_negatives[:15],
+        "false_positives": false_positives[:15],
+        "session_quality": session_quality,
+        "conversion": conversion,
     }
 
 
@@ -487,6 +648,10 @@ def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
     top_reasons = summary.get("top_skip_reasons") or []
     counts_by_decision = summary.get("counts_by_decision") or {}
     sessions = summary.get("sessions") or {}
+    false_negatives = summary.get("false_negatives") or []
+    false_positives = summary.get("false_positives") or []
+    session_quality = summary.get("session_quality") or []
+    conversion = summary.get("conversion") or {}
 
     if counts_by_decision.get("candidate_gate_skip", 0) > 0:
         recs.append(
@@ -516,6 +681,30 @@ def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
                 "detail": "Promotions are often blocked by 15m buyer breadth. Compare those blocks against later winners before changing the threshold.",
             }
         )
+    if false_negatives:
+        top_reason = None
+        reason_counts: dict[str, int] = {}
+        for item in false_negatives:
+            for reason in item.get("reasons") or []:
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        if reason_counts:
+            top_reason = sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+        recs.append(
+            {
+                "title": "False Negatives Detected",
+                "detail": (
+                    f"{len(false_negatives)} skipped or blocked setups later worked. "
+                    + (f"The most common blocker was `{top_reason}`." if top_reason else "Inspect blockers before tightening further.")
+                ),
+            }
+        )
+    if false_positives:
+        recs.append(
+            {
+                "title": "False Positive Review",
+                "detail": f"{len(false_positives)} recent sent alerts later faded or failed. Audit these before relaxing risk or breadth gates.",
+            }
+        )
 
     best_session = None
     best_sent = -1
@@ -529,6 +718,29 @@ def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
             {
                 "title": "Most Active Session",
                 "detail": f"The busiest recent session is `{best_session}`. Cross-check this against outcome quality before biasing the engine toward it.",
+            }
+        )
+    if session_quality:
+        best_quality = session_quality[0]
+        worst_quality = sorted(session_quality, key=lambda item: (item["win_rate"], -item["total"], item["session_bucket"]))[0]
+        recs.append(
+            {
+                "title": "Session Quality Spread",
+                "detail": (
+                    f"Best realized session is `{best_quality['session_bucket']}` at {best_quality['win_rate']}% positive outcomes. "
+                    f"Weakest is `{worst_quality['session_bucket']}` at {worst_quality['win_rate']}%."
+                ),
+            }
+        )
+    if int(conversion.get("candidate_tokens") or 0) > 0:
+        conv_rate = round(
+            (int(conversion.get("candidate_to_promoted_tokens") or 0) / max(1, int(conversion.get("candidate_tokens") or 0))) * 100.0,
+            1,
+        )
+        recs.append(
+            {
+                "title": "Candidate Conversion",
+                "detail": f"{conv_rate}% of candidate tokens converted into promoted tokens in the lookback window.",
             }
         )
 
@@ -550,6 +762,11 @@ def render_diagnostics_html(hours: int = 24) -> str:
     top_skip_reasons = summary.get("top_skip_reasons") or []
     sessions = summary.get("sessions") or {}
     recent_examples = summary.get("recent_examples") or []
+    outcomes_by_label = summary.get("outcomes_by_label") or {}
+    false_negatives = summary.get("false_negatives") or []
+    false_positives = summary.get("false_positives") or []
+    session_quality = summary.get("session_quality") or []
+    conversion = summary.get("conversion") or {}
 
     def metric_card(label: str, value: Any) -> str:
         return (
@@ -582,6 +799,41 @@ def render_diagnostics_html(hours: int = 24) -> str:
         for name, stats in sorted(sessions.items())
     ) or "<tr><td colspan='4'>No session data yet</td></tr>"
 
+    outcome_cards = "".join(
+        metric_card(f"Outcome: {label}", count)
+        for label, count in sorted(outcomes_by_label.items(), key=lambda item: (-int(item[1] or 0), item[0]))
+    ) or metric_card("Outcome: pending", 0)
+
+    false_negative_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('token') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('decision') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('outcome_label') or 'unknown'))}</td>"
+        f"<td>{html.escape(', '.join(item.get('reasons') or []) or '-')}</td>"
+        "</tr>"
+        for item in false_negatives[:10]
+    ) or "<tr><td colspan='4'>No false negatives observed</td></tr>"
+
+    false_positive_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('token') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('event_type') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('outcome_label') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('market_cap_change_pct') or '-'))}%</td>"
+        "</tr>"
+        for item in false_positives[:10]
+    ) or "<tr><td colspan='4'>No false positives observed</td></tr>"
+
+    session_quality_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('session_bucket') or 'unknown'))}</td>"
+        f"<td>{int(item.get('total') or 0)}</td>"
+        f"<td>{html.escape(str(item.get('win_rate') or 0))}%</td>"
+        f"<td>{html.escape(str(item.get('fail_rate') or 0))}%</td>"
+        "</tr>"
+        for item in session_quality
+    ) or "<tr><td colspan='4'>No outcome quality data yet</td></tr>"
+
     recent_rows = "".join(
         "<tr>"
         f"<td>{html.escape(str(item.get('token') or 'unknown'))}</td>"
@@ -608,6 +860,8 @@ def render_diagnostics_html(hours: int = 24) -> str:
             metric_card("Sent", sum(value for key, value in counts_by_decision.items() if str(key).endswith("sent"))),
             metric_card("Skipped", sum(value for key, value in counts_by_decision.items() if "skip" in str(key))),
             metric_card("Blocked", sum(value for key, value in counts_by_decision.items() if "block" in str(key))),
+            metric_card("False Negatives", len(false_negatives)),
+            metric_card("False Positives", len(false_positives)),
         ]
     )
 
@@ -709,6 +963,20 @@ def render_diagnostics_html(hours: int = 24) -> str:
         <div class="recommendations">{recommendation_html}</div>
       </section>
     </div>
+    <div class="grid" style="margin-top: 18px;">
+      <section class="panel">
+        <h2>Outcome Labels</h2>
+        <div class="metric-row">{outcome_cards}</div>
+      </section>
+      <section class="panel">
+        <h2>Candidate Conversion</h2>
+        <div class="kv-list">
+          {kv_row("Candidate Tokens", conversion.get("candidate_tokens", 0))}
+          {kv_row("Promoted Tokens", conversion.get("promoted_tokens", 0))}
+          {kv_row("Candidate -> Promoted", conversion.get("candidate_to_promoted_tokens", 0))}
+        </div>
+      </section>
+    </div>
     <div class="wide-grid">
       <section class="panel">
         <h2>Session Breakdown</h2>
@@ -726,6 +994,37 @@ def render_diagnostics_html(hours: int = 24) -> str:
             <tr><th>Token</th><th>Stage</th><th>Decision</th><th>Reasons</th><th>Attn</th><th>Risk</th></tr>
           </thead>
           <tbody>{recent_rows}</tbody>
+        </table>
+      </section>
+    </div>
+    <div class="wide-grid">
+      <section class="panel">
+        <h2>Session Outcome Quality</h2>
+        <table>
+          <thead>
+            <tr><th>Session</th><th>Total</th><th>Positive Rate</th><th>Fail Rate</th></tr>
+          </thead>
+          <tbody>{session_quality_rows}</tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>False Negatives</h2>
+        <table>
+          <thead>
+            <tr><th>Token</th><th>Decision</th><th>Outcome</th><th>Reasons</th></tr>
+          </thead>
+          <tbody>{false_negative_rows}</tbody>
+        </table>
+      </section>
+    </div>
+    <div class="wide-grid">
+      <section class="panel">
+        <h2>False Positives</h2>
+        <table>
+          <thead>
+            <tr><th>Token</th><th>Type</th><th>Outcome</th><th>MC Change</th></tr>
+          </thead>
+          <tbody>{false_positive_rows}</tbody>
         </table>
       </section>
     </div>

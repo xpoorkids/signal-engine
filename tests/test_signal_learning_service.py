@@ -211,3 +211,142 @@ def test_diagnostics_summary_aggregates_decisions(tmp_path, monkeypatch):
     reasons = {item["reason"]: item["count"] for item in summary["top_skip_reasons"]}
     assert reasons["attention<0.20"] == 1
     assert reasons["buyers_low"] == 1
+
+
+def test_diagnostics_summary_includes_outcome_analysis(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    candidate_event = Event(
+        type="candidate",
+        source="test",
+        token="token-missed",
+        confidence=0.42,
+        ts=1_773_500_000,
+        extra={
+            "lifecycle": "dex",
+            "attention_score": 0.19,
+            "risk_score": 0.24,
+            "dex_summary": {"market_cap": 10000, "liquidity_usd": 4000, "volume_m5": 2000},
+        },
+    )
+    candidate_signal_id = sls.record_signal_event(candidate_event)
+    sls.record_signal_decision(
+        token="token-missed",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_gate_skip",
+        reasons=["attention<0.20"],
+        attention_score=0.19,
+        risk_score=0.24,
+        confidence_score=0.42,
+        lifecycle="dex",
+        ts_value=1_773_500_000,
+    )
+
+    promoted_event = Event(
+        type="promoted",
+        source="test",
+        token="token-bad-send",
+        confidence=0.77,
+        ts=1_773_500_100,
+        extra={
+            "lifecycle": "dex",
+            "attention_score": 0.68,
+            "risk_score": 0.58,
+            "dex_summary": {"market_cap": 12000, "liquidity_usd": 5000, "volume_m5": 3000},
+        },
+    )
+    promoted_signal_id = sls.record_signal_event(promoted_event)
+    candidate_then_promoted = Event(
+        type="candidate",
+        source="test",
+        token="token-convert",
+        confidence=0.61,
+        ts=1_773_500_200,
+        extra={"lifecycle": "dex", "attention_score": 0.55, "risk_score": 0.22},
+    )
+    sls.record_signal_event(candidate_then_promoted)
+    converted_promoted = Event(
+        type="promoted",
+        source="test",
+        token="token-convert",
+        confidence=0.82,
+        ts=1_773_500_260,
+        extra={"lifecycle": "dex", "attention_score": 0.71, "risk_score": 0.18},
+    )
+    sls.record_signal_event(converted_promoted)
+
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                candidate_signal_id,
+                60,
+                1_773_503_600,
+                "dex",
+                18000,
+                4200,
+                4500,
+                60,
+                35,
+                80,
+                100,
+                40,
+                80.0,
+                5.0,
+                125.0,
+                "strong_continuation",
+                json.dumps({"outcome_label": "strong_continuation"}),
+            ),
+        )
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                promoted_signal_id,
+                60,
+                1_773_503_700,
+                "dex",
+                7000,
+                2900,
+                900,
+                65,
+                -25,
+                -45,
+                30,
+                85,
+                -41.7,
+                -42.0,
+                -70.0,
+                "failed",
+                json.dumps({"outcome_label": "failed"}),
+            ),
+        )
+
+    summary = sls.get_diagnostics_summary(hours=10_000)
+    recommendations = sls.get_diagnostics_recommendations(hours=10_000)
+
+    assert summary["outcomes_by_label"]["strong_continuation"] == 1
+    assert summary["outcomes_by_label"]["failed"] == 1
+    assert summary["false_negatives"][0]["token"] == "token-missed"
+    assert summary["false_positives"][0]["token"] == "token-bad-send"
+    assert summary["conversion"]["candidate_tokens"] >= 2
+    assert summary["conversion"]["promoted_tokens"] >= 2
+    assert summary["conversion"]["candidate_to_promoted_tokens"] >= 1
+    assert summary["session_quality"]
+    assert any(item["title"] == "False Negatives Detected" for item in recommendations)
