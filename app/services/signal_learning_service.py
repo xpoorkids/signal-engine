@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import sqlite3
@@ -478,6 +479,259 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
         "sessions": sessions,
         "recent_examples": recent_examples,
     }
+
+
+def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
+    summary = get_diagnostics_summary(hours)
+    recs: list[dict[str, str]] = []
+    top_reasons = summary.get("top_skip_reasons") or []
+    counts_by_decision = summary.get("counts_by_decision") or {}
+    sessions = summary.get("sessions") or {}
+
+    if counts_by_decision.get("candidate_gate_skip", 0) > 0:
+        recs.append(
+            {
+                "title": "Candidate Gate Pressure",
+                "detail": "Candidate skips are active. Review the top skip reasons before lowering thresholds.",
+            }
+        )
+    if any(str(item.get("reason") or "").startswith("age<") for item in top_reasons):
+        recs.append(
+            {
+                "title": "Age Gate Dominance",
+                "detail": "A large share of candidates are being filtered by token age. Check whether your market is moving faster than the current age floor.",
+            }
+        )
+    if any("dex_gate:liq<" in str(item.get("reason") or "") for item in top_reasons):
+        recs.append(
+            {
+                "title": "Liquidity Bottleneck",
+                "detail": "Liquidity is a major blocker. Inspect whether this is protecting quality or causing missed early movers.",
+            }
+        )
+    if any("buyers_low" == str(item.get("reason") or "") for item in top_reasons):
+        recs.append(
+            {
+                "title": "Promotion Breadth Bottleneck",
+                "detail": "Promotions are often blocked by 15m buyer breadth. Compare those blocks against later winners before changing the threshold.",
+            }
+        )
+
+    best_session = None
+    best_sent = -1
+    for session_name, stats in sessions.items():
+        sent = int(stats.get("sent") or 0)
+        if sent > best_sent:
+            best_sent = sent
+            best_session = session_name
+    if best_session:
+        recs.append(
+            {
+                "title": "Most Active Session",
+                "detail": f"The busiest recent session is `{best_session}`. Cross-check this against outcome quality before biasing the engine toward it.",
+            }
+        )
+
+    if not recs:
+        recs.append(
+            {
+                "title": "No Strong Pattern Yet",
+                "detail": "Collect more decision telemetry before changing gates. The recent sample is too small to justify tuning.",
+            }
+        )
+    return recs
+
+
+def render_diagnostics_html(hours: int = 24) -> str:
+    summary = get_diagnostics_summary(hours)
+    recommendations = get_diagnostics_recommendations(hours)
+    counts_by_decision = summary.get("counts_by_decision") or {}
+    counts_by_stage = summary.get("counts_by_stage") or {}
+    top_skip_reasons = summary.get("top_skip_reasons") or []
+    sessions = summary.get("sessions") or {}
+    recent_examples = summary.get("recent_examples") or []
+
+    def metric_card(label: str, value: Any) -> str:
+        return (
+            '<div class="metric-card">'
+            f'<span>{html.escape(label)}</span>'
+            f"<strong>{html.escape(str(value))}</strong>"
+            "</div>"
+        )
+
+    def kv_row(label: str, value: Any) -> str:
+        return (
+            '<div class="kv-row">'
+            f'<span>{html.escape(label)}</span>'
+            f'<strong>{html.escape(str(value))}</strong>'
+            "</div>"
+        )
+
+    top_skip_html = "".join(
+        f"<li><strong>{html.escape(str(item.get('reason') or 'unknown'))}</strong><span>{int(item.get('count') or 0)}</span></li>"
+        for item in top_skip_reasons
+    ) or "<li><strong>No skip reasons yet</strong><span>0</span></li>"
+
+    session_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(name))}</td>"
+        f"<td>{int(stats.get('sent') or 0)}</td>"
+        f"<td>{int(stats.get('skipped') or 0)}</td>"
+        f"<td>{int(stats.get('blocked') or 0)}</td>"
+        "</tr>"
+        for name, stats in sorted(sessions.items())
+    ) or "<tr><td colspan='4'>No session data yet</td></tr>"
+
+    recent_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('token') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('stage') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('decision') or 'unknown'))}</td>"
+        f"<td>{html.escape(', '.join(item.get('reasons') or []))}</td>"
+        f"<td>{html.escape(str(item.get('attention_score')))}</td>"
+        f"<td>{html.escape(str(item.get('risk_score')))}</td>"
+        "</tr>"
+        for item in recent_examples[:12]
+    ) or "<tr><td colspan='6'>No recent examples yet</td></tr>"
+
+    recommendation_html = "".join(
+        '<div class="recommendation">'
+        f"<h4>{html.escape(item['title'])}</h4>"
+        f"<p>{html.escape(item['detail'])}</p>"
+        "</div>"
+        for item in recommendations
+    )
+
+    overview_cards = "".join(
+        [
+            metric_card("Lookback Hours", summary.get("lookback_hours", hours)),
+            metric_card("Sent", sum(value for key, value in counts_by_decision.items() if str(key).endswith("sent"))),
+            metric_card("Skipped", sum(value for key, value in counts_by_decision.items() if "skip" in str(key))),
+            metric_card("Blocked", sum(value for key, value in counts_by_decision.items() if "block" in str(key))),
+        ]
+    )
+
+    stage_cards = "".join(metric_card(stage, count) for stage, count in sorted(counts_by_stage.items()))
+    decision_rows = "".join(kv_row(decision, count) for decision, count in sorted(counts_by_decision.items()))
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Signal Diagnostics</title>
+  <style>
+    :root {{
+      --bg: #071018;
+      --panel: rgba(11, 24, 38, 0.88);
+      --panel-2: rgba(18, 34, 52, 0.94);
+      --line: rgba(116, 153, 186, 0.16);
+      --text: #ecf4fb;
+      --muted: #8ca4b8;
+      --accent: #f4c430;
+      --good: #2ecc71;
+      --warn: #f4c430;
+      --bad: #e35d6a;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      color: var(--text);
+      font-family: "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(244,196,48,.12), transparent 24%),
+        radial-gradient(circle at bottom right, rgba(47,107,255,.14), transparent 28%),
+        linear-gradient(180deg, #071018 0%, #09131c 100%);
+    }}
+    .shell {{ max-width: 1320px; margin: 0 auto; padding: 24px 18px 36px; }}
+    .hero, .grid, .wide-grid {{ display:grid; gap:16px; }}
+    .hero {{ grid-template-columns: 1.2fr .8fr; margin-bottom: 18px; }}
+    .grid {{ grid-template-columns: repeat(4, minmax(0,1fr)); }}
+    .wide-grid {{ grid-template-columns: 1fr 1fr; margin-top: 18px; }}
+    .panel {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      padding: 20px;
+      box-shadow: 0 18px 50px rgba(0,0,0,.35);
+      backdrop-filter: blur(10px);
+    }}
+    h1 {{ margin: 0 0 8px; font-size: 34px; }}
+    h2 {{ margin: 0 0 14px; font-size: 15px; letter-spacing: .12em; color: var(--muted); text-transform: uppercase; }}
+    h4 {{ margin: 0 0 8px; font-size: 15px; }}
+    p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
+    .metric-row {{ display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; }}
+    .metric-card, .recommendation {{
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 14px 16px;
+    }}
+    .metric-card span, .kv-row span {{ display:block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; margin-bottom: 6px; }}
+    .metric-card strong {{ font-size: 24px; }}
+    .kv-list {{ display:grid; gap: 10px; }}
+    .kv-row {{ display:flex; justify-content:space-between; gap:16px; padding:12px 14px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; }}
+    ul.reason-list {{ list-style:none; padding:0; margin:0; display:grid; gap:10px; }}
+    ul.reason-list li {{ display:flex; justify-content:space-between; gap:16px; padding:12px 14px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; }}
+    table {{ width:100%; border-collapse: collapse; }}
+    th, td {{ text-align:left; padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 14px; }}
+    th {{ color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .10em; }}
+    .recommendations {{ display:grid; gap: 12px; }}
+    @media (max-width: 1020px) {{
+      .hero, .wide-grid, .grid, .metric-row {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="panel hero">
+      <div>
+        <h1>Signal Diagnostics</h1>
+        <p>Operator view for alert flow, skip reasons, promotion blockers, and recent decision quality over the last {int(summary.get('lookback_hours', hours))} hours.</p>
+      </div>
+      <div class="metric-row">{overview_cards}</div>
+    </section>
+    <div class="grid">
+      <section class="panel">
+        <h2>Stage Mix</h2>
+        <div class="metric-row">{stage_cards or metric_card("No Data", 0)}</div>
+      </section>
+      <section class="panel">
+        <h2>Decision Counts</h2>
+        <div class="kv-list">{decision_rows or kv_row("No decisions", 0)}</div>
+      </section>
+      <section class="panel">
+        <h2>Top Skip Reasons</h2>
+        <ul class="reason-list">{top_skip_html}</ul>
+      </section>
+      <section class="panel">
+        <h2>Recommendations</h2>
+        <div class="recommendations">{recommendation_html}</div>
+      </section>
+    </div>
+    <div class="wide-grid">
+      <section class="panel">
+        <h2>Session Breakdown</h2>
+        <table>
+          <thead>
+            <tr><th>Session</th><th>Sent</th><th>Skipped</th><th>Blocked</th></tr>
+          </thead>
+          <tbody>{session_rows}</tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Recent Decision Examples</h2>
+        <table>
+          <thead>
+            <tr><th>Token</th><th>Stage</th><th>Decision</th><th>Reasons</th><th>Attn</th><th>Risk</th></tr>
+          </thead>
+          <tbody>{recent_rows}</tbody>
+        </table>
+      </section>
+    </div>
+  </div>
+</body>
+</html>"""
 
 
 def _fetch_due_jobs(limit: int = 10) -> list[dict[str, Any]]:
