@@ -98,7 +98,7 @@ def _record_decision(
     lifecycle: str | None = None,
 ) -> None:
     try:
-        record_signal_decision(
+        signal_id = record_signal_decision(
             token=e.token,
             event_type=e.type,
             stage=stage,
@@ -110,7 +110,12 @@ def _record_decision(
             creator_score=creator_score,
             lifecycle=lifecycle,
             ts_value=e.ts,
+            signal_id=str((e.extra or {}).get("_signal_id") or "").strip() or None,
+            source=e.source,
+            creator=e.creator,
         )
+        if signal_id and isinstance(e.extra, dict):
+            e.extra["_signal_id"] = signal_id
     except Exception:
         logger.exception("[diagnostics] record_signal_decision_failed token=%s decision=%s", e.token, decision)
 

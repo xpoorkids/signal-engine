@@ -350,3 +350,81 @@ def test_diagnostics_summary_includes_outcome_analysis(tmp_path, monkeypatch):
     assert summary["conversion"]["candidate_to_promoted_tokens"] >= 1
     assert summary["session_quality"]
     assert any(item["title"] == "False Negatives Detected" for item in recommendations)
+
+
+def test_record_signal_decision_creates_reusable_signal_shell(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    signal_id = sls.record_signal_decision(
+        token="token-shell",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_gate_skip",
+        reasons=["attention<0.20"],
+        attention_score=0.18,
+        risk_score=0.21,
+        confidence_score=0.33,
+        lifecycle="dex",
+        ts_value=1_773_600_000,
+        source="test",
+        creator="creator-shell",
+    )
+
+    assert signal_id is not None
+
+    with sls._connect() as c:
+        decision_row = c.execute(
+            "SELECT signal_id FROM signal_decisions WHERE token='token-shell' ORDER BY created_ts DESC LIMIT 1"
+        ).fetchone()
+        signal_row = c.execute(
+            "SELECT signal_id, token, event_type, source, creator, confidence_score, attention_score, risk_score FROM signals WHERE signal_id=?",
+            (signal_id,),
+        ).fetchone()
+        job_count = c.execute(
+            "SELECT COUNT(1) FROM signal_snapshot_jobs WHERE signal_id=?",
+            (signal_id,),
+        ).fetchone()[0]
+
+    assert decision_row[0] == signal_id
+    assert signal_row[0] == signal_id
+    assert signal_row[1] == "token-shell"
+    assert signal_row[2] == "candidate"
+    assert signal_row[3] == "test"
+    assert signal_row[4] == "creator-shell"
+    assert signal_row[5] == 0.33
+    assert signal_row[6] == 0.18
+    assert signal_row[7] == 0.21
+    assert job_count == len(sls.SNAPSHOT_HORIZONS_MINUTES)
+
+    event = Event(
+        type="candidate",
+        source="test",
+        token="token-shell",
+        creator="creator-shell",
+        confidence=0.61,
+        ts=1_773_600_030,
+        extra={
+            "_signal_id": signal_id,
+            "lifecycle": "dex",
+            "attention_score": 0.55,
+            "risk_score": 0.19,
+            "dex_summary": {"market_cap": 18000, "liquidity_usd": 7000, "volume_m5": 5000},
+        },
+    )
+    updated_signal_id = sls.record_signal_event(event, external_ref="candidate-message-1")
+
+    with sls._connect() as c:
+        updated_row = c.execute(
+            "SELECT signal_id, external_ref, confidence_score, attention_score, risk_score, market_cap_usd FROM signals WHERE signal_id=?",
+            (signal_id,),
+        ).fetchone()
+
+    assert updated_signal_id == signal_id
+    assert updated_row[0] == signal_id
+    assert updated_row[1] == "candidate-message-1"
+    assert updated_row[2] == 0.61
+    assert updated_row[3] == 0.55
+    assert updated_row[4] == 0.19
+    assert updated_row[5] == 18000

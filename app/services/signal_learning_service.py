@@ -146,6 +146,10 @@ def init() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_signal_jobs_due ON signal_snapshot_jobs(status, due_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_signal ON signal_snapshots(signal_id, horizon_minutes)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_ts ON signal_decisions(created_ts, decision)")
+        decision_cols = {row[1] for row in c.execute("PRAGMA table_info(signal_decisions)").fetchall()}
+        if "signal_id" not in decision_cols:
+            c.execute("ALTER TABLE signal_decisions ADD COLUMN signal_id TEXT")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_signal_id ON signal_decisions(signal_id)")
 
 
 def _to_float(value: Any) -> float | None:
@@ -241,16 +245,144 @@ def _outcome_label(snapshot: dict[str, Any], baseline: dict[str, Any]) -> str:
     return "mixed"
 
 
+def _ensure_signal_jobs(c: sqlite3.Connection, signal_id: str, ts_value: int) -> None:
+    for horizon in SNAPSHOT_HORIZONS_MINUTES:
+        c.execute(
+            """
+            INSERT INTO signal_snapshot_jobs (signal_id, horizon_minutes, due_ts, status)
+            VALUES (?, ?, ?, 'pending')
+            ON CONFLICT(signal_id, horizon_minutes) DO NOTHING
+            """,
+            (signal_id, horizon, ts_value + (horizon * 60)),
+        )
+
+
+def _ensure_signal_shell(
+    *,
+    token: str | None,
+    event_type: str,
+    ts_value: float,
+    signal_id: str | None = None,
+    source: str | None = None,
+    creator: str | None = None,
+    lifecycle: str | None = None,
+    confidence_score: float | None = None,
+    attention_score: float | None = None,
+    risk_score: float | None = None,
+) -> str | None:
+    if not token:
+        return None
+    ts_int = int(ts_value)
+    now = int(time.time())
+    time_features = _classify_time_features(ts_value)
+    with _connect() as c:
+        existing_signal_id = signal_id
+        if existing_signal_id:
+            row = c.execute("SELECT signal_id FROM signals WHERE signal_id=?", (existing_signal_id,)).fetchone()
+            if row is None:
+                existing_signal_id = None
+        if existing_signal_id is None:
+            row = c.execute(
+                """
+                SELECT signal_id
+                FROM signals
+                WHERE token=? AND event_type=? AND ABS(alert_ts - ?) <= 900
+                ORDER BY ABS(alert_ts - ?) ASC, updated_ts DESC
+                LIMIT 1
+                """,
+                (token, event_type, ts_int, ts_int),
+            ).fetchone()
+            if row:
+                existing_signal_id = str(row[0])
+
+        resolved_signal_id = existing_signal_id or uuid.uuid4().hex
+        if existing_signal_id:
+            c.execute(
+                """
+                UPDATE signals
+                SET updated_ts=?,
+                    source=COALESCE(?, source),
+                    creator=COALESCE(?, creator),
+                    lifecycle=COALESCE(?, lifecycle),
+                    confidence_score=COALESCE(?, confidence_score),
+                    attention_score=COALESCE(?, attention_score),
+                    risk_score=COALESCE(?, risk_score)
+                WHERE signal_id=?
+                """,
+                (
+                    now,
+                    source,
+                    creator,
+                    lifecycle,
+                    confidence_score,
+                    attention_score,
+                    risk_score,
+                    resolved_signal_id,
+                ),
+            )
+        else:
+            c.execute(
+                """
+                INSERT INTO signals (
+                    signal_id, external_ref, token, event_type, source, creator, alert_ts, updated_ts,
+                    lifecycle, confidence_score, attention_score, risk_score, elite_score,
+                    market_cap_usd, liquidity_usd, volume_m5_usd, age_minutes, price_change_m5,
+                    price_change_h1, txns_m5_buys, txns_m5_sells,
+                    hour_utc, day_of_week_utc, is_weekend_utc, hour_local, day_of_week_local,
+                    local_daypart, session_bucket, payload_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    resolved_signal_id,
+                    None,
+                    token,
+                    event_type,
+                    source,
+                    creator,
+                    ts_int,
+                    now,
+                    lifecycle,
+                    confidence_score,
+                    attention_score,
+                    risk_score,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    time_features["hour_utc"],
+                    time_features["day_of_week_utc"],
+                    time_features["is_weekend_utc"],
+                    time_features["hour_local"],
+                    time_features["day_of_week_local"],
+                    time_features["local_daypart"],
+                    time_features["session_bucket"],
+                    "{}",
+                ),
+            )
+        _ensure_signal_jobs(c, resolved_signal_id, ts_int)
+    return resolved_signal_id
+
+
 def record_signal_event(event, *, external_ref: str | None = None, edited: bool = False) -> str:
     now = int(time.time())
     extra = event.extra if isinstance(event.extra, dict) else {}
     metrics = _extract_extra_metrics(extra)
     time_features = _classify_time_features(event.ts)
     payload_json = json.dumps(extra, sort_keys=True)
-    existing_signal_id = None
+    existing_signal_id = str(extra.get("_signal_id") or "").strip() or None
 
     with _connect() as c:
-        if external_ref:
+        if existing_signal_id:
+            row = c.execute("SELECT signal_id FROM signals WHERE signal_id=?", (existing_signal_id,)).fetchone()
+            if row is None:
+                existing_signal_id = None
+        if existing_signal_id is None and external_ref:
             row = c.execute(
                 "SELECT signal_id FROM signals WHERE external_ref=? AND event_type=? ORDER BY alert_ts DESC LIMIT 1",
                 (external_ref, event.type),
@@ -263,12 +395,14 @@ def record_signal_event(event, *, external_ref: str | None = None, edited: bool 
             c.execute(
                 """
                 UPDATE signals
-                SET updated_ts=?, confidence_score=?, attention_score=?, risk_score=?, elite_score=?,
+                SET external_ref=COALESCE(?, external_ref),
+                    updated_ts=?, confidence_score=?, attention_score=?, risk_score=?, elite_score=?,
                     market_cap_usd=?, liquidity_usd=?, volume_m5_usd=?, age_minutes=?, price_change_m5=?,
                     price_change_h1=?, txns_m5_buys=?, txns_m5_sells=?, lifecycle=?, payload_json=?
                 WHERE signal_id=?
                 """,
                 (
+                    external_ref,
                     now,
                     _to_float(event.confidence),
                     metrics["attention_score"],
@@ -333,15 +467,7 @@ def record_signal_event(event, *, external_ref: str | None = None, edited: bool 
                 ),
             )
 
-        for horizon in SNAPSHOT_HORIZONS_MINUTES:
-            c.execute(
-                """
-                INSERT INTO signal_snapshot_jobs (signal_id, horizon_minutes, due_ts, status)
-                VALUES (?, ?, ?, 'pending')
-                ON CONFLICT(signal_id, horizon_minutes) DO NOTHING
-                """,
-                (signal_id, horizon, int(event.ts) + (horizon * 60)),
-            )
+        _ensure_signal_jobs(c, signal_id, int(event.ts))
 
     logger.info(
         "[signal-learning] signal_recorded signal_id=%s token=%s type=%s edited=%s external_ref=%s",
@@ -367,23 +493,39 @@ def record_signal_decision(
     creator_score: float | None = None,
     lifecycle: str | None = None,
     ts_value: float | None = None,
-) -> str:
+    signal_id: str | None = None,
+    source: str | None = None,
+    creator: str | None = None,
+) -> str | None:
     created_ts = int(ts_value or time.time())
     time_features = _classify_time_features(created_ts)
     decision_id = uuid.uuid4().hex
+    resolved_signal_id = _ensure_signal_shell(
+        token=token,
+        event_type=event_type,
+        ts_value=created_ts,
+        signal_id=signal_id,
+        source=source or f"decision:{stage}",
+        creator=creator,
+        lifecycle=lifecycle,
+        confidence_score=confidence_score,
+        attention_score=attention_score,
+        risk_score=risk_score,
+    )
     with _connect() as c:
         c.execute(
             """
             INSERT INTO signal_decisions (
-                decision_id, token, event_type, stage, decision, reasons_json,
+                decision_id, signal_id, token, event_type, stage, decision, reasons_json,
                 attention_score, risk_score, confidence_score, creator_score, lifecycle,
                 hour_utc, day_of_week_utc, is_weekend_utc, hour_local, day_of_week_local,
                 local_daypart, session_bucket, created_ts
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 decision_id,
+                resolved_signal_id,
                 token,
                 event_type,
                 stage,
@@ -404,7 +546,7 @@ def record_signal_decision(
                 created_ts,
             ),
         )
-    return decision_id
+    return resolved_signal_id
 
 
 def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
@@ -412,7 +554,7 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
     with _connect() as c:
         decision_rows = c.execute(
             """
-            SELECT decision, reasons_json, session_bucket, local_daypart,
+            SELECT signal_id, decision, reasons_json, session_bucket, local_daypart,
                    attention_score, risk_score, confidence_score, created_ts, token, stage
             FROM signal_decisions
             WHERE created_ts >= ?
@@ -453,6 +595,7 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
     sessions: dict[str, dict[str, int]] = {}
     recent_examples: list[dict[str, Any]] = []
     outcome_by_token: dict[str, list[dict[str, Any]]] = {}
+    outcome_by_signal_id: dict[str, dict[str, Any]] = {}
     outcome_counts: dict[str, int] = {}
     false_positives: list[dict[str, Any]] = []
     session_outcomes: dict[str, dict[str, Any]] = {}
@@ -489,6 +632,7 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
             "liquidity_change_pct": liquidity_change_pct,
         }
         outcome_by_token.setdefault(token_key, []).append(outcome_entry)
+        outcome_by_signal_id[signal_id] = outcome_entry
         session_stats = session_outcomes.setdefault(
             session_key,
             {"total": 0, "worked": 0, "failed": 0, "strong_continuation": 0, "mixed": 0, "pending": 0},
@@ -517,7 +661,7 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
             )
 
     for row in decision_rows:
-        decision, reasons_json, session_bucket, local_daypart, attention_score, risk_score, confidence_score, created_ts, token, stage = row
+        signal_id, decision, reasons_json, session_bucket, local_daypart, attention_score, risk_score, confidence_score, created_ts, token, stage = row
         counts_by_decision[decision] = counts_by_decision.get(decision, 0) + 1
         stage_key = stage or "unknown"
         stage_counts[stage_key] = stage_counts.get(stage_key, 0) + 1
@@ -543,6 +687,7 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
             recent_examples.append(
                 {
                     "token": token,
+                    "signal_id": signal_id,
                     "stage": stage,
                     "decision": decision,
                     "reasons": reasons,
@@ -562,18 +707,20 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
 
     false_negatives: list[dict[str, Any]] = []
     for row in decision_rows:
-        decision, reasons_json, session_bucket, local_daypart, attention_score, risk_score, confidence_score, created_ts, token, stage = row
+        signal_id, decision, reasons_json, session_bucket, local_daypart, attention_score, risk_score, confidence_score, created_ts, token, stage = row
         if decision.endswith("sent"):
             continue
-        token_outcomes = outcome_by_token.get(token or "")
-        if not token_outcomes:
-            continue
-        best_outcome = None
-        for outcome_entry in token_outcomes:
-            if outcome_entry["outcome_label"] in {"worked", "strong_continuation"}:
-                best_outcome = outcome_entry
-                break
-        if not best_outcome:
+        matched_outcome = outcome_by_signal_id.get(signal_id or "")
+        if matched_outcome and matched_outcome["outcome_label"] not in {"worked", "strong_continuation"}:
+            matched_outcome = None
+        if matched_outcome is None:
+            token_outcomes = outcome_by_token.get(token or "")
+            if token_outcomes:
+                for outcome_entry in token_outcomes:
+                    if outcome_entry["outcome_label"] in {"worked", "strong_continuation"}:
+                        matched_outcome = outcome_entry
+                        break
+        if not matched_outcome:
             continue
         reasons: list[str] = []
         try:
@@ -585,13 +732,14 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
         false_negatives.append(
             {
                 "token": token,
+                "signal_id": signal_id,
                 "stage": stage,
                 "decision": decision,
                 "reasons": reasons,
-                "outcome_label": best_outcome["outcome_label"],
-                "session_bucket": best_outcome["session_bucket"],
-                "market_cap_change_pct": best_outcome["market_cap_change_pct"],
-                "horizon_minutes": best_outcome["horizon_minutes"],
+                "outcome_label": matched_outcome["outcome_label"],
+                "session_bucket": matched_outcome["session_bucket"],
+                "market_cap_change_pct": matched_outcome["market_cap_change_pct"],
+                "horizon_minutes": matched_outcome["horizon_minutes"],
             }
         )
 
