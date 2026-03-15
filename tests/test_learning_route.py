@@ -126,6 +126,70 @@ def test_learning_engine_health_routes_return_status(tmp_path, monkeypatch):
     assert "Engine Health" in html_response.text
 
 
+def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    base_ts = 1_773_620_000
+    positive_ids = []
+    for offset in range(6):
+        positive_ids.append(
+            sls.record_signal_decision(
+                token=f"token-positive-{offset}",
+                event_type="candidate",
+                stage="candidate",
+                decision="candidate_gate_skip",
+                reasons=["attention<0.20"],
+                attention_score=0.19,
+                risk_score=0.22,
+                confidence_score=0.30,
+                lifecycle="dex",
+                ts_value=base_ts + offset,
+                source="test",
+            )
+        )
+    with sls._connect() as c:
+        for idx, signal_id in enumerate(positive_ids):
+            c.execute(
+                """
+                INSERT INTO signal_snapshots (
+                    signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                    volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                    txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                    outcome_label, snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    60,
+                    base_ts + 3600 + idx,
+                    "dex",
+                    18000,
+                    4200,
+                    3000,
+                    64.0,
+                    25.0,
+                    60.0,
+                    40,
+                    18,
+                    80.0,
+                    3.0,
+                    35.0,
+                    "worked",
+                    '{"outcome_label":"worked"}',
+                ),
+            )
+
+    client = TestClient(main.app)
+    response = client.get("/learning/tuning/proposals?hours=10000")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "proposals" in payload
+    assert payload["proposal_count"] >= 1
+
+
 def test_learning_diagnostics_dashboard_returns_html(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
