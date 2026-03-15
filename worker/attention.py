@@ -367,9 +367,9 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
     buyers_15m = metrics["unique_buyers_15m"]
     burst_60s = metrics["burst_count_60s"]
 
-    local_buyers = min(0.28, (min(buyers_5m, 4) * 0.04) + (max(buyers_5m - 4, 0) * 0.02))
+    local_buyers = min(0.32, (min(buyers_5m, 4) * 0.045) + (max(buyers_5m - 4, 0) * 0.02))
     local_burst = min(0.24, (min(burst_60s, 8) * 0.015) + (max(burst_60s - 8, 0) * 0.0075))
-    local_15m = min(0.18, min(buyers_15m, 18) * 0.01)
+    local_15m = min(0.22, min(buyers_15m, 18) * 0.012)
     local = local_buyers + local_burst + local_15m
     if buyers_5m >= 3:
         _append_reason(reasons, f"5m buyer breadth: {buyers_5m}")
@@ -449,6 +449,7 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
             or (narrative_score > 0.0 and local >= 0.25)
             or (birdeye_score > 0.0 and local >= 0.20)
             or pumpportal_score > 0.0
+            or (local >= 0.32 and (buyers_5m >= 4 or burst_60s >= 10))
         )
     )
     if should_query_x:

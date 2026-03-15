@@ -155,6 +155,10 @@ def admission_check_candidate(
         reasons.append("risk_veto")
 
     lifecycle = "dex" if dex_summary else "bonding_curve"
+    if lifecycle == "dex":
+        gate_ok, gate_reasons = evaluate_alert_gate("candidate", dex_summary)
+        if not gate_ok:
+            reasons.extend(f"dex_gate:{reason}" for reason in gate_reasons)
     if lifecycle == "bonding_curve":
         has_bonding, bonding_ok = _bonding_curve_status(extra)
         if has_bonding and not bonding_ok:

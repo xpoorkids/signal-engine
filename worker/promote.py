@@ -77,6 +77,12 @@ from app.services.wallet_service import wallet_risk_score
 logger = logging.getLogger(__name__)
 logger.info("[PROMOTE FILE LOADED]")
 
+
+def _candidate_send_eligible(attention_score: float | None, creator_score: float) -> bool:
+    attn = float(attention_score or 0.0)
+    # Creator quality can help borderline setups, but should not push weak attention through on its own.
+    return attn >= 0.50 or (creator_score >= EARLY_CREATOR_MIN and attn >= 0.35)
+
 async def process_event(state: EngineState, e: Event) -> list[Event]:
     out: list[Event] = []
     logger.info("[PROMOTE HANDLER CALLED] type=%s token=%s", e.type, e.token)
@@ -595,9 +601,10 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     risk_score,
                     attn_reasons,
                 )
-                creator_ok = float(creator_score_info.get("score") or 0.0) >= EARLY_CREATOR_MIN
+                creator_score_value = float(creator_score_info.get("score") or 0.0)
+                creator_ok = creator_score_value >= EARLY_CREATOR_MIN
                 attention_improving = (attention_score or 0.0) > prev_attention
-                send_eligible = creator_ok or (attention_score or 0.0) >= 0.50
+                send_eligible = _candidate_send_eligible(attention_score, creator_score_value)
                 allow_rate = allow_candidate_rate_limit(EARLY_WATCH_RATE_LIMIT_PER_HOUR) if send_eligible else False
                 should_send = send_eligible and allow_rate
                 if not allow_rate:
