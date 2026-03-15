@@ -95,6 +95,37 @@ def test_learning_diagnostics_route_returns_summary(tmp_path, monkeypatch):
     assert payload["counts_by_decision"]["candidate_gate_skip"] == 1
 
 
+def test_learning_engine_health_routes_return_status(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+    sls.record_signal_decision(
+        token="token-a",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_gate_skip",
+        reasons=["attention<0.20"],
+        attention_score=0.05,
+        risk_score=0.50,
+        confidence_score=0.20,
+        creator_score=0.0,
+        lifecycle="dex",
+        ts_value=1_773_500_000,
+    )
+
+    client = TestClient(main.app)
+
+    json_response = client.get("/learning/health?hours=10000")
+    assert json_response.status_code == 200
+    payload = json_response.json()
+    assert payload["status"] in {"cold", "quiet", "processing", "gated", "blocked", "active"}
+    assert "skip_pressure" in payload
+
+    html_response = client.get("/learning/health/dashboard?hours=10000")
+    assert html_response.status_code == 200
+    assert "Engine Health" in html_response.text
+
+
 def test_learning_diagnostics_dashboard_returns_html(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

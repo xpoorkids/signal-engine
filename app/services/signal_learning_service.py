@@ -1000,6 +1000,207 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
     }
 
 
+def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
+    summary = get_diagnostics_summary(hours=max(1, hours))
+    cutoff = int(time.time()) - max(1, hours) * 3600
+    with _connect() as c:
+        latest_signal_row = c.execute(
+            """
+            SELECT token, event_type, alert_ts
+            FROM signals
+            WHERE alert_ts >= ?
+            ORDER BY alert_ts DESC
+            LIMIT 1
+            """,
+            (cutoff,),
+        ).fetchone()
+        latest_decision_row = c.execute(
+            """
+            SELECT decision, created_ts, token
+            FROM signal_decisions
+            WHERE created_ts >= ?
+            ORDER BY created_ts DESC
+            LIMIT 1
+            """,
+            (cutoff,),
+        ).fetchone()
+
+    counts_by_decision = summary.get("counts_by_decision") if isinstance(summary.get("counts_by_decision"), dict) else {}
+    sent_count = sum(int(value or 0) for key, value in counts_by_decision.items() if str(key).endswith("sent"))
+    skipped_count = sum(int(value or 0) for key, value in counts_by_decision.items() if "skip" in str(key))
+    blocked_count = sum(int(value or 0) for key, value in counts_by_decision.items() if "block" in str(key))
+    total_decisions = sum(int(value or 0) for value in counts_by_decision.values())
+
+    skip_pressure = round((skipped_count / total_decisions) * 100.0, 1) if total_decisions else 0.0
+    block_pressure = round((blocked_count / total_decisions) * 100.0, 1) if total_decisions else 0.0
+    send_rate = round((sent_count / total_decisions) * 100.0, 1) if total_decisions else 0.0
+
+    latest_signal = None
+    if latest_signal_row:
+        latest_signal = {
+            "token": latest_signal_row[0],
+            "event_type": latest_signal_row[1],
+            "alert_ts": latest_signal_row[2],
+            "age_minutes": round(max(0.0, (time.time() - int(latest_signal_row[2] or 0)) / 60.0), 1),
+        }
+
+    latest_decision = None
+    if latest_decision_row:
+        latest_decision = {
+            "decision": latest_decision_row[0],
+            "created_ts": latest_decision_row[1],
+            "token": latest_decision_row[2],
+            "age_minutes": round(max(0.0, (time.time() - int(latest_decision_row[1] or 0)) / 60.0), 1),
+        }
+
+    status = "quiet"
+    status_detail = "The engine is processing, but recent sends are sparse."
+    if total_decisions == 0 and latest_signal is None:
+        status = "cold"
+        status_detail = "No recent decision or alert activity in the selected window."
+    elif total_decisions > 0 and sent_count == 0 and skip_pressure >= 70.0:
+        status = "gated"
+        status_detail = "The engine is active, but gates are filtering most setups."
+    elif total_decisions > 0 and sent_count == 0 and block_pressure >= 50.0:
+        status = "blocked"
+        status_detail = "The engine is active, but promotion blockers are suppressing sends."
+    elif sent_count > 0:
+        status = "active"
+        status_detail = "The engine is active and sending alerts in the selected window."
+    elif latest_decision and latest_decision["age_minutes"] <= 15.0:
+        status = "processing"
+        status_detail = "The engine is processing fresh events, but none qualified for send yet."
+
+    top_skip_reasons = summary.get("top_skip_reasons") if isinstance(summary.get("top_skip_reasons"), list) else []
+    top_reasons = top_skip_reasons[:5]
+
+    return {
+        "lookback_hours": hours,
+        "status": status,
+        "status_detail": status_detail,
+        "sent_count": sent_count,
+        "skipped_count": skipped_count,
+        "blocked_count": blocked_count,
+        "total_decisions": total_decisions,
+        "send_rate": send_rate,
+        "skip_pressure": skip_pressure,
+        "block_pressure": block_pressure,
+        "latest_signal": latest_signal,
+        "latest_decision": latest_decision,
+        "top_skip_reasons": top_reasons,
+    }
+
+
+def render_engine_health_html(hours: int = 6) -> str:
+    digest = get_engine_health_digest(hours=max(1, hours))
+    latest_signal = digest.get("latest_signal") if isinstance(digest.get("latest_signal"), dict) else {}
+    latest_decision = digest.get("latest_decision") if isinstance(digest.get("latest_decision"), dict) else {}
+    top_skip_reasons = digest.get("top_skip_reasons") if isinstance(digest.get("top_skip_reasons"), list) else []
+
+    def metric_card(label: str, value: Any) -> str:
+        return (
+            '<div class="metric-card">'
+            f'<span>{html.escape(label)}</span>'
+            f"<strong>{html.escape(str(value))}</strong>"
+            "</div>"
+        )
+
+    top_reason_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('reason') or 'unknown'))}</td>"
+        f"<td>{int(item.get('count') or 0)}</td>"
+        "</tr>"
+        for item in top_skip_reasons
+    ) or "<tr><td colspan='2'>No skip reasons in this window.</td></tr>"
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Engine Health</title>
+  <style>
+    :root {{
+      --bg: #081119;
+      --panel: rgba(11, 24, 38, 0.9);
+      --panel-2: rgba(18, 34, 52, 0.96);
+      --line: rgba(116, 153, 186, 0.16);
+      --text: #edf5fb;
+      --muted: #8ca4b8;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      color: var(--text);
+      font-family: "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #071018 0%, #09131c 100%);
+    }}
+    .shell {{ max-width: 1200px; margin: 0 auto; padding: 24px 18px 36px; }}
+    .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 18px; }}
+    .grid {{ display:grid; gap:16px; grid-template-columns: repeat(4, minmax(0,1fr)); margin-top: 18px; }}
+    .wide-grid {{ display:grid; gap:16px; grid-template-columns: 1fr 1fr; margin-top: 18px; }}
+    .metric-card {{ background: var(--panel-2); border: 1px solid var(--line); border-radius: 18px; padding: 14px 16px; }}
+    .metric-card span {{ display:block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; margin-bottom: 6px; }}
+    .metric-card strong {{ font-size: 24px; }}
+    h1 {{ margin: 0 0 8px; font-size: 32px; }}
+    h2 {{ margin: 0 0 14px; font-size: 14px; letter-spacing: .12em; color: var(--muted); text-transform: uppercase; }}
+    p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
+    table {{ width:100%; border-collapse: collapse; }}
+    th, td {{ text-align:left; padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 14px; }}
+    th {{ color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .10em; }}
+    @media (max-width: 1020px) {{
+      .grid, .wide-grid {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="panel">
+      <h1>Engine Health</h1>
+      <p>{html.escape(str(digest.get("status_detail") or ""))}</p>
+    </section>
+    <div class="grid">
+      {metric_card("Status", digest.get("status", "unknown"))}
+      {metric_card("Sent", digest.get("sent_count", 0))}
+      {metric_card("Skip Pressure", f"{digest.get('skip_pressure', 0)}%")}
+      {metric_card("Block Pressure", f"{digest.get('block_pressure', 0)}%")}
+    </div>
+    <div class="wide-grid">
+      <section class="panel">
+        <h2>Latest Alert</h2>
+        <table>
+          <tbody>
+            <tr><th>Token</th><td>{html.escape(str(latest_signal.get("token") or "None"))}</td></tr>
+            <tr><th>Type</th><td>{html.escape(str(latest_signal.get("event_type") or "None"))}</td></tr>
+            <tr><th>Age Minutes</th><td>{html.escape(str(latest_signal.get("age_minutes") or "N/A"))}</td></tr>
+          </tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Latest Decision</h2>
+        <table>
+          <tbody>
+            <tr><th>Token</th><td>{html.escape(str(latest_decision.get("token") or "None"))}</td></tr>
+            <tr><th>Decision</th><td>{html.escape(str(latest_decision.get("decision") or "None"))}</td></tr>
+            <tr><th>Age Minutes</th><td>{html.escape(str(latest_decision.get("age_minutes") or "N/A"))}</td></tr>
+          </tbody>
+        </table>
+      </section>
+    </div>
+    <div class="wide-grid">
+      <section class="panel">
+        <h2>Top Skip Reasons</h2>
+        <table>
+          <thead><tr><th>Reason</th><th>Count</th></tr></thead>
+          <tbody>{top_reason_rows}</tbody>
+        </table>
+      </section>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
 def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
     summary = get_diagnostics_summary(hours)
     recs: list[dict[str, str]] = []

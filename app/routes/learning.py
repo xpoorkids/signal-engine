@@ -2,10 +2,12 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 
 from app.services.signal_learning_service import (
+    get_engine_health_digest,
     get_diagnostics_summary,
     get_learning_digest,
     get_latest_learning_report,
     get_learning_report,
+    render_engine_health_html,
     render_diagnostics_html,
     render_learning_digest_html,
     render_learning_report_html,
@@ -82,6 +84,16 @@ def learning_report_digest_dashboard(report_date: str):
 @router.get("/learning/diagnostics/summary")
 def learning_diagnostics_summary(hours: int = 24):
     return get_diagnostics_summary(hours=max(1, hours))
+
+
+@router.get("/learning/health")
+def learning_engine_health(hours: int = 6):
+    return get_engine_health_digest(hours=max(1, hours))
+
+
+@router.get("/learning/health/dashboard")
+def learning_engine_health_dashboard(hours: int = 6):
+    return HTMLResponse(content=render_engine_health_html(hours=max(1, hours)))
 
 
 @router.get("/learning/diagnostics/dashboard")
