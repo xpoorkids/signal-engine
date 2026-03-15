@@ -184,9 +184,9 @@ def _wallet_signal_lines(risk_flags: dict) -> str:
     if not isinstance(risk_flags, dict):
         return "organic holder distribution"
     order = [
-        ("wallet_cluster", "cluster_detected"),
-        ("holder_concentration", "holder_concentration"),
-        ("bot_cadence", "bot_cadence"),
+        ("wallet_cluster", "wallet clustering"),
+        ("holder_concentration", "holder concentration"),
+        ("bot_cadence", "bot-like cadence"),
     ]
     lines = []
     for key, label in order:
@@ -210,14 +210,36 @@ def _attention_signal_lines(e: Event, risk_flags: dict) -> str:
     x_tweet_count = int(attention_metrics.get("x_tweet_count") or 0)
     x_unique_authors = int(attention_metrics.get("x_unique_authors") or 0)
     if tracked_hits > 0:
-        lines.append(f"- smart_wallets: {tracked_hits}")
+        lines.append(f"- smart wallets: {tracked_hits}")
     if kol_hits > 0:
-        lines.append(f"- kol_wallets: {kol_hits}")
+        lines.append(f"- kol wallets: {kol_hits}")
     if narrative_hits:
         lines.append(f"- narrative: {', '.join(str(x) for x in narrative_hits[:2])}")
     if x_tweet_count > 0:
-        lines.append(f"- x_mentions: {x_tweet_count} / authors: {x_unique_authors}")
+        lines.append(f"- x momentum: {x_tweet_count} mentions / {x_unique_authors} authors")
     return "\n".join(lines[:5]) if lines else "- organic holder distribution"
+
+
+def _pretty_reason(reason: str) -> str:
+    mapping = {
+        "dex_pair_found": "Dex pair is live",
+        "token_resolved": "Token metadata resolved",
+        "sniper_route": "Sniper route triggered",
+        "promotion_gate_passed": "Promotion gate passed",
+        "wallet_low_risk": "Creator wallet risk is low",
+        "dexscreener_boost": "DexScreener boost detected",
+        "birdeye_trending": "Birdeye trending",
+        "tracked_wallet_flow": "Smart wallet flow detected",
+        "kol_wallet_flow": "KOL wallet flow detected",
+        "x_social_momentum": "X social momentum detected",
+    }
+    if reason in mapping:
+        return mapping[reason]
+    if reason.startswith("repeat_"):
+        return f"Repeat signal count: {reason.split('_', 1)[1]}"
+    if reason.startswith("narrative:"):
+        return f"Narrative alignment: {reason.split(':', 1)[1].replace(',', ', ')}"
+    return reason.replace("_", " ")
 
 
 def _security_lines(e: Event, metrics: dict, risk_score: float) -> str:
@@ -290,7 +312,7 @@ def _reason_stack(e: Event) -> str:
             seen.append(reason)
     if not seen:
         return "- flow + structure"
-    return "\n".join(f"- {reason.replace('_', ' ')}" for reason in seen[:4])
+    return "\n".join(f"- {_pretty_reason(reason)}" for reason in seen[:4])
 
 
 def _market_tape(metrics: dict) -> str:

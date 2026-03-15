@@ -31,6 +31,11 @@ PUMPORTAL_TRADE_BURST_THRESHOLD = 20
 _DEX_CACHE: Dict[str, tuple[float, Any]] = {}
 
 
+def _append_reason(reasons: list[str], text: str) -> None:
+    if text and text not in reasons:
+        reasons.append(text)
+
+
 def _recent_buyers(state: Any, token: str, window_sec: int = 300) -> set[str]:
     if not token:
         return set()
@@ -358,34 +363,44 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
     except Exception:
         metrics["unique_buyers_15m"] = 0
 
-    local_buyers = min(0.25, metrics["unique_buyers_5m"] * 0.05)
-    local_burst = min(0.25, metrics["burst_count_60s"] * 0.03)
-    local_15m = min(0.20, metrics["unique_buyers_15m"] * 0.02)
+    buyers_5m = metrics["unique_buyers_5m"]
+    buyers_15m = metrics["unique_buyers_15m"]
+    burst_60s = metrics["burst_count_60s"]
+
+    local_buyers = min(0.28, (min(buyers_5m, 4) * 0.04) + (max(buyers_5m - 4, 0) * 0.02))
+    local_burst = min(0.24, (min(burst_60s, 8) * 0.015) + (max(burst_60s - 8, 0) * 0.0075))
+    local_15m = min(0.18, min(buyers_15m, 18) * 0.01)
     local = local_buyers + local_burst + local_15m
+    if buyers_5m >= 3:
+        _append_reason(reasons, f"5m buyer breadth: {buyers_5m}")
+    if burst_60s >= 8:
+        _append_reason(reasons, f"1m burst strength: {burst_60s}")
+    if buyers_15m >= 8:
+        _append_reason(reasons, f"15m buyer breadth: {buyers_15m}")
 
     # DexScreener boosts/orders
     dex_boost = 0.0
     boosts = _dexscreener_boosts_count(token) if token else None
     if boosts is None:
-        reasons.append("source_unavailable:dexscreener")
+        _append_reason(reasons, "source_unavailable:dexscreener")
     else:
         metrics["dexscreener_boosts_count"] = boosts
         if boosts >= DEXSCREENER_BOOST_THRESHOLD:
             dex_boost = 0.20
-            reasons.append("dexscreener_boost")
+            _append_reason(reasons, f"DexScreener boost activity: {boosts}")
 
     # Birdeye trending (optional)
     birdeye_score = 0.0
     be = _birdeye_trending(token) if token else None
     if be is None:
         if ENABLE_BIRDEYE:
-            reasons.append("source_unavailable:birdeye")
+            _append_reason(reasons, "source_unavailable:birdeye")
     else:
         metrics["birdeye_trending"] = be.get("rank") is not None
         metrics["birdeye_rank"] = be.get("rank")
         if be.get("rank") is not None:
             birdeye_score = 0.10
-            reasons.append("birdeye_trending")
+            _append_reason(reasons, f"Birdeye trending rank: #{be.get('rank')}")
 
     # PumpPortal trade burst (optional)
     pumpportal_score = 0.0
@@ -396,10 +411,10 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
             metrics["pumportal_trade_burst"] = _PUMPPORTAL.trade_burst(token, window_sec=60)
             if metrics["pumportal_trade_burst"] >= PUMPORTAL_TRADE_BURST_THRESHOLD:
                 pumpportal_score = 0.20
-                reasons.append("pumpportal_trade_burst")
+                _append_reason(reasons, f"PumpPortal trade burst: {metrics['pumportal_trade_burst']}")
     else:
         if ENABLE_PUMPORTAL:
-            reasons.append("source_unavailable:pumpportal")
+            _append_reason(reasons, "source_unavailable:pumpportal")
 
     tracked_score = 0.0
     recent_buyers = _recent_buyers(state, token or "")
@@ -412,17 +427,17 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         metrics["kol_wallet_hits"] = kol_hits
         if tracked_hits > 0:
             tracked_score += min(0.15, tracked_hits * 0.05)
-            reasons.append("tracked_wallet_flow")
+            _append_reason(reasons, f"Smart wallet flow: {tracked_hits}")
         if kol_hits > 0:
             tracked_score += min(0.20, kol_hits * 0.10)
-            reasons.append("kol_wallet_flow")
+            _append_reason(reasons, f"KOL wallet flow: {kol_hits}")
 
     narrative_score = 0.0
     hits = _narrative_hits(e)
     if hits:
         metrics["narrative_hits"] = hits[:3]
         narrative_score = min(0.10, len(hits) * 0.05)
-        reasons.append(f"narrative:{','.join(hits[:2])}")
+        _append_reason(reasons, f"Narrative alignment: {', '.join(hits[:2])}")
 
     x_score = 0.0
     should_query_x = (
@@ -454,9 +469,12 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
             if metrics["x_likes"] >= 20:
                 x_score += 0.05
             if x_score > 0:
-                reasons.append("x_social_momentum")
+                _append_reason(
+                    reasons,
+                    f"X momentum: {metrics['x_tweet_count']} mentions / {metrics['x_unique_authors']} authors",
+                )
         else:
-            reasons.append("source_unavailable:x")
+            _append_reason(reasons, "source_unavailable:x")
 
     attention_score = local + dex_boost + birdeye_score + pumpportal_score + tracked_score + narrative_score + x_score
     attention_score += _acceleration_boost(token or "")
