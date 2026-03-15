@@ -6,6 +6,7 @@ from app.services.signal_learning_service import (
     get_latest_learning_report,
     get_learning_report,
     render_diagnostics_html,
+    render_learning_report_html,
 )
 
 
@@ -20,12 +21,28 @@ def learning_report_latest():
     return report
 
 
+@router.get("/learning/report/latest/dashboard")
+def learning_report_latest_dashboard():
+    try:
+        return HTMLResponse(content=render_learning_report_html())
+    except KeyError:
+        raise HTTPException(status_code=404, detail="learning_report_not_found")
+
+
 @router.get("/learning/report/{report_date}")
 def learning_report_by_date(report_date: str):
     report = get_learning_report(report_date)
     if report is None:
         raise HTTPException(status_code=404, detail="learning_report_not_found")
     return report
+
+
+@router.get("/learning/report/{report_date}/dashboard")
+def learning_report_dashboard(report_date: str):
+    try:
+        return HTMLResponse(content=render_learning_report_html(report_date))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="learning_report_not_found")
 
 
 @router.get("/learning/diagnostics/summary")

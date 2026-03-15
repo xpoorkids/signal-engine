@@ -2064,6 +2064,226 @@ def get_latest_learning_report() -> dict[str, Any] | None:
         return None
 
 
+def render_learning_report_html(report_date: str | None = None) -> str:
+    report = get_learning_report(report_date) if report_date else get_latest_learning_report()
+    if report is None:
+        raise KeyError("learning_report_not_found")
+
+    tuning_snapshot = report.get("tuning_snapshot") if isinstance(report.get("tuning_snapshot"), dict) else {}
+    totals_by_type = report.get("totals_by_type") if isinstance(report.get("totals_by_type"), dict) else {}
+    outcomes_by_label = report.get("outcomes_by_label") if isinstance(report.get("outcomes_by_label"), dict) else {}
+    sessions = report.get("sessions") if isinstance(report.get("sessions"), dict) else {}
+    top_blockers = tuning_snapshot.get("top_blockers") if isinstance(tuning_snapshot.get("top_blockers"), list) else []
+    top_relax_calls = tuning_snapshot.get("top_relax_calls") if isinstance(tuning_snapshot.get("top_relax_calls"), list) else []
+    top_tighten_calls = tuning_snapshot.get("top_tighten_calls") if isinstance(tuning_snapshot.get("top_tighten_calls"), list) else []
+    top_review_calls = tuning_snapshot.get("top_review_calls") if isinstance(tuning_snapshot.get("top_review_calls"), list) else []
+    best_session_signal = tuning_snapshot.get("best_session_signal") if isinstance(tuning_snapshot.get("best_session_signal"), list) else []
+    worst_session_signal = tuning_snapshot.get("worst_session_signal") if isinstance(tuning_snapshot.get("worst_session_signal"), list) else []
+    failing_clusters = report.get("failing_clusters") if isinstance(report.get("failing_clusters"), list) else []
+
+    def metric_card(label: str, value: Any) -> str:
+        return (
+            '<div class="metric-card">'
+            f'<span>{html.escape(label)}</span>'
+            f"<strong>{html.escape(str(value))}</strong>"
+            "</div>"
+        )
+
+    totals_cards = "".join(
+        metric_card(signal_type, count)
+        for signal_type, count in sorted(totals_by_type.items())
+    ) or metric_card("No Signals", 0)
+
+    outcome_cards = "".join(
+        metric_card(label, count)
+        for label, count in sorted(outcomes_by_label.items(), key=lambda item: (-int(item[1] or 0), item[0]))
+    ) or metric_card("pending", 0)
+
+    blocker_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('reason') or 'unknown'))}</td>"
+        f"<td>{int(item.get('count') or 0)}</td>"
+        "</tr>"
+        for item in top_blockers[:10]
+    ) or "<tr><td colspan='2'>No blocker data</td></tr>"
+
+    threshold_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('reason') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('action') or 'hold'))}</td>"
+        f"<td>{int(item.get('sample_size') or 0)}</td>"
+        "</tr>"
+        for item in (top_relax_calls[:3] + top_tighten_calls[:3] + top_review_calls[:3])
+    ) or "<tr><td colspan='3'>No threshold actions</td></tr>"
+
+    best_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('session_bucket') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('signal_type') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('win_rate') or 0))}%</td>"
+        "</tr>"
+        for item in best_session_signal[:5]
+    ) or "<tr><td colspan='3'>No winning regime data</td></tr>"
+
+    worst_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('session_bucket') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('signal_type') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('win_rate') or 0))}%</td>"
+        "</tr>"
+        for item in worst_session_signal[:5]
+    ) or "<tr><td colspan='3'>No weak regime data</td></tr>"
+
+    session_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(name))}</td>"
+        f"<td>{int(stats.get('count') or 0)}</td>"
+        f"<td>{int(stats.get('worked') or 0)}</td>"
+        f"<td>{int(stats.get('failed') or 0)}</td>"
+        f"<td>{html.escape(str(stats.get('avg_market_cap_change_pct')))}</td>"
+        "</tr>"
+        for name, stats in sorted(sessions.items())
+    ) or "<tr><td colspan='5'>No session data</td></tr>"
+
+    failing_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('token') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('event_type') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('session_bucket') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('market_cap_change_pct') or '-'))}</td>"
+        "</tr>"
+        for item in failing_clusters[:10]
+    ) or "<tr><td colspan='4'>No failing clusters</td></tr>"
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Learning Report {html.escape(str(report.get('report_date') or 'latest'))}</title>
+  <style>
+    :root {{
+      --bg: #081119;
+      --panel: rgba(11, 24, 38, 0.9);
+      --panel-2: rgba(18, 34, 52, 0.96);
+      --line: rgba(116, 153, 186, 0.16);
+      --text: #edf5fb;
+      --muted: #8ca4b8;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      color: var(--text);
+      font-family: "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(244,196,48,.10), transparent 25%),
+        radial-gradient(circle at bottom right, rgba(47,107,255,.12), transparent 28%),
+        linear-gradient(180deg, #071018 0%, #09131c 100%);
+    }}
+    .shell {{ max-width: 1360px; margin: 0 auto; padding: 24px 18px 36px; }}
+    .hero, .grid, .wide-grid {{ display:grid; gap:16px; }}
+    .hero {{ grid-template-columns: 1fr; margin-bottom: 18px; }}
+    .grid {{ grid-template-columns: repeat(3, minmax(0,1fr)); }}
+    .wide-grid {{ grid-template-columns: 1fr 1fr; margin-top: 18px; }}
+    .panel {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      padding: 20px;
+      box-shadow: 0 18px 50px rgba(0,0,0,.35);
+      backdrop-filter: blur(10px);
+    }}
+    h1 {{ margin: 0 0 8px; font-size: 34px; }}
+    h2 {{ margin: 0 0 14px; font-size: 15px; letter-spacing: .12em; color: var(--muted); text-transform: uppercase; }}
+    p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
+    .metric-row {{ display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; }}
+    .metric-card {{
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 14px 16px;
+    }}
+    .metric-card span {{ display:block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; margin-bottom: 6px; }}
+    .metric-card strong {{ font-size: 24px; }}
+    table {{ width:100%; border-collapse: collapse; }}
+    th, td {{ text-align:left; padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 14px; }}
+    th {{ color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .10em; }}
+    @media (max-width: 1020px) {{
+      .grid, .wide-grid, .metric-row {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="panel hero">
+      <div>
+        <h1>Daily Learning Report</h1>
+        <p>Stored tuning snapshot for {html.escape(str(report.get("report_date") or "latest"))}. This view is report-backed, not recomputed from a live dashboard window.</p>
+      </div>
+    </section>
+    <div class="grid">
+      <section class="panel">
+        <h2>Totals By Type</h2>
+        <div class="metric-row">{totals_cards}</div>
+      </section>
+      <section class="panel">
+        <h2>Outcome Labels</h2>
+        <div class="metric-row">{outcome_cards}</div>
+      </section>
+    </div>
+    <div class="wide-grid">
+      <section class="panel">
+        <h2>Top Blockers</h2>
+        <table>
+          <thead><tr><th>Reason</th><th>Count</th></tr></thead>
+          <tbody>{blocker_rows}</tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Threshold Calls</h2>
+        <table>
+          <thead><tr><th>Reason</th><th>Action</th><th>Sample</th></tr></thead>
+          <tbody>{threshold_rows}</tbody>
+        </table>
+      </section>
+    </div>
+    <div class="wide-grid">
+      <section class="panel">
+        <h2>Best Session x Signal</h2>
+        <table>
+          <thead><tr><th>Session</th><th>Signal</th><th>Win Rate</th></tr></thead>
+          <tbody>{best_rows}</tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Worst Session x Signal</h2>
+        <table>
+          <thead><tr><th>Session</th><th>Signal</th><th>Win Rate</th></tr></thead>
+          <tbody>{worst_rows}</tbody>
+        </table>
+      </section>
+    </div>
+    <div class="wide-grid">
+      <section class="panel">
+        <h2>Session Overview</h2>
+        <table>
+          <thead><tr><th>Session</th><th>Count</th><th>Worked</th><th>Failed</th><th>Avg MC %</th></tr></thead>
+          <tbody>{session_rows}</tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Failing Clusters</h2>
+        <table>
+          <thead><tr><th>Token</th><th>Type</th><th>Session</th><th>MC %</th></tr></thead>
+          <tbody>{failing_rows}</tbody>
+        </table>
+      </section>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
 async def daily_report_worker() -> None:
     init()
     while True:

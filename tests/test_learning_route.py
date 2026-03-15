@@ -20,6 +20,20 @@ def test_learning_report_route_returns_latest(tmp_path, monkeypatch):
     assert payload["report_date"] == report["report_date"]
 
 
+def test_learning_report_latest_dashboard_returns_html(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+    sls.generate_daily_learning_report("2026-03-14")
+
+    client = TestClient(main.app)
+    response = client.get("/learning/report/latest/dashboard")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Daily Learning Report" in response.text
+
+
 def test_learning_report_route_404_when_missing(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
@@ -29,6 +43,9 @@ def test_learning_report_route_404_when_missing(tmp_path, monkeypatch):
     response = client.get("/learning/report/latest")
 
     assert response.status_code == 404
+
+    dashboard_response = client.get("/learning/report/latest/dashboard")
+    assert dashboard_response.status_code == 404
 
 
 def test_learning_diagnostics_route_returns_summary(tmp_path, monkeypatch):
@@ -197,3 +214,18 @@ def test_learning_diagnostics_routes_include_outcome_sections(tmp_path, monkeypa
     assert "Threshold Guidance" in dashboard_response.text
     assert "Blocker Trends" in dashboard_response.text
     assert "Session x Signal Trends" in dashboard_response.text
+
+
+def test_learning_report_dashboard_by_date_returns_tuning_snapshot(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+    report = sls.generate_daily_learning_report("2026-03-14")
+
+    client = TestClient(main.app)
+    response = client.get(f"/learning/report/{report['report_date']}/dashboard")
+
+    assert response.status_code == 200
+    assert "Daily Learning Report" in response.text
+    assert "Top Blockers" in response.text
+    assert "Threshold Calls" in response.text
