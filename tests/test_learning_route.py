@@ -34,6 +34,24 @@ def test_learning_report_latest_dashboard_returns_html(tmp_path, monkeypatch):
     assert "Daily Learning Report" in response.text
 
 
+def test_learning_report_latest_digest_returns_json_and_html(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+    sls.generate_daily_learning_report("2026-03-14")
+
+    client = TestClient(main.app)
+
+    json_response = client.get("/learning/report/latest/digest")
+    assert json_response.status_code == 200
+    payload = json_response.json()
+    assert "highlights" in payload
+
+    html_response = client.get("/learning/report/latest/digest/dashboard")
+    assert html_response.status_code == 200
+    assert "Learning Digest" in html_response.text
+
+
 def test_learning_report_route_404_when_missing(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
@@ -46,6 +64,10 @@ def test_learning_report_route_404_when_missing(tmp_path, monkeypatch):
 
     dashboard_response = client.get("/learning/report/latest/dashboard")
     assert dashboard_response.status_code == 404
+    digest_response = client.get("/learning/report/latest/digest")
+    assert digest_response.status_code == 404
+    digest_dashboard_response = client.get("/learning/report/latest/digest/dashboard")
+    assert digest_dashboard_response.status_code == 404
 
 
 def test_learning_diagnostics_route_returns_summary(tmp_path, monkeypatch):
@@ -229,3 +251,12 @@ def test_learning_report_dashboard_by_date_returns_tuning_snapshot(tmp_path, mon
     assert "Daily Learning Report" in response.text
     assert "Top Blockers" in response.text
     assert "Threshold Calls" in response.text
+
+    digest_response = client.get(f"/learning/report/{report['report_date']}/digest")
+    assert digest_response.status_code == 200
+    digest_payload = digest_response.json()
+    assert "highlights" in digest_payload
+
+    digest_dashboard_response = client.get(f"/learning/report/{report['report_date']}/digest/dashboard")
+    assert digest_dashboard_response.status_code == 200
+    assert "Learning Digest" in digest_dashboard_response.text

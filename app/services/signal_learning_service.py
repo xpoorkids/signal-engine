@@ -2284,6 +2284,207 @@ def render_learning_report_html(report_date: str | None = None) -> str:
 </html>"""
 
 
+def get_learning_digest(report_date: str | None = None) -> dict[str, Any] | None:
+    report = get_learning_report(report_date) if report_date else get_latest_learning_report()
+    if report is None:
+        return None
+
+    tuning_snapshot = report.get("tuning_snapshot") if isinstance(report.get("tuning_snapshot"), dict) else {}
+    top_blockers = tuning_snapshot.get("top_blockers") if isinstance(tuning_snapshot.get("top_blockers"), list) else []
+    top_relax_calls = tuning_snapshot.get("top_relax_calls") if isinstance(tuning_snapshot.get("top_relax_calls"), list) else []
+    top_tighten_calls = tuning_snapshot.get("top_tighten_calls") if isinstance(tuning_snapshot.get("top_tighten_calls"), list) else []
+    top_review_calls = tuning_snapshot.get("top_review_calls") if isinstance(tuning_snapshot.get("top_review_calls"), list) else []
+    best_session_signal = tuning_snapshot.get("best_session_signal") if isinstance(tuning_snapshot.get("best_session_signal"), list) else []
+    worst_session_signal = tuning_snapshot.get("worst_session_signal") if isinstance(tuning_snapshot.get("worst_session_signal"), list) else []
+    outcomes_by_label = report.get("outcomes_by_label") if isinstance(report.get("outcomes_by_label"), dict) else {}
+
+    highlights: list[dict[str, Any]] = []
+    if top_relax_calls:
+        item = top_relax_calls[0]
+        highlights.append(
+            {
+                "kind": "relax",
+                "title": f"Relax {item.get('reason')}",
+                "detail": f"Positive rate {item.get('positive_rate')}% across {int(item.get('sample_size') or 0)} samples.",
+            }
+        )
+    if top_tighten_calls:
+        item = top_tighten_calls[0]
+        highlights.append(
+            {
+                "kind": "tighten",
+                "title": f"Tighten {item.get('reason')}",
+                "detail": f"Fail rate {item.get('fail_rate')}% across {int(item.get('sample_size') or 0)} samples.",
+            }
+        )
+    if best_session_signal:
+        item = best_session_signal[0]
+        highlights.append(
+            {
+                "kind": "best_regime",
+                "title": f"Best regime: {item.get('signal_type')} / {item.get('session_bucket')}",
+                "detail": f"Win rate {item.get('win_rate')}% across {int(item.get('total') or 0)} samples.",
+            }
+        )
+    if worst_session_signal:
+        item = worst_session_signal[0]
+        highlights.append(
+            {
+                "kind": "worst_regime",
+                "title": f"Weak regime: {item.get('signal_type')} / {item.get('session_bucket')}",
+                "detail": f"Win rate {item.get('win_rate')}% across {int(item.get('total') or 0)} samples.",
+            }
+        )
+    if top_blockers:
+        item = top_blockers[0]
+        highlights.append(
+            {
+                "kind": "top_blocker",
+                "title": f"Top blocker: {item.get('reason')}",
+                "detail": f"Triggered {int(item.get('count') or 0)} times in the report window.",
+            }
+        )
+
+    return {
+        "report_date": report.get("report_date"),
+        "generated_ts": report.get("generated_ts"),
+        "outcomes_by_label": outcomes_by_label,
+        "highlights": highlights[:5],
+        "top_relax_calls": top_relax_calls[:3],
+        "top_tighten_calls": top_tighten_calls[:3],
+        "top_review_calls": top_review_calls[:3],
+        "best_session_signal": best_session_signal[:3],
+        "worst_session_signal": worst_session_signal[:3],
+        "top_blockers": top_blockers[:5],
+    }
+
+
+def render_learning_digest_html(report_date: str | None = None) -> str:
+    digest = get_learning_digest(report_date)
+    if digest is None:
+        raise KeyError("learning_report_not_found")
+
+    highlights = digest.get("highlights") if isinstance(digest.get("highlights"), list) else []
+    top_relax_calls = digest.get("top_relax_calls") if isinstance(digest.get("top_relax_calls"), list) else []
+    top_tighten_calls = digest.get("top_tighten_calls") if isinstance(digest.get("top_tighten_calls"), list) else []
+    best_session_signal = digest.get("best_session_signal") if isinstance(digest.get("best_session_signal"), list) else []
+    worst_session_signal = digest.get("worst_session_signal") if isinstance(digest.get("worst_session_signal"), list) else []
+
+    highlight_cards = "".join(
+        '<div class="card">'
+        f"<h3>{html.escape(str(item.get('title') or 'Update'))}</h3>"
+        f"<p>{html.escape(str(item.get('detail') or ''))}</p>"
+        "</div>"
+        for item in highlights
+    ) or '<div class="card"><h3>No highlights</h3><p>No digest highlights are available for this report.</p></div>'
+
+    def _rows(items: list[dict[str, Any]], kind: str) -> str:
+        if kind == "threshold":
+            return "".join(
+                "<tr>"
+                f"<td>{html.escape(str(item.get('reason') or 'unknown'))}</td>"
+                f"<td>{html.escape(str(item.get('action') or 'hold'))}</td>"
+                f"<td>{int(item.get('sample_size') or 0)}</td>"
+                "</tr>"
+                for item in items
+            ) or "<tr><td colspan='3'>None</td></tr>"
+        return "".join(
+            "<tr>"
+            f"<td>{html.escape(str(item.get('session_bucket') or 'unknown'))}</td>"
+            f"<td>{html.escape(str(item.get('signal_type') or 'unknown'))}</td>"
+            f"<td>{html.escape(str(item.get('win_rate') or 0))}%</td>"
+            "</tr>"
+            for item in items
+        ) or "<tr><td colspan='3'>None</td></tr>"
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Learning Digest {html.escape(str(digest.get('report_date') or 'latest'))}</title>
+  <style>
+    :root {{
+      --bg: #081119;
+      --panel: rgba(11, 24, 38, 0.9);
+      --panel-2: rgba(18, 34, 52, 0.96);
+      --line: rgba(116, 153, 186, 0.16);
+      --text: #edf5fb;
+      --muted: #8ca4b8;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      color: var(--text);
+      font-family: "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #071018 0%, #09131c 100%);
+    }}
+    .shell {{ max-width: 1200px; margin: 0 auto; padding: 24px 18px 36px; }}
+    .panel, .card {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 18px;
+    }}
+    .cards, .grid {{ display:grid; gap:16px; }}
+    .cards {{ grid-template-columns: repeat(2, minmax(0,1fr)); margin-top: 18px; }}
+    .grid {{ grid-template-columns: 1fr 1fr; margin-top: 18px; }}
+    h1 {{ margin: 0 0 8px; font-size: 32px; }}
+    h2 {{ margin: 0 0 14px; font-size: 14px; letter-spacing: .12em; color: var(--muted); text-transform: uppercase; }}
+    h3 {{ margin: 0 0 8px; font-size: 18px; }}
+    p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
+    table {{ width:100%; border-collapse: collapse; }}
+    th, td {{ text-align:left; padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 14px; }}
+    th {{ color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .10em; }}
+    @media (max-width: 1020px) {{
+      .cards, .grid {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="panel">
+      <h1>Learning Digest</h1>
+      <p>Fast daily operator view for {html.escape(str(digest.get("report_date") or "latest"))}. This is the shortest path to the most actionable tuning signals.</p>
+    </section>
+    <section class="cards">{highlight_cards}</section>
+    <div class="grid">
+      <section class="panel">
+        <h2>Threshold Actions</h2>
+        <table>
+          <thead><tr><th>Reason</th><th>Action</th><th>Sample</th></tr></thead>
+          <tbody>{_rows(top_relax_calls + top_tighten_calls, "threshold")}</tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Review Queue</h2>
+        <table>
+          <thead><tr><th>Reason</th><th>Action</th><th>Sample</th></tr></thead>
+          <tbody>{_rows(digest.get("top_review_calls") or [], "threshold")}</tbody>
+        </table>
+      </section>
+    </div>
+    <div class="grid">
+      <section class="panel">
+        <h2>Best Regimes</h2>
+        <table>
+          <thead><tr><th>Session</th><th>Signal</th><th>Win Rate</th></tr></thead>
+          <tbody>{_rows(best_session_signal, "regime")}</tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Weak Regimes</h2>
+        <table>
+          <thead><tr><th>Session</th><th>Signal</th><th>Win Rate</th></tr></thead>
+          <tbody>{_rows(worst_session_signal, "regime")}</tbody>
+        </table>
+      </section>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
 async def daily_report_worker() -> None:
     init()
     while True:
