@@ -600,6 +600,7 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
     false_positives: list[dict[str, Any]] = []
     session_outcomes: dict[str, dict[str, Any]] = {}
     conversion_by_token: dict[str, set[str]] = {}
+    reason_scorecards: dict[str, dict[str, Any]] = {}
 
     for row in outcome_rows:
         (
@@ -708,20 +709,6 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
     false_negatives: list[dict[str, Any]] = []
     for row in decision_rows:
         signal_id, decision, reasons_json, session_bucket, local_daypart, attention_score, risk_score, confidence_score, created_ts, token, stage = row
-        if decision.endswith("sent"):
-            continue
-        matched_outcome = outcome_by_signal_id.get(signal_id or "")
-        if matched_outcome and matched_outcome["outcome_label"] not in {"worked", "strong_continuation"}:
-            matched_outcome = None
-        if matched_outcome is None:
-            token_outcomes = outcome_by_token.get(token or "")
-            if token_outcomes:
-                for outcome_entry in token_outcomes:
-                    if outcome_entry["outcome_label"] in {"worked", "strong_continuation"}:
-                        matched_outcome = outcome_entry
-                        break
-        if not matched_outcome:
-            continue
         reasons: list[str] = []
         try:
             parsed = json.loads(reasons_json or "[]")
@@ -729,6 +716,45 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
                 reasons = [str(item) for item in parsed]
         except Exception:
             reasons = []
+        matched_outcome = outcome_by_signal_id.get(signal_id or "")
+        if matched_outcome is None:
+            token_outcomes = outcome_by_token.get(token or "")
+            if token_outcomes:
+                for outcome_entry in token_outcomes:
+                    if outcome_entry["outcome_label"] != "pending":
+                        matched_outcome = outcome_entry
+                        break
+        if matched_outcome:
+            outcome_label = str(matched_outcome.get("outcome_label") or "pending")
+            for reason in reasons:
+                card = reason_scorecards.setdefault(
+                    reason,
+                    {
+                        "reason": reason,
+                        "total": 0,
+                        "positive": 0,
+                        "negative": 0,
+                        "worked": 0,
+                        "strong_continuation": 0,
+                        "failed": 0,
+                        "faded": 0,
+                        "mixed": 0,
+                        "pending": 0,
+                    },
+                )
+                card["total"] += 1
+                if outcome_label in {"worked", "strong_continuation"}:
+                    card["positive"] += 1
+                if outcome_label in {"failed", "faded"}:
+                    card["negative"] += 1
+                if outcome_label in card:
+                    card[outcome_label] += 1
+                else:
+                    card["mixed"] += 1
+        if decision.endswith("sent"):
+            continue
+        if not matched_outcome or matched_outcome["outcome_label"] not in {"worked", "strong_continuation"}:
+            continue
         false_negatives.append(
             {
                 "token": token,
@@ -775,6 +801,20 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
         )
     session_quality.sort(key=lambda item: (-item["win_rate"], -item["total"], item["session_bucket"]))
 
+    reason_quality: list[dict[str, Any]] = []
+    for reason, card in reason_scorecards.items():
+        total = int(card.get("total") or 0)
+        positive = int(card.get("positive") or 0)
+        negative = int(card.get("negative") or 0)
+        reason_quality.append(
+            {
+                **card,
+                "positive_rate": round((positive / total) * 100.0, 1) if total else 0.0,
+                "fail_rate": round((negative / total) * 100.0, 1) if total else 0.0,
+            }
+        )
+    reason_quality.sort(key=lambda item: (-item["total"], item["reason"]))
+
     return {
         "lookback_hours": hours,
         "counts_by_decision": counts_by_decision,
@@ -787,6 +827,7 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
         "false_positives": false_positives[:15],
         "session_quality": session_quality,
         "conversion": conversion,
+        "reason_quality": reason_quality[:25],
     }
 
 
@@ -800,6 +841,7 @@ def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
     false_positives = summary.get("false_positives") or []
     session_quality = summary.get("session_quality") or []
     conversion = summary.get("conversion") or {}
+    reason_quality = summary.get("reason_quality") or []
 
     if counts_by_decision.get("candidate_gate_skip", 0) > 0:
         recs.append(
@@ -853,6 +895,29 @@ def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
                 "detail": f"{len(false_positives)} recent sent alerts later faded or failed. Audit these before relaxing risk or breadth gates.",
             }
         )
+    if reason_quality:
+        costly_reason = max(reason_quality, key=lambda item: (item["positive"], -item["negative"], item["total"]))
+        protective_reason = max(reason_quality, key=lambda item: (item["negative"], -item["positive"], item["total"]))
+        if int(costly_reason.get("positive") or 0) > 0:
+            recs.append(
+                {
+                    "title": "Most Costly Blocker",
+                    "detail": (
+                        f"`{costly_reason['reason']}` is blocking winners: "
+                        f"{costly_reason['positive']}/{costly_reason['total']} later produced positive outcomes."
+                    ),
+                }
+            )
+        if int(protective_reason.get("negative") or 0) > 0:
+            recs.append(
+                {
+                    "title": "Most Protective Blocker",
+                    "detail": (
+                        f"`{protective_reason['reason']}` is filtering weak setups: "
+                        f"{protective_reason['negative']}/{protective_reason['total']} later failed or faded."
+                    ),
+                }
+            )
 
     best_session = None
     best_sent = -1
@@ -915,6 +980,7 @@ def render_diagnostics_html(hours: int = 24) -> str:
     false_positives = summary.get("false_positives") or []
     session_quality = summary.get("session_quality") or []
     conversion = summary.get("conversion") or {}
+    reason_quality = summary.get("reason_quality") or []
 
     def metric_card(label: str, value: Any) -> str:
         return (
@@ -981,6 +1047,16 @@ def render_diagnostics_html(hours: int = 24) -> str:
         "</tr>"
         for item in session_quality
     ) or "<tr><td colspan='4'>No outcome quality data yet</td></tr>"
+
+    reason_quality_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('reason') or 'unknown'))}</td>"
+        f"<td>{int(item.get('total') or 0)}</td>"
+        f"<td>{html.escape(str(item.get('positive_rate') or 0))}%</td>"
+        f"<td>{html.escape(str(item.get('fail_rate') or 0))}%</td>"
+        "</tr>"
+        for item in reason_quality[:12]
+    ) or "<tr><td colspan='4'>No blocker outcome data yet</td></tr>"
 
     recent_rows = "".join(
         "<tr>"
@@ -1162,6 +1238,17 @@ def render_diagnostics_html(hours: int = 24) -> str:
             <tr><th>Token</th><th>Decision</th><th>Outcome</th><th>Reasons</th></tr>
           </thead>
           <tbody>{false_negative_rows}</tbody>
+        </table>
+      </section>
+    </div>
+    <div class="wide-grid">
+      <section class="panel">
+        <h2>Blocker Outcome Scorecards</h2>
+        <table>
+          <thead>
+            <tr><th>Reason</th><th>Total</th><th>Positive Rate</th><th>Fail Rate</th></tr>
+          </thead>
+          <tbody>{reason_quality_rows}</tbody>
         </table>
       </section>
     </div>

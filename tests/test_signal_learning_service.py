@@ -428,3 +428,108 @@ def test_record_signal_decision_creates_reusable_signal_shell(tmp_path, monkeypa
     assert updated_row[3] == 0.55
     assert updated_row[4] == 0.19
     assert updated_row[5] == 18000
+
+
+def test_diagnostics_summary_builds_reason_quality_scorecards(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    worked_signal_id = sls.record_signal_decision(
+        token="token-worked",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_gate_skip",
+        reasons=["buyers_low", "attention<0.20"],
+        attention_score=0.18,
+        risk_score=0.20,
+        confidence_score=0.31,
+        lifecycle="dex",
+        ts_value=1_773_610_000,
+        source="test",
+    )
+    failed_signal_id = sls.record_signal_decision(
+        token="token-failed",
+        event_type="candidate",
+        stage="promoted",
+        decision="promotion_block",
+        reasons=["buyers_low", "dex_gate:liq<12000.0"],
+        attention_score=0.44,
+        risk_score=0.28,
+        confidence_score=0.49,
+        lifecycle="dex",
+        ts_value=1_773_610_050,
+        source="test",
+    )
+
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                worked_signal_id,
+                60,
+                1_773_613_600,
+                "dex",
+                18000,
+                4100,
+                2600,
+                64.0,
+                25.0,
+                60.0,
+                44,
+                20,
+                80.0,
+                2.5,
+                30.0,
+                "worked",
+                json.dumps({"outcome_label": "worked"}),
+            ),
+        )
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                failed_signal_id,
+                60,
+                1_773_613_700,
+                "dex",
+                7000,
+                2900,
+                900,
+                65,
+                -25,
+                -45,
+                30,
+                85,
+                -41.7,
+                -42.0,
+                -70.0,
+                "failed",
+                json.dumps({"outcome_label": "failed"}),
+            ),
+        )
+
+    summary = sls.get_diagnostics_summary(hours=10_000)
+    recommendations = sls.get_diagnostics_recommendations(hours=10_000)
+
+    scorecards = {item["reason"]: item for item in summary["reason_quality"]}
+    assert scorecards["buyers_low"]["total"] == 2
+    assert scorecards["buyers_low"]["positive"] == 1
+    assert scorecards["buyers_low"]["negative"] == 1
+    assert scorecards["buyers_low"]["positive_rate"] == 50.0
+    assert scorecards["dex_gate:liq<12000.0"]["negative"] == 1
+    assert any(item["title"] == "Most Costly Blocker" for item in recommendations)
+    assert any(item["title"] == "Most Protective Blocker" for item in recommendations)
