@@ -3,12 +3,14 @@ import sqlite3
 import time
 from pathlib import Path
 
+from app.services.db_service import connect_sqlite
+
 DB_PATH = Path("state/engine.db")
 DB_PATH.parent.mkdir(exist_ok=True)
 
 
 def _connect():
-    return sqlite3.connect(DB_PATH)
+    return connect_sqlite(DB_PATH)
 
 
 def init():

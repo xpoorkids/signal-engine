@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from app.services.db_service import connect_sqlite
 from worker.dex import dex_enrich_token, select_best_pair, summarize_pair
 
 try:
@@ -30,7 +31,7 @@ REPORT_POLL_SECONDS = 600
 
 
 def _connect() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
+    return connect_sqlite(DB_PATH)
 
 
 def init() -> None:
