@@ -116,9 +116,35 @@ def init() -> None:
             )
             """
         )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS signal_decisions (
+                decision_id TEXT PRIMARY KEY,
+                token TEXT,
+                event_type TEXT,
+                stage TEXT,
+                decision TEXT NOT NULL,
+                reasons_json TEXT,
+                attention_score REAL,
+                risk_score REAL,
+                confidence_score REAL,
+                creator_score REAL,
+                lifecycle TEXT,
+                hour_utc INTEGER,
+                day_of_week_utc INTEGER,
+                is_weekend_utc INTEGER,
+                hour_local INTEGER,
+                day_of_week_local INTEGER,
+                local_daypart TEXT,
+                session_bucket TEXT,
+                created_ts INTEGER NOT NULL
+            )
+            """
+        )
         c.execute("CREATE INDEX IF NOT EXISTS idx_signals_alert_ts ON signals(alert_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_signal_jobs_due ON signal_snapshot_jobs(status, due_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_signal ON signal_snapshots(signal_id, horizon_minutes)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_ts ON signal_decisions(created_ts, decision)")
 
 
 def _to_float(value: Any) -> float | None:
@@ -325,6 +351,133 @@ def record_signal_event(event, *, external_ref: str | None = None, edited: bool 
         external_ref or "",
     )
     return signal_id
+
+
+def record_signal_decision(
+    *,
+    token: str | None,
+    event_type: str,
+    stage: str,
+    decision: str,
+    reasons: list[str] | None = None,
+    attention_score: float | None = None,
+    risk_score: float | None = None,
+    confidence_score: float | None = None,
+    creator_score: float | None = None,
+    lifecycle: str | None = None,
+    ts_value: float | None = None,
+) -> str:
+    created_ts = int(ts_value or time.time())
+    time_features = _classify_time_features(created_ts)
+    decision_id = uuid.uuid4().hex
+    with _connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_decisions (
+                decision_id, token, event_type, stage, decision, reasons_json,
+                attention_score, risk_score, confidence_score, creator_score, lifecycle,
+                hour_utc, day_of_week_utc, is_weekend_utc, hour_local, day_of_week_local,
+                local_daypart, session_bucket, created_ts
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                decision_id,
+                token,
+                event_type,
+                stage,
+                decision,
+                json.dumps(reasons or []),
+                attention_score,
+                risk_score,
+                confidence_score,
+                creator_score,
+                lifecycle,
+                time_features["hour_utc"],
+                time_features["day_of_week_utc"],
+                time_features["is_weekend_utc"],
+                time_features["hour_local"],
+                time_features["day_of_week_local"],
+                time_features["local_daypart"],
+                time_features["session_bucket"],
+                created_ts,
+            ),
+        )
+    return decision_id
+
+
+def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
+    cutoff = int(time.time()) - max(1, hours) * 3600
+    with _connect() as c:
+        decision_rows = c.execute(
+            """
+            SELECT decision, reasons_json, session_bucket, local_daypart,
+                   attention_score, risk_score, confidence_score, created_ts, token, stage
+            FROM signal_decisions
+            WHERE created_ts >= ?
+            ORDER BY created_ts DESC
+            """,
+            (cutoff,),
+        ).fetchall()
+
+    counts_by_decision: dict[str, int] = {}
+    skip_reason_counts: dict[str, int] = {}
+    stage_counts: dict[str, int] = {}
+    sessions: dict[str, dict[str, int]] = {}
+    recent_examples: list[dict[str, Any]] = []
+
+    for row in decision_rows:
+        decision, reasons_json, session_bucket, local_daypart, attention_score, risk_score, confidence_score, created_ts, token, stage = row
+        counts_by_decision[decision] = counts_by_decision.get(decision, 0) + 1
+        stage_key = stage or "unknown"
+        stage_counts[stage_key] = stage_counts.get(stage_key, 0) + 1
+        session_stats = sessions.setdefault(session_bucket or "unknown", {"sent": 0, "skipped": 0, "blocked": 0})
+        if decision.endswith("sent"):
+            session_stats["sent"] += 1
+        elif "skip" in decision:
+            session_stats["skipped"] += 1
+        elif "block" in decision:
+            session_stats["blocked"] += 1
+
+        reasons: list[str] = []
+        try:
+            parsed = json.loads(reasons_json or "[]")
+            if isinstance(parsed, list):
+                reasons = [str(item) for item in parsed]
+        except Exception:
+            reasons = []
+        if decision != "candidate_sent":
+            for reason in reasons:
+                skip_reason_counts[reason] = skip_reason_counts.get(reason, 0) + 1
+        if len(recent_examples) < 20:
+            recent_examples.append(
+                {
+                    "token": token,
+                    "stage": stage,
+                    "decision": decision,
+                    "reasons": reasons,
+                    "attention_score": attention_score,
+                    "risk_score": risk_score,
+                    "confidence_score": confidence_score,
+                    "session_bucket": session_bucket,
+                    "local_daypart": local_daypart,
+                    "created_ts": created_ts,
+                }
+            )
+
+    top_skip_reasons = [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(skip_reason_counts.items(), key=lambda item: (-item[1], item[0]))[:15]
+    ]
+
+    return {
+        "lookback_hours": hours,
+        "counts_by_decision": counts_by_decision,
+        "counts_by_stage": stage_counts,
+        "top_skip_reasons": top_skip_reasons,
+        "sessions": sessions,
+        "recent_examples": recent_examples,
+    }
 
 
 def _fetch_due_jobs(limit: int = 10) -> list[dict[str, Any]]:

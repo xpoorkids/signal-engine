@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 
 from app.services.signal_learning_service import (
+    get_diagnostics_summary,
     get_latest_learning_report,
     get_learning_report,
 )
@@ -23,3 +24,8 @@ def learning_report_by_date(report_date: str):
     if report is None:
         raise HTTPException(status_code=404, detail="learning_report_not_found")
     return report
+
+
+@router.get("/learning/diagnostics/summary")
+def learning_diagnostics_summary(hours: int = 24):
+    return get_diagnostics_summary(hours=max(1, hours))

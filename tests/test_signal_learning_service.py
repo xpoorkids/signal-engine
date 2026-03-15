@@ -170,3 +170,44 @@ def test_generate_daily_learning_report_summarizes_outcomes(tmp_path, monkeypatc
             (report_date,),
         ).fetchone()
     assert stored is not None
+
+
+def test_diagnostics_summary_aggregates_decisions(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    sls.record_signal_decision(
+        token="token-a",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_gate_skip",
+        reasons=["attention<0.20", "dex_gate:liq<12000.0"],
+        attention_score=0.06,
+        risk_score=0.50,
+        confidence_score=0.27,
+        creator_score=0.0,
+        lifecycle="dex",
+        ts_value=1_773_500_000,
+    )
+    sls.record_signal_decision(
+        token="token-b",
+        event_type="candidate",
+        stage="promoted",
+        decision="promotion_block",
+        reasons=["buyers_low"],
+        attention_score=0.72,
+        risk_score=0.22,
+        confidence_score=0.81,
+        creator_score=0.4,
+        lifecycle="dex",
+        ts_value=1_773_500_100,
+    )
+
+    summary = sls.get_diagnostics_summary(hours=10_000)
+
+    assert summary["counts_by_decision"]["candidate_gate_skip"] == 1
+    assert summary["counts_by_decision"]["promotion_block"] == 1
+    reasons = {item["reason"]: item["count"] for item in summary["top_skip_reasons"]}
+    assert reasons["attention<0.20"] == 1
+    assert reasons["buyers_low"] == 1

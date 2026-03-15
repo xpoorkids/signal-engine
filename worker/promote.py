@@ -58,6 +58,7 @@ from worker.creator_score import compute_creator_score
 from worker.progression import metrics_improved
 from worker.recheck import schedule_rechecks, update_stop_counters, min_liquidity_gate
 from app.services.signal_metrics import compute_confidence_score, metric_state
+from app.services.signal_learning_service import record_signal_decision
 from app.services.state_service import (
     init as state_init,
     upsert_seen,
@@ -82,6 +83,36 @@ def _candidate_send_eligible(attention_score: float | None, creator_score: float
     attn = float(attention_score or 0.0)
     # Creator quality can help borderline setups, but should not push weak attention through on its own.
     return attn >= 0.50 or (creator_score >= EARLY_CREATOR_MIN and attn >= 0.35)
+
+
+def _record_decision(
+    e: Event,
+    *,
+    stage: str,
+    decision: str,
+    reasons: list[str] | None = None,
+    attention_score: float | None = None,
+    risk_score: float | None = None,
+    confidence_score: float | None = None,
+    creator_score: float | None = None,
+    lifecycle: str | None = None,
+) -> None:
+    try:
+        record_signal_decision(
+            token=e.token,
+            event_type=e.type,
+            stage=stage,
+            decision=decision,
+            reasons=reasons,
+            attention_score=attention_score,
+            risk_score=risk_score,
+            confidence_score=confidence_score,
+            creator_score=creator_score,
+            lifecycle=lifecycle,
+            ts_value=e.ts,
+        )
+    except Exception:
+        logger.exception("[diagnostics] record_signal_decision_failed token=%s decision=%s", e.token, decision)
 
 async def process_event(state: EngineState, e: Event) -> list[Event]:
     out: list[Event] = []
@@ -588,6 +619,17 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     attention_score,
                     risk_score,
                 )
+                _record_decision(
+                    e,
+                    stage="candidate",
+                    decision="candidate_gate_skip",
+                    reasons=gate_reasons,
+                    attention_score=attention_score,
+                    risk_score=risk_score,
+                    confidence_score=e.confidence,
+                    creator_score=float(creator_score_info.get("score") or 0.0),
+                    lifecycle=lifecycle,
+                )
             else:
                 if attention_unavailable:
                     logger.info("[candidate-warning] attention_unavailable token=%s", e.token)
@@ -615,6 +657,17 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                             sniper_conditions_met,
                         )
                         logger.info("[candidate-skip] reason=rate_limited token=%s", e.token)
+                        _record_decision(
+                            e,
+                            stage="candidate",
+                            decision="candidate_rate_limited",
+                            reasons=["rate_limited"],
+                            attention_score=attention_score,
+                            risk_score=risk_score,
+                            confidence_score=e.confidence,
+                            creator_score=creator_score_value,
+                            lifecycle=lifecycle,
+                        )
                 elif not send_eligible:
                     logger.info(
                         "[pre-candidate-skip] token=%s sniper_conditions_met=%s",
@@ -622,6 +675,17 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                         sniper_conditions_met,
                     )
                     logger.info("[candidate-skip] reason=no_creator_or_improve token=%s", e.token)
+                    _record_decision(
+                        e,
+                        stage="candidate",
+                        decision="candidate_not_eligible",
+                        reasons=["no_creator_or_attention"],
+                        attention_score=attention_score,
+                        risk_score=risk_score,
+                        confidence_score=e.confidence,
+                        creator_score=creator_score_value,
+                        lifecycle=lifecycle,
+                    )
 
                 extra["lifecycle"] = lifecycle
                 candidate_state = get_candidate_state(e.token)
@@ -634,6 +698,17 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 extra["candidate_improved"] = improved
                 extra["candidate_improved_keys"] = improved_keys
                 extra["candidate_message_id"] = message_id
+                _record_decision(
+                    e,
+                    stage="candidate",
+                    decision="candidate_ready" if should_send else "candidate_buffered",
+                    reasons=improved_keys if improved_keys else [],
+                    attention_score=attention_score,
+                    risk_score=risk_score,
+                    confidence_score=e.confidence,
+                    creator_score=creator_score_value,
+                    lifecycle=lifecycle,
+                )
                 logger.info(
                     "[candidate-progress] token=%s improved=%s keys=%s",
                     e.token,
@@ -813,6 +888,17 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     e.token,
                     gate_reasons,
                 )
+                _record_decision(
+                    e,
+                    stage="heating_up",
+                    decision="heating_gate_skip",
+                    reasons=gate_reasons,
+                    attention_score=attention_score,
+                    risk_score=risk_score,
+                    confidence_score=e.confidence,
+                    creator_score=creator_score,
+                    lifecycle=str(extra.get("lifecycle") or ""),
+                )
             else:
                 pass
 
@@ -821,6 +907,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             has_dex_pool = bool(dex_summary)
             if not has_dex_pool:
                 logger.info("[promotion-block] reason=no_dex_pool token=%s", e.token)
+                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["no_dex_pool"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="unknown")
                 return out
             liq = float((dex_summary or {}).get("liquidity_usd") or 0.0)
             buyers_15m = int(attn_metrics.get("unique_buyers_15m") or 0)
@@ -828,21 +915,27 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             creator_sell = bool(extra.get("creator_sold"))
             if liq < PROM_MIN_LIQ_USD:
                 logger.info("[promotion-block] reason=liq_low token=%s liq=%.0f", e.token, liq)
+                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["liq_low"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
                 return out
             if buyers_15m < 30:
                 logger.info("[promotion-block] reason=buyers_low token=%s buyers_15m=%s", e.token, buyers_15m)
+                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["buyers_low"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
                 return out
             if attention_score is None or attention_score < PROMOTION_MIN_ATTENTION:
                 logger.info("[promotion-block] reason=attention_low token=%s attention=%s", e.token, attention_score)
+                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["attention_low"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
                 return out
             if risk_score is not None and risk_score >= PROMOTION_MAX_RISK:
                 logger.info("[promotion-block] reason=risk_high token=%s risk=%.2f", e.token, risk_score)
+                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["risk_high"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
                 return out
             if lp_drain:
                 logger.info("[promotion-block] reason=lp_drain token=%s", e.token)
+                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["lp_drain"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
                 return out
             if creator_sell:
                 logger.info("[promotion-block] reason=creator_sell token=%s", e.token)
+                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["creator_sell"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
                 return out
 
             confirm_count = update_promo_confirm(e.token, True)
@@ -852,6 +945,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 confirm_count,
             )
             if confirm_count < 2:
+                _record_decision(e, stage="promoted", decision="promotion_wait_confirm", reasons=[f"confirm_count:{confirm_count}"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
                 return out
             gate_pass, gate_reasons = evaluate_alert_gate(
                 "promoted",
@@ -863,6 +957,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     e.token,
                     gate_reasons,
                 )
+                _record_decision(e, stage="promoted", decision="promotion_gate_skip", reasons=gate_reasons, attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
                 return out
             logger.info(
                 "[promotion-validated] token=%s score=%.3f threshold=%.3f",
@@ -885,5 +980,6 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     signature=e.signature,
                 )
             )
+            _record_decision(e, stage="promoted", decision="promoted_sent", reasons=["promotion_gate_passed"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
 
     return out
