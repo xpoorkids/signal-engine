@@ -169,7 +169,7 @@ def test_format_discord_regression_sample_payload_keeps_real_risk():
     assert "0.47" in identity_field
     assert "Risk Score: `0.47" in quality_field
     assert "Flow Bias:" in flow_field
-    assert "CA: `So11111111111111111111111111111111111111112`" in identity_field
+    assert "**Contract:** `So11111111111111111111111111111111111111112`" in identity_field
 
 
 def test_format_discord_fetches_metadata_when_identity_missing(monkeypatch):
@@ -197,7 +197,7 @@ def test_format_discord_fetches_metadata_when_identity_missing(monkeypatch):
     embed = format_discord(event)["embeds"][0]
     identity_field = _candidate_field(embed, "Token Identity")
 
-    assert "**Real Token**  `$REAL`" in identity_field
+    assert "**Token:** Real Token (`$REAL`)" in identity_field
 
 
 def test_format_discord_overview_uses_new_hierarchy():
@@ -235,10 +235,11 @@ def test_format_discord_overview_uses_new_hierarchy():
     embed = format_discord(event)["embeds"][0]
 
     assert embed["fields"][0]["name"] == "Command View"
-    assert _candidate_field(embed, "Token Identity").count("Lifecycle") == 1
+    assert "**Token:** Pumpers (`$PUMPERS`)" in _candidate_field(embed, "Token Identity")
     assert "5m Buy Flow:" in _candidate_field(embed, "Flow + Structure")
     assert "5m Volume:" in _candidate_field(embed, "Market Snapshot")
-    assert "Watch for" in embed["description"] or "Constructive setup" in embed["description"]
+    assert "\n" not in embed["description"].strip()
+    assert "Watch-only" in embed["description"] or "Constructive setup" in embed["description"]
 
 
 def test_embed_field_count_stays_within_limits():

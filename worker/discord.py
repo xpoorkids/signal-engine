@@ -722,12 +722,10 @@ def _build_overview_lines(
     symbol: str,
     name: str,
     full_addr: str,
-    lines: list[str],
 ) -> list[str]:
     return [
-        f"**{name}**  `${symbol}`",
-        f"CA: `{full_addr}`",
-        *lines,
+        f"**Token:** {name} (`${symbol}`)",
+        f"**Contract:** `{full_addr}`",
     ]
 
 
@@ -790,7 +788,6 @@ def _format_candidate_like(e: Event, description: str) -> dict:
                         symbol,
                         name,
                         full_addr,
-                        _token_risk_lines(e.extra if isinstance(e.extra, dict) else {}, vm.lifecycle, vm.risk_score, vm.attention_score),
                     )
                 ),
                 "inline": False,
@@ -818,7 +815,7 @@ def _format_candidate_like(e: Event, description: str) -> dict:
 
     embed = {
         "title": _signal_title(signal_type, vm.symbol),
-        "description": f"{description}\n{_summary_blurb(vm.attention_score, vm.risk_score, vm.lifecycle)}\n",
+        "description": f"{_summary_blurb(vm.attention_score, vm.risk_score, vm.lifecycle)}\n",
         "color": get_signal_color(signal_type, vm.risk_score),
         "fields": fields,
         "footer": {"text": truncate_text(f"Signal Engine  Radar Deck  {e.type}", 2048)},
@@ -873,7 +870,6 @@ def format_discord(e: Event) -> dict:
                             symbol,
                             name,
                             full_addr,
-                            _token_risk_lines(e.extra if isinstance(e.extra, dict) else {}, vm.lifecycle, vm.risk_score, vm.attention_score),
                         )
                     ),
                     "inline": False,
@@ -902,7 +898,7 @@ def format_discord(e: Event) -> dict:
 
         embed = {
             "title": _signal_title(signal_type, vm.symbol),
-            "description": f"Validated by layered gates.\n{_summary_blurb(vm.attention_score, vm.risk_score, vm.lifecycle)}\n",
+            "description": f"{_summary_blurb(vm.attention_score, vm.risk_score, vm.lifecycle)}\n",
             "color": get_signal_color(signal_type, vm.risk_score),
             "fields": fields,
             "footer": {"text": truncate_text(f"Signal Engine  Alpha Deck  {e.type}", 2048)},

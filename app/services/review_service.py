@@ -594,9 +594,8 @@ def render_review_html(review: dict[str, Any]) -> str:
         "Token Identity",
         (
             '<div class="stack">'
-            f'<div><strong>{html.escape(vm.name)}</strong> <span class="mono">${html.escape(vm.symbol)}</span></div>'
-            f'<div class="mono">CA: {html.escape(vm.token)}</div>'
-            f"<div>Lifecycle: <strong>{lifecycle_label}</strong></div>"
+            f'<div><strong>Token:</strong> {html.escape(vm.name)} <span class="mono">${html.escape(vm.symbol)}</span></div>'
+            f'<div class="mono"><strong>Contract:</strong> {html.escape(vm.token)}</div>'
             "</div>"
         ),
     )
