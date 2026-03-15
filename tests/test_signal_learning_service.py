@@ -649,3 +649,99 @@ def test_threshold_guidance_recommends_relax_or_tighten(tmp_path, monkeypatch):
     assert guidance["dex_gate:liq<12000.0"]["action"] == "tighten"
     assert guidance["dex_gate:liq<12000.0"]["confidence"] == "medium"
     assert any(item["title"] == "Threshold: attention<0.20" for item in recommendations)
+
+
+def test_session_signal_quality_highlights_best_and_worst_combos(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    with sls._connect() as c:
+        signal_rows = [
+            ("sig-a1", "token-a1", "candidate", "asia", "worked"),
+            ("sig-a2", "token-a2", "candidate", "asia", "strong_continuation"),
+            ("sig-u1", "token-u1", "promoted", "us_day", "failed"),
+            ("sig-u2", "token-u2", "promoted", "us_day", "faded"),
+        ]
+        for idx, (signal_id, token, event_type, session_bucket, outcome_label) in enumerate(signal_rows):
+            c.execute(
+                """
+                INSERT INTO signals (
+                    signal_id, external_ref, token, event_type, source, creator, alert_ts, updated_ts,
+                    lifecycle, confidence_score, attention_score, risk_score, elite_score,
+                    market_cap_usd, liquidity_usd, volume_m5_usd, age_minutes, price_change_m5,
+                    price_change_h1, txns_m5_buys, txns_m5_sells,
+                    hour_utc, day_of_week_utc, is_weekend_utc, hour_local, day_of_week_local,
+                    local_daypart, session_bucket, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    f"ext-{idx}",
+                    token,
+                    event_type,
+                    "test",
+                    None,
+                    1_773_700_000 + idx,
+                    1_773_700_000 + idx,
+                    "dex",
+                    0.5,
+                    0.4,
+                    0.2,
+                    8,
+                    12000,
+                    5000,
+                    2400,
+                    6.0,
+                    18.0,
+                    40.0,
+                    40,
+                    18,
+                    12,
+                    2,
+                    0,
+                    8,
+                    2,
+                    "morning",
+                    session_bucket,
+                    "{}",
+                ),
+            )
+            c.execute(
+                """
+                INSERT INTO signal_snapshots (
+                    signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                    volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                    txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                    outcome_label, snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    60,
+                    1_773_703_600 + idx,
+                    "dex",
+                    18000 if outcome_label in {"worked", "strong_continuation"} else 7000,
+                    5200 if outcome_label in {"worked", "strong_continuation"} else 2500,
+                    3000,
+                    66.0,
+                    20.0 if outcome_label in {"worked", "strong_continuation"} else -18.0,
+                    55.0 if outcome_label in {"worked", "strong_continuation"} else -40.0,
+                    55,
+                    22,
+                    80.0 if outcome_label in {"worked", "strong_continuation"} else -35.0,
+                    4.0 if outcome_label in {"worked", "strong_continuation"} else -38.0,
+                    30.0,
+                    outcome_label,
+                    json.dumps({"outcome_label": outcome_label}),
+                ),
+            )
+
+    summary = sls.get_diagnostics_summary(hours=10_000)
+    recommendations = sls.get_diagnostics_recommendations(hours=10_000)
+
+    combos = {(item["session_bucket"], item["signal_type"]): item for item in summary["session_signal_quality"]}
+    assert combos[("asia", "candidate")]["win_rate"] == 100.0
+    assert combos[("us_day", "promoted")]["fail_rate"] == 100.0
+    assert any(item["title"] == "Best Session x Signal" for item in recommendations)
+    assert any(item["title"] == "Weakest Session x Signal" for item in recommendations)

@@ -599,6 +599,7 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
     outcome_counts: dict[str, int] = {}
     false_positives: list[dict[str, Any]] = []
     session_outcomes: dict[str, dict[str, Any]] = {}
+    session_signal_outcomes: dict[tuple[str, str], dict[str, Any]] = {}
     conversion_by_token: dict[str, set[str]] = {}
     reason_scorecards: dict[str, dict[str, Any]] = {}
 
@@ -647,6 +648,27 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
             session_stats["failed"] += 1
         else:
             session_stats["mixed"] += 1
+
+        combo_key = (session_key, str(event_type or "unknown"))
+        combo_stats = session_signal_outcomes.setdefault(
+            combo_key,
+            {
+                "session_bucket": session_key,
+                "signal_type": str(event_type or "unknown"),
+                "total": 0,
+                "worked": 0,
+                "strong_continuation": 0,
+                "failed": 0,
+                "faded": 0,
+                "mixed": 0,
+                "pending": 0,
+            },
+        )
+        combo_stats["total"] += 1
+        if outcome_label in combo_stats:
+            combo_stats[outcome_label] += 1
+        else:
+            combo_stats["mixed"] += 1
 
         if event_type in {"candidate", "promoted"} and outcome_label in {"failed", "faded"}:
             false_positives.append(
@@ -801,6 +823,26 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
         )
     session_quality.sort(key=lambda item: (-item["win_rate"], -item["total"], item["session_bucket"]))
 
+    session_signal_quality: list[dict[str, Any]] = []
+    for (session_name, signal_type), stats in session_signal_outcomes.items():
+        total = int(stats.get("total") or 0)
+        positive = int(stats.get("worked") or 0) + int(stats.get("strong_continuation") or 0)
+        negative = int(stats.get("failed") or 0) + int(stats.get("faded") or 0)
+        session_signal_quality.append(
+            {
+                **stats,
+                "session_bucket": session_name,
+                "signal_type": signal_type,
+                "positive": positive,
+                "negative": negative,
+                "win_rate": round((positive / total) * 100.0, 1) if total else 0.0,
+                "fail_rate": round((negative / total) * 100.0, 1) if total else 0.0,
+            }
+        )
+    session_signal_quality.sort(
+        key=lambda item: (-item["win_rate"], -item["total"], item["session_bucket"], item["signal_type"])
+    )
+
     reason_quality: list[dict[str, Any]] = []
     for reason, card in reason_scorecards.items():
         total = int(card.get("total") or 0)
@@ -872,6 +914,7 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
         "false_negatives": false_negatives[:15],
         "false_positives": false_positives[:15],
         "session_quality": session_quality,
+        "session_signal_quality": session_signal_quality[:20],
         "conversion": conversion,
         "reason_quality": reason_quality[:25],
         "threshold_guidance": threshold_guidance[:12],
@@ -887,6 +930,7 @@ def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
     false_negatives = summary.get("false_negatives") or []
     false_positives = summary.get("false_positives") or []
     session_quality = summary.get("session_quality") or []
+    session_signal_quality = summary.get("session_signal_quality") or []
     conversion = summary.get("conversion") or {}
     reason_quality = summary.get("reason_quality") or []
     threshold_guidance = summary.get("threshold_guidance") or []
@@ -1010,6 +1054,30 @@ def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
                 ),
             }
         )
+    if session_signal_quality:
+        best_combo = session_signal_quality[0]
+        worst_combo = sorted(
+            session_signal_quality,
+            key=lambda item: (item["win_rate"], -item["total"], item["session_bucket"], item["signal_type"]),
+        )[0]
+        recs.append(
+            {
+                "title": "Best Session x Signal",
+                "detail": (
+                    f"`{best_combo['signal_type']}` in `{best_combo['session_bucket']}` is leading at "
+                    f"{best_combo['win_rate']}% positive outcomes across {best_combo['total']} samples."
+                ),
+            }
+        )
+        recs.append(
+            {
+                "title": "Weakest Session x Signal",
+                "detail": (
+                    f"`{worst_combo['signal_type']}` in `{worst_combo['session_bucket']}` is weakest at "
+                    f"{worst_combo['win_rate']}% positive outcomes across {worst_combo['total']} samples."
+                ),
+            }
+        )
     if int(conversion.get("candidate_tokens") or 0) > 0:
         conv_rate = round(
             (int(conversion.get("candidate_to_promoted_tokens") or 0) / max(1, int(conversion.get("candidate_tokens") or 0))) * 100.0,
@@ -1044,6 +1112,7 @@ def render_diagnostics_html(hours: int = 24) -> str:
     false_negatives = summary.get("false_negatives") or []
     false_positives = summary.get("false_positives") or []
     session_quality = summary.get("session_quality") or []
+    session_signal_quality = summary.get("session_signal_quality") or []
     conversion = summary.get("conversion") or {}
     reason_quality = summary.get("reason_quality") or []
     threshold_guidance = summary.get("threshold_guidance") or []
@@ -1113,6 +1182,16 @@ def render_diagnostics_html(hours: int = 24) -> str:
         "</tr>"
         for item in session_quality
     ) or "<tr><td colspan='4'>No outcome quality data yet</td></tr>"
+
+    session_signal_quality_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('session_bucket') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('signal_type') or 'unknown'))}</td>"
+        f"<td>{int(item.get('total') or 0)}</td>"
+        f"<td>{html.escape(str(item.get('win_rate') or 0))}%</td>"
+        "</tr>"
+        for item in session_signal_quality[:12]
+    ) or "<tr><td colspan='4'>No session x signal data yet</td></tr>"
 
     reason_quality_rows = "".join(
         "<tr>"
@@ -1307,6 +1386,17 @@ def render_diagnostics_html(hours: int = 24) -> str:
           <tbody>{session_quality_rows}</tbody>
         </table>
       </section>
+      <section class="panel">
+        <h2>Session x Signal Quality</h2>
+        <table>
+          <thead>
+            <tr><th>Session</th><th>Signal</th><th>Total</th><th>Positive Rate</th></tr>
+          </thead>
+          <tbody>{session_signal_quality_rows}</tbody>
+        </table>
+      </section>
+    </div>
+    <div class="wide-grid">
       <section class="panel">
         <h2>False Negatives</h2>
         <table>

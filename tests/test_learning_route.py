@@ -184,10 +184,12 @@ def test_learning_diagnostics_routes_include_outcome_sections(tmp_path, monkeypa
     assert "conversion" in summary_payload
     assert "reason_quality" in summary_payload
     assert "threshold_guidance" in summary_payload
+    assert "session_signal_quality" in summary_payload
 
     dashboard_response = client.get("/learning/diagnostics/dashboard?hours=10000")
     assert dashboard_response.status_code == 200
     assert "False Negatives" in dashboard_response.text
     assert "Session Outcome Quality" in dashboard_response.text
+    assert "Session x Signal Quality" in dashboard_response.text
     assert "Blocker Outcome Scorecards" in dashboard_response.text
     assert "Threshold Guidance" in dashboard_response.text
