@@ -600,8 +600,10 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
     false_positives: list[dict[str, Any]] = []
     session_outcomes: dict[str, dict[str, Any]] = {}
     session_signal_outcomes: dict[tuple[str, str], dict[str, Any]] = {}
+    session_signal_daily: dict[tuple[str, str, str], dict[str, Any]] = {}
     conversion_by_token: dict[str, set[str]] = {}
     reason_scorecards: dict[str, dict[str, Any]] = {}
+    reason_daily: dict[tuple[str, str], dict[str, Any]] = {}
 
     for row in outcome_rows:
         (
@@ -628,6 +630,7 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
             "session_bucket": session_key,
             "local_daypart": local_daypart,
             "alert_ts": alert_ts,
+            "alert_date": datetime.fromtimestamp(int(alert_ts or 0), tz=timezone.utc).date().isoformat() if alert_ts else None,
             "horizon_minutes": horizon_minutes,
             "outcome_label": outcome_label,
             "market_cap_change_pct": market_cap_change_pct,
@@ -669,6 +672,23 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
             combo_stats[outcome_label] += 1
         else:
             combo_stats["mixed"] += 1
+        alert_date = outcome_entry["alert_date"] or "unknown"
+        combo_daily = session_signal_daily.setdefault(
+            (session_key, str(event_type or "unknown"), alert_date),
+            {
+                "session_bucket": session_key,
+                "signal_type": str(event_type or "unknown"),
+                "date": alert_date,
+                "total": 0,
+                "positive": 0,
+                "negative": 0,
+            },
+        )
+        combo_daily["total"] += 1
+        if outcome_label in {"worked", "strong_continuation"}:
+            combo_daily["positive"] += 1
+        elif outcome_label in {"failed", "faded"}:
+            combo_daily["negative"] += 1
 
         if event_type in {"candidate", "promoted"} and outcome_label in {"failed", "faded"}:
             false_positives.append(
@@ -748,6 +768,7 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
                         break
         if matched_outcome:
             outcome_label = str(matched_outcome.get("outcome_label") or "pending")
+            outcome_date = str(matched_outcome.get("alert_date") or "unknown")
             for reason in reasons:
                 card = reason_scorecards.setdefault(
                     reason,
@@ -773,6 +794,15 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
                     card[outcome_label] += 1
                 else:
                     card["mixed"] += 1
+                daily_card = reason_daily.setdefault(
+                    (reason, outcome_date),
+                    {"reason": reason, "date": outcome_date, "total": 0, "positive": 0, "negative": 0},
+                )
+                daily_card["total"] += 1
+                if outcome_label in {"worked", "strong_continuation"}:
+                    daily_card["positive"] += 1
+                elif outcome_label in {"failed", "faded"}:
+                    daily_card["negative"] += 1
         if decision.endswith("sent"):
             continue
         if not matched_outcome or matched_outcome["outcome_label"] not in {"worked", "strong_continuation"}:
@@ -857,6 +887,53 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
         )
     reason_quality.sort(key=lambda item: (-item["total"], item["reason"]))
 
+    def _build_daily_trends(
+        daily_map: dict[tuple[Any, ...], dict[str, Any]],
+        *,
+        key_fields: list[str],
+    ) -> list[dict[str, Any]]:
+        grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+        for row in daily_map.values():
+            identity = tuple(row.get(field) for field in key_fields)
+            grouped.setdefault(identity, []).append(row)
+        trends: list[dict[str, Any]] = []
+        for identity, rows in grouped.items():
+            rows.sort(key=lambda item: str(item.get("date") or ""))
+            if len(rows) < 2:
+                continue
+            current = rows[-1]
+            previous = rows[-2]
+            current_total = int(current.get("total") or 0)
+            previous_total = int(previous.get("total") or 0)
+            current_positive = int(current.get("positive") or 0)
+            previous_positive = int(previous.get("positive") or 0)
+            current_negative = int(current.get("negative") or 0)
+            previous_negative = int(previous.get("negative") or 0)
+            current_win_rate = round((current_positive / current_total) * 100.0, 1) if current_total else 0.0
+            previous_win_rate = round((previous_positive / previous_total) * 100.0, 1) if previous_total else 0.0
+            current_fail_rate = round((current_negative / current_total) * 100.0, 1) if current_total else 0.0
+            previous_fail_rate = round((previous_negative / previous_total) * 100.0, 1) if previous_total else 0.0
+            trends.append(
+                {
+                    **{field: identity[idx] for idx, field in enumerate(key_fields)},
+                    "current_date": current.get("date"),
+                    "previous_date": previous.get("date"),
+                    "current_total": current_total,
+                    "previous_total": previous_total,
+                    "current_win_rate": current_win_rate,
+                    "previous_win_rate": previous_win_rate,
+                    "current_fail_rate": current_fail_rate,
+                    "previous_fail_rate": previous_fail_rate,
+                    "win_rate_delta": round(current_win_rate - previous_win_rate, 1),
+                    "fail_rate_delta": round(current_fail_rate - previous_fail_rate, 1),
+                }
+            )
+        trends.sort(key=lambda item: (-abs(float(item.get("win_rate_delta") or 0.0)), -int(item.get("current_total") or 0)))
+        return trends
+
+    reason_trends = _build_daily_trends(reason_daily, key_fields=["reason"])
+    session_signal_trends = _build_daily_trends(session_signal_daily, key_fields=["session_bucket", "signal_type"])
+
     threshold_guidance: list[dict[str, Any]] = []
     for item in reason_quality:
         total = int(item.get("total") or 0)
@@ -918,6 +995,8 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
         "conversion": conversion,
         "reason_quality": reason_quality[:25],
         "threshold_guidance": threshold_guidance[:12],
+        "reason_trends": reason_trends[:12],
+        "session_signal_trends": session_signal_trends[:12],
     }
 
 
@@ -934,6 +1013,8 @@ def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
     conversion = summary.get("conversion") or {}
     reason_quality = summary.get("reason_quality") or []
     threshold_guidance = summary.get("threshold_guidance") or []
+    reason_trends = summary.get("reason_trends") or []
+    session_signal_trends = summary.get("session_signal_trends") or []
 
     if counts_by_decision.get("candidate_gate_skip", 0) > 0:
         recs.append(
@@ -1069,6 +1150,52 @@ def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
                 ),
             }
         )
+    if reason_trends:
+        improving_reason = max(reason_trends, key=lambda item: (item["win_rate_delta"], item["current_total"]))
+        degrading_reason = min(reason_trends, key=lambda item: (item["win_rate_delta"], -item["current_total"]))
+        if float(improving_reason.get("win_rate_delta") or 0.0) > 0:
+            recs.append(
+                {
+                    "title": "Improving Blocker Trend",
+                    "detail": (
+                        f"`{improving_reason['reason']}` improved by {improving_reason['win_rate_delta']} pts "
+                        f"vs {improving_reason['previous_date']}."
+                    ),
+                }
+            )
+        if float(degrading_reason.get("win_rate_delta") or 0.0) < 0:
+            recs.append(
+                {
+                    "title": "Degrading Blocker Trend",
+                    "detail": (
+                        f"`{degrading_reason['reason']}` dropped by {abs(float(degrading_reason['win_rate_delta'] or 0.0))} pts "
+                        f"vs {degrading_reason['previous_date']}."
+                    ),
+                }
+            )
+    if session_signal_trends:
+        improving_combo = max(session_signal_trends, key=lambda item: (item["win_rate_delta"], item["current_total"]))
+        degrading_combo = min(session_signal_trends, key=lambda item: (item["win_rate_delta"], -item["current_total"]))
+        if float(improving_combo.get("win_rate_delta") or 0.0) > 0:
+            recs.append(
+                {
+                    "title": "Improving Session x Signal",
+                    "detail": (
+                        f"`{improving_combo['signal_type']}` in `{improving_combo['session_bucket']}` improved by "
+                        f"{improving_combo['win_rate_delta']} pts day over day."
+                    ),
+                }
+            )
+        if float(degrading_combo.get("win_rate_delta") or 0.0) < 0:
+            recs.append(
+                {
+                    "title": "Degrading Session x Signal",
+                    "detail": (
+                        f"`{degrading_combo['signal_type']}` in `{degrading_combo['session_bucket']}` fell by "
+                        f"{abs(float(degrading_combo['win_rate_delta'] or 0.0))} pts day over day."
+                    ),
+                }
+            )
         recs.append(
             {
                 "title": "Weakest Session x Signal",
@@ -1116,6 +1243,8 @@ def render_diagnostics_html(hours: int = 24) -> str:
     conversion = summary.get("conversion") or {}
     reason_quality = summary.get("reason_quality") or []
     threshold_guidance = summary.get("threshold_guidance") or []
+    reason_trends = summary.get("reason_trends") or []
+    session_signal_trends = summary.get("session_signal_trends") or []
 
     def metric_card(label: str, value: Any) -> str:
         return (
@@ -1212,6 +1341,26 @@ def render_diagnostics_html(hours: int = 24) -> str:
         "</tr>"
         for item in threshold_guidance[:10]
     ) or "<tr><td colspan='4'>No threshold guidance yet</td></tr>"
+
+    reason_trend_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('reason') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('previous_date') or '-'))}</td>"
+        f"<td>{html.escape(str(item.get('current_date') or '-'))}</td>"
+        f"<td>{html.escape(str(item.get('win_rate_delta') or 0))}</td>"
+        "</tr>"
+        for item in reason_trends[:10]
+    ) or "<tr><td colspan='4'>No blocker trend data yet</td></tr>"
+
+    session_signal_trend_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('session_bucket') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('signal_type') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('previous_date') or '-'))}</td>"
+        f"<td>{html.escape(str(item.get('win_rate_delta') or 0))}</td>"
+        "</tr>"
+        for item in session_signal_trends[:10]
+    ) or "<tr><td colspan='4'>No session x signal trend data yet</td></tr>"
 
     recent_rows = "".join(
         "<tr>"
@@ -1424,6 +1573,26 @@ def render_diagnostics_html(hours: int = 24) -> str:
             <tr><th>Reason</th><th>Action</th><th>Confidence</th><th>Sample</th></tr>
           </thead>
           <tbody>{threshold_guidance_rows}</tbody>
+        </table>
+      </section>
+    </div>
+    <div class="wide-grid">
+      <section class="panel">
+        <h2>Blocker Trends</h2>
+        <table>
+          <thead>
+            <tr><th>Reason</th><th>Previous</th><th>Current</th><th>Win Delta</th></tr>
+          </thead>
+          <tbody>{reason_trend_rows}</tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Session x Signal Trends</h2>
+        <table>
+          <thead>
+            <tr><th>Session</th><th>Signal</th><th>Previous</th><th>Win Delta</th></tr>
+          </thead>
+          <tbody>{session_signal_trend_rows}</tbody>
         </table>
       </section>
     </div>

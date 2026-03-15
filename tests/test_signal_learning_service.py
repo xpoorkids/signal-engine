@@ -745,3 +745,131 @@ def test_session_signal_quality_highlights_best_and_worst_combos(tmp_path, monke
     assert combos[("us_day", "promoted")]["fail_rate"] == 100.0
     assert any(item["title"] == "Best Session x Signal" for item in recommendations)
     assert any(item["title"] == "Weakest Session x Signal" for item in recommendations)
+
+
+def test_diagnostics_summary_builds_daily_trends(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    with sls._connect() as c:
+        signal_specs = [
+            ("sig-r1", "token-r1", "candidate", "asia", 1_773_600_000, "failed"),
+            ("sig-r2", "token-r2", "candidate", "asia", 1_773_686_400, "worked"),
+            ("sig-s1", "token-s1", "promoted", "us_day", 1_773_600_100, "failed"),
+            ("sig-s2", "token-s2", "promoted", "us_day", 1_773_686_500, "worked"),
+        ]
+        for idx, (signal_id, token, event_type, session_bucket, alert_ts, outcome_label) in enumerate(signal_specs):
+            c.execute(
+                """
+                INSERT INTO signals (
+                    signal_id, external_ref, token, event_type, source, creator, alert_ts, updated_ts,
+                    lifecycle, confidence_score, attention_score, risk_score, elite_score,
+                    market_cap_usd, liquidity_usd, volume_m5_usd, age_minutes, price_change_m5,
+                    price_change_h1, txns_m5_buys, txns_m5_sells,
+                    hour_utc, day_of_week_utc, is_weekend_utc, hour_local, day_of_week_local,
+                    local_daypart, session_bucket, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    f"ext-trend-{idx}",
+                    token,
+                    event_type,
+                    "test",
+                    None,
+                    alert_ts,
+                    alert_ts,
+                    "dex",
+                    0.5,
+                    0.4,
+                    0.2,
+                    8,
+                    12000,
+                    5000,
+                    2400,
+                    6.0,
+                    18.0,
+                    40.0,
+                    40,
+                    18,
+                    12,
+                    2,
+                    0,
+                    8,
+                    2,
+                    "morning",
+                    session_bucket,
+                    "{}",
+                ),
+            )
+            c.execute(
+                """
+                INSERT INTO signal_snapshots (
+                    signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                    volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                    txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                    outcome_label, snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    60,
+                    alert_ts + 3600,
+                    "dex",
+                    18000 if outcome_label == "worked" else 7000,
+                    5200 if outcome_label == "worked" else 2500,
+                    3000,
+                    66.0,
+                    20.0 if outcome_label == "worked" else -18.0,
+                    55.0 if outcome_label == "worked" else -40.0,
+                    55,
+                    22,
+                    80.0 if outcome_label == "worked" else -35.0,
+                    4.0 if outcome_label == "worked" else -38.0,
+                    30.0,
+                    outcome_label,
+                    json.dumps({"outcome_label": outcome_label}),
+                ),
+            )
+
+    sls.record_signal_decision(
+        token="token-r1",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_gate_skip",
+        reasons=["attention<0.20"],
+        attention_score=0.19,
+        risk_score=0.20,
+        confidence_score=0.30,
+        lifecycle="dex",
+        ts_value=1_773_600_000,
+        signal_id="sig-r1",
+        source="test",
+    )
+    sls.record_signal_decision(
+        token="token-r2",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_gate_skip",
+        reasons=["attention<0.20"],
+        attention_score=0.19,
+        risk_score=0.20,
+        confidence_score=0.30,
+        lifecycle="dex",
+        ts_value=1_773_686_400,
+        signal_id="sig-r2",
+        source="test",
+    )
+
+    summary = sls.get_diagnostics_summary(hours=10_000)
+    recommendations = sls.get_diagnostics_recommendations(hours=10_000)
+
+    reason_trends = {item["reason"]: item for item in summary["reason_trends"]}
+    combo_trends = {
+        (item["session_bucket"], item["signal_type"]): item for item in summary["session_signal_trends"]
+    }
+    assert reason_trends["attention<0.20"]["win_rate_delta"] == 100.0
+    assert combo_trends[("us_day", "promoted")]["win_rate_delta"] == 100.0
+    assert any(item["title"] == "Improving Blocker Trend" for item in recommendations)
+    assert any(item["title"] == "Improving Session x Signal" for item in recommendations)
