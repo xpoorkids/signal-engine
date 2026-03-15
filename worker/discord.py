@@ -305,6 +305,7 @@ def _reason_stack(e: Event) -> str:
         if isinstance(reason, str):
             reasons.append(reason)
     generic_reasons = {
+        "balance_increase_detected",
         "token_resolved",
         "dex_pair_found",
         "sniper_route",
