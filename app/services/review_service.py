@@ -32,7 +32,7 @@ def _fmt_num(value: Any, decimals: int = 0, prefix: str = "") -> str:
     try:
         num = float(value)
     except Exception:
-        return "—"
+        return "--"
     if decimals:
         return f"{prefix}{num:,.{decimals}f}"
     return f"{prefix}{num:,.0f}"
@@ -42,7 +42,7 @@ def _fmt_pct(value: Any, decimals: int = 0) -> str:
     try:
         num = float(value)
     except Exception:
-        return "—"
+        return "--"
     sign = "+" if num > 0 else ""
     if decimals:
         return f"{sign}{num:.{decimals}f}%"
@@ -55,48 +55,98 @@ def _review_attention(dex_summary: dict[str, Any], x_signal: dict[str, Any] | No
 
     liq = _float(dex_summary.get("liquidity_usd"))
     vol5 = _float(dex_summary.get("volume_m5"))
+    vol1h = _float(dex_summary.get("volume_h1"))
     buys5 = _int(dex_summary.get("txns_m5_buys"))
     sells5 = _int(dex_summary.get("txns_m5_sells"))
     age = _float(dex_summary.get("age_minutes"))
+    chg1h = _float(dex_summary.get("price_change_h1"))
+
+    buy_sell_ratio = buys5 / max(sells5, 1) if buys5 > 0 else 0.0
+    vol_liq_ratio = vol5 / liq if liq > 0 else 0.0
 
     if dex_summary:
-        score += 0.20
-        reasons.append("dex_pair_found")
-    if liq >= 15000:
-        score += 0.20
-        reasons.append("liquidity_15000_plus")
+        score += 0.12
+        reasons.append("Dex pair is live")
+
+    if liq >= 50000:
+        score += 0.24
+        reasons.append(f"Strong liquidity base at {_fmt_num(liq, prefix='$')}")
+    elif liq >= 15000:
+        score += 0.18
+        reasons.append(f"Tradable liquidity at {_fmt_num(liq, prefix='$')}")
     elif liq >= 8000:
         score += 0.10
-        reasons.append("liquidity_8000_plus")
-    if vol5 >= 8000:
-        score += 0.15
-        reasons.append("volume_m5_8000_plus")
-    elif vol5 >= 2000:
+        reasons.append(f"Decent early liquidity at {_fmt_num(liq, prefix='$')}")
+    elif liq >= 3000:
+        score += 0.05
+        reasons.append(f"Starter liquidity at {_fmt_num(liq, prefix='$')}")
+
+    if vol5 >= 50000:
+        score += 0.20
+        reasons.append(f"Heavy 5m turnover at {_fmt_num(vol5, prefix='$')}")
+    elif vol5 >= 15000:
+        score += 0.14
+        reasons.append(f"Strong 5m turnover at {_fmt_num(vol5, prefix='$')}")
+    elif vol5 >= 5000:
         score += 0.08
-        reasons.append("volume_m5_2000_plus")
-    if buys5 >= 15 and buys5 > sells5:
-        score += 0.15
-        reasons.append("buy_pressure_m5")
+        reasons.append(f"Healthy 5m turnover at {_fmt_num(vol5, prefix='$')}")
+
+    if vol1h >= 100000:
+        score += 0.06
+        reasons.append(f"1h participation is holding at {_fmt_num(vol1h, prefix='$')}")
+
+    if buys5 >= 40 and buy_sell_ratio >= 1.4:
+        score += 0.18
+        reasons.append(f"Order flow is buy-led at {buys5}/{sells5} buys to sells")
+    elif buys5 >= 15 and buy_sell_ratio >= 1.1:
+        score += 0.12
+        reasons.append(f"Buy pressure is positive at {buys5}/{sells5} buys to sells")
     elif buys5 >= 8:
+        score += 0.06
+        reasons.append(f"Steady trade count with {buys5} buys in 5m")
+
+    if vol_liq_ratio >= 1.5 and liq >= 8000:
         score += 0.08
-        reasons.append("steady_buys_m5")
-    if 0 < age <= 120:
+        reasons.append(f"Turnover is moving at {vol_liq_ratio:.1f}x liquidity in 5m")
+    elif vol_liq_ratio >= 0.7 and liq >= 8000:
+        score += 0.04
+        reasons.append(f"Turnover is active at {vol_liq_ratio:.1f}x liquidity in 5m")
+
+    if 0 < age <= 30:
         score += 0.10
-        reasons.append("early_age_window")
+        reasons.append(f"Still early at {age:.1f}m old")
+    elif age <= 180:
+        score += 0.06
+        reasons.append(f"Still developing at {age:.1f}m old")
+
+    if chg1h >= 100:
+        score += 0.08
+        reasons.append(f"Price expansion is strong at {_fmt_pct(chg1h, 1)} over 1h")
+    elif chg1h >= 25:
+        score += 0.04
+        reasons.append(f"Price trend is constructive at {_fmt_pct(chg1h, 1)} over 1h")
 
     if x_signal:
         tweets = _int(x_signal.get("tweet_count"))
         authors = _int(x_signal.get("unique_authors"))
         likes = _int(x_signal.get("likes"))
-        if tweets >= 10 and authors >= 10:
-            score += 0.20
-            reasons.append("x_social_momentum_10_10")
+
+        if tweets >= 20 and authors >= 15:
+            score += 0.22
+            reasons.append(f"X traction is broad with {tweets} mentions across {authors} authors")
+        elif tweets >= 10 and authors >= 10:
+            score += 0.16
+            reasons.append(f"X traction is real with {tweets} mentions across {authors} authors")
         elif tweets >= 5 and authors >= 5:
-            score += 0.10
-            reasons.append("x_social_momentum_5_5")
-        if likes >= 50:
-            score += 0.05
-            reasons.append("x_engagement")
+            score += 0.08
+            reasons.append(f"X chatter is building with {tweets} mentions across {authors} authors")
+
+        if likes >= 100:
+            score += 0.06
+            reasons.append(f"X engagement is elevated at {likes} likes")
+        elif likes >= 25:
+            score += 0.03
+            reasons.append(f"X engagement is visible at {likes} likes")
 
     return max(0.0, min(score, 1.0)), reasons
 
@@ -117,52 +167,53 @@ def _review_risk(
 
     if mint_authority:
         score += 0.30
-        reasons.append("mint_authority_active")
+        reasons.append("Mint authority is still active")
     if freeze_authority:
         score += 0.25
-        reasons.append("freeze_authority_active")
+        reasons.append("Freeze authority is still active")
+
     if liq_usd == 0:
         score += 0.08
-        reasons.append("liquidity_unknown")
+        reasons.append("Liquidity is still unconfirmed")
     elif liq_usd < 2000:
         score += 0.22
-        reasons.append("very_thin_liquidity")
+        reasons.append(f"Liquidity is very thin at {_fmt_num(liq_usd, prefix='$')}")
     elif liq_usd < 5000:
         score += 0.15
-        reasons.append("thin_liquidity")
+        reasons.append(f"Liquidity is thin at {_fmt_num(liq_usd, prefix='$')}")
     elif liq_usd < 15000:
         score += 0.08
-        reasons.append("subscale_liquidity")
+        reasons.append(f"Liquidity is subscale at {_fmt_num(liq_usd, prefix='$')}")
 
     if top_holder_pct >= 20:
         score += 0.30
-        reasons.append("top_holder_20_plus")
+        reasons.append(f"Top holder concentration is severe at {top_holder_pct:.1f}%")
     elif top_holder_pct >= 15:
         score += 0.22
-        reasons.append("top_holder_15_plus")
+        reasons.append(f"Top holder concentration is high at {top_holder_pct:.1f}%")
     elif top_holder_pct >= 10:
         score += 0.15
-        reasons.append("top_holder_10_plus")
+        reasons.append(f"Top holder concentration is elevated at {top_holder_pct:.1f}%")
     elif top_holder_pct >= 6:
         score += 0.08
-        reasons.append("top_holder_6_plus")
+        reasons.append(f"Top holder concentration is worth watching at {top_holder_pct:.1f}%")
     elif holder_level == "high":
         score += 0.20
-        reasons.append(str(wallet_risk.get("reason") or "holder_concentration_high"))
+        reasons.append("Holder distribution reads high-risk")
     elif holder_level == "warn":
         score += 0.10
-        reasons.append(str(wallet_risk.get("reason") or "holder_concentration_warn"))
+        reasons.append("Holder distribution reads concentrated")
 
     if liq_usd > 0 and vol5 >= liq_usd * 3.0:
         score += 0.12
-        reasons.append("washy_volume_to_liquidity")
+        reasons.append("Volume is running too hot versus liquidity")
     elif liq_usd > 0 and vol5 >= liq_usd * 1.5:
         score += 0.06
-        reasons.append("elevated_volume_to_liquidity")
+        reasons.append("Volume is elevated relative to liquidity")
 
     if age > 0 and age <= 10 and liq_usd < 8000:
         score += 0.05
-        reasons.append("very_early_thin_book")
+        reasons.append("Very early token with a thin order book")
 
     return max(0.0, min(score, 1.0)), reasons
 
@@ -184,25 +235,25 @@ def _rug_assessment(
 
     if mint_authority:
         score += 3
-        flags.append("mint_authority_active")
+        flags.append("Mint authority active")
     if freeze_authority:
         score += 3
-        flags.append("freeze_authority_active")
+        flags.append("Freeze authority active")
     if holder_level == "high" or top_holder_pct >= 12:
         score += 3
-        flags.append("holder_concentration_high")
+        flags.append(f"Top holder concentrated at {top_holder_pct:.1f}%")
     elif holder_level == "warn" or top_holder_pct >= 8:
         score += 2
-        flags.append("holder_concentration_warn")
+        flags.append(f"Top holder concentration watch at {top_holder_pct:.1f}%")
     if liq_locked is False:
         score += 2
-        flags.append("lp_not_locked")
+        flags.append("LP not locked")
     if 0 < liq < 5000:
         score += 2
-        flags.append("thin_liquidity")
+        flags.append(f"Thin liquidity at {_fmt_num(liq, prefix='$')}")
     if liq > 0 and vol5 >= liq * 2.0:
         score += 2
-        flags.append("volume_without_liquidity")
+        flags.append("Volume too aggressive for current liquidity")
 
     verdict = "low"
     if score >= 6:
@@ -384,7 +435,7 @@ def render_review_html(review: dict[str, Any]) -> str:
     risk_reasons = review.get("risk_reasons") if isinstance(review.get("risk_reasons"), list) else []
     reasons = attention_reasons + risk_reasons
     if not reasons:
-        reasons = ["pending_signals"]
+        reasons = ["Signals are still developing"]
 
     x_count = _int(social.get("tweet_count"))
     x_authors = _int(social.get("unique_authors"))
@@ -407,9 +458,7 @@ def render_review_html(review: dict[str, Any]) -> str:
         safe_url = html.escape(url, quote=True)
         return f'<a class="link-btn" href="{safe_url}" target="_blank" rel="noopener noreferrer">{html.escape(label)}</a>'
 
-    reason_items = "".join(
-        f"<li>{html.escape(str(reason).replace('_', ' '))}</li>" for reason in reasons[:8]
-    )
+    reason_items = "".join(f"<li>{html.escape(str(reason))}</li>" for reason in reasons[:8])
 
     html_out = f"""<!doctype html>
 <html lang="en">
@@ -419,7 +468,6 @@ def render_review_html(review: dict[str, Any]) -> str:
   <title>Signal Engine Review // {symbol}</title>
   <style>
     :root {{
-      --bg: #08111a;
       --panel: rgba(11, 24, 36, 0.88);
       --panel-2: rgba(16, 33, 48, 0.92);
       --line: rgba(123, 162, 196, 0.18);
@@ -428,7 +476,6 @@ def render_review_html(review: dict[str, Any]) -> str:
       --gold: #f3bd3f;
       --teal: #49dcb1;
       --red: #ff6b6b;
-      --blue: #7cb7ff;
       --shadow: 0 20px 60px rgba(0,0,0,0.45);
     }}
     * {{ box-sizing: border-box; }}
@@ -505,7 +552,7 @@ def render_review_html(review: dict[str, Any]) -> str:
     }}
     .chips {{
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 10px;
       margin-top: 18px;
     }}
@@ -568,7 +615,7 @@ def render_review_html(review: dict[str, Any]) -> str:
     }}
     .grid {{
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 18px;
     }}
     .section {{
@@ -612,6 +659,9 @@ def render_review_html(review: dict[str, Any]) -> str:
       letter-spacing: .08em;
       text-transform: uppercase;
     }}
+    @media (max-width: 1180px) {{
+      .grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    }}
     @media (max-width: 980px) {{
       .hero, .grid {{ grid-template-columns: 1fr; }}
       .chips {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
@@ -652,7 +702,7 @@ def render_review_html(review: dict[str, Any]) -> str:
             {stat("Volume 5m", _fmt_num(market.get("volume_m5"), prefix="$"))}
             {stat("Volume 1h", _fmt_num(market.get("volume_h1"), prefix="$"))}
             {stat("M5 Change", _fmt_pct(market.get("price_change_m5"), 1))}
-            {stat("Age", _fmt_num(market.get("age_minutes"), 1) + "m" if market.get("age_minutes") is not None else "—")}
+            {stat("Age", _fmt_num(market.get("age_minutes"), 1) + "m" if market.get("age_minutes") is not None else "--")}
           </div>
         </div>
         <div>
@@ -678,9 +728,9 @@ def render_review_html(review: dict[str, Any]) -> str:
           {stat("Verdict", rug_verdict)}
           {stat("Rug Score", str(rug_score))}
           {stat("Top Holder", _fmt_pct(_float(holder_risk.get("top_holder_pct")) * 100.0, 1))}
-          {stat("Vol / Liq", f"{(_float(market.get('volume_m5')) / _float(market.get('liquidity_usd'))):.1f}x" if _float(market.get('liquidity_usd')) > 0 else "—")}
+          {stat("Vol / Liq", f"{(_float(market.get('volume_m5')) / _float(market.get('liquidity_usd'))):.1f}x" if _float(market.get('liquidity_usd')) > 0 else "--")}
         </div>
-        <div style="margin-top:12px" class="muted">{html.escape(', '.join(rug_flags) if rug_flags else 'no_major_rug_flags')}</div>
+        <div style="margin-top:12px" class="muted">{html.escape(', '.join(rug_flags) if rug_flags else 'No major rug flags')}</div>
       </section>
       <section class="card section">
         <h3>Security</h3>
