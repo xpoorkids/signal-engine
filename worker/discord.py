@@ -1,5 +1,6 @@
 ﻿import json
 import requests
+from app.services.signal_presentation import SignalViewModel
 from app.services.signal_metrics import (
     format_metric_number,
     get_metric_meta,
@@ -15,7 +16,6 @@ from worker.config import (
 )
 from worker.events import Event
 from worker.config import RADAR_QUIET_RISK_MAX
-from worker.metadata import fetch_token_metadata
 
 
 AMBER = 0xF4C430
@@ -158,6 +158,44 @@ def _metric_display(extra: dict | None, key: str, *, decimals: int = 2) -> str:
     return metric_label(get_metric_meta(extra, key))
 
 
+def format_currency_compact(value: float | int | None) -> str:
+    number = to_optional_float(value)
+    if number is None:
+        return "N/A"
+    abs_num = abs(number)
+    if abs_num >= 1_000_000_000:
+        return f"${number / 1_000_000_000:.1f}B"
+    if abs_num >= 1_000_000:
+        return f"${number / 1_000_000:.1f}M"
+    if abs_num >= 1_000:
+        return f"${number / 1_000:.1f}K"
+    return f"${number:,.0f}"
+
+
+def format_percent_compact(value: float | int | None, *, decimals: int = 0) -> str:
+    number = to_optional_float(value)
+    if number is None:
+        return "N/A"
+    sign = "+" if number > 0 else ""
+    return f"{sign}{number:.{decimals}f}%"
+
+
+def shorten_address(address: str | None, *, head: int = 6, tail: int = 6) -> str:
+    if not address:
+        return "unknown"
+    if len(address) <= head + tail + 3:
+        return address
+    return f"{address[:head]}...{address[-tail:]}"
+
+
+def truncate_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    if limit <= 1:
+        return value[:limit]
+    return value[: limit - 1] + "…"
+
+
 def _score_band(score: float | None, *, invert: bool = False) -> str:
     if score is None:
         return "Unavailable"
@@ -212,6 +250,207 @@ def _market_snapshot(metrics: dict) -> list[str]:
     if spark:
         lines.append(f"Price Path: {spark}")
     return lines
+
+
+def _flow_bias_label(buys: int | None, sells: int | None) -> str | None:
+    if buys is None and sells is None:
+        return None
+    buy_count = buys or 0
+    sell_count = sells or 0
+    total = buy_count + sell_count
+    if total <= 0:
+        return None
+    imbalance = (buy_count - sell_count) / total
+    if imbalance >= 0.20:
+        return "Buy-side"
+    if imbalance <= -0.20:
+        return "Sell pressure"
+    return "Balanced"
+
+
+def _momentum_label(attention_score: float | None, metrics: dict) -> str:
+    chg5 = to_optional_float(metrics.get("price_change_m5"))
+    vol5 = to_optional_float(metrics.get("volume_m5"))
+    if attention_score is None:
+        return "Not computed"
+    if attention_score >= 0.80 and chg5 is not None and chg5 >= 20:
+        return "Confirming"
+    if attention_score >= 0.60 and vol5 is not None and vol5 > 0:
+        return "Early"
+    if attention_score >= 0.45:
+        return "Mixed"
+    return "Unconfirmed"
+
+
+def _risk_band(risk_score: float | None) -> str:
+    if risk_score is None:
+        return "Unavailable"
+    if risk_score < 0.20:
+        return "Low"
+    if risk_score < 0.45:
+        return "Mixed"
+    if risk_score < 0.70:
+        return "Elevated"
+    return "High"
+
+
+def _confidence_band(confidence: float | None) -> str:
+    if confidence is None:
+        return "Unavailable"
+    if confidence >= 0.80:
+        return "High conviction"
+    if confidence >= 0.65:
+        return "Strong"
+    if confidence >= 0.45:
+        return "Moderate"
+    return "Low"
+
+
+def _quality_tier(attention_score: float | None, risk_score: float | None, elite_score: int | None) -> str:
+    if elite_score is None or attention_score is None:
+        return "Experimental"
+    if elite_score >= 10 and attention_score >= 0.75 and (risk_score is None or risk_score <= 0.30):
+        return "Tier A"
+    if elite_score >= 7 and attention_score >= 0.55:
+        return "Tier B"
+    return "Tier C"
+
+
+def _decision_strip(extra: dict | None, confidence_pct: str, lifecycle: str) -> str:
+    return " ".join(
+        [
+            f"`CONF {confidence_pct}`",
+            f"`RISK {_metric_display(extra, 'risk_score')}`",
+            f"`ATTN {_metric_display(extra, 'attention_score')}`",
+            f"`LIFE {lifecycle.upper() if lifecycle else 'N/A'}`",
+        ]
+    )
+
+
+def _build_flow_section(metrics: dict, attention_score: float | None, risk_score: float | None) -> str:
+    buys = metrics.get("txns_m5_buys")
+    sells = metrics.get("txns_m5_sells")
+    flow_bias = _flow_bias_label(buys if isinstance(buys, int) else None, sells if isinstance(sells, int) else None)
+    lines = []
+    if buys is not None or sells is not None:
+        lines.append(f"- 5m Buy Flow: `{buys if buys is not None else 'N/A'}`")
+        lines.append(f"- 5m Sell Flow: `{sells if sells is not None else 'N/A'}`")
+    if flow_bias:
+        lines.append(f"- Flow Bias: `{flow_bias}`")
+    lines.append(f"- Momentum: `{_momentum_label(attention_score, metrics)}`")
+    lines.append(f"- Structure: `{_score_band(attention_score)} attention / {_score_band(risk_score, invert=True)} risk`")
+    return "\n".join(lines[:5])
+
+
+def _build_social_section(e: Event) -> str:
+    extra = e.extra if isinstance(e.extra, dict) else {}
+    attention_metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
+    x_mentions = attention_metrics.get("x_tweet_count")
+    x_authors = attention_metrics.get("x_unique_authors")
+    x_likes = attention_metrics.get("x_likes")
+    lines = []
+    if x_mentions is not None and x_authors is not None and (x_mentions or x_authors):
+        lines.append(f"- X Momentum: `{x_mentions} mentions / {x_authors} authors`")
+    if x_likes:
+        lines.append(f"- X Engagement: `{x_likes} likes`")
+    return "\n".join(lines[:3])
+
+
+def _build_quality_section(e: Event, metrics: dict, risk_score: float | None, confidence_score: float | None) -> str:
+    extra = e.extra if isinstance(e.extra, dict) else {}
+    elite = extra.get("elite_score") if isinstance(extra.get("elite_score"), int) else None
+    risk_flags = extra.get("risk_flags") if isinstance(extra.get("risk_flags"), dict) else {}
+    holder_note = "Concentrated" if risk_flags.get("holder_concentration") else "Organic / unknown"
+    lines = [
+        f"- Confidence: `{render_confidence_pct(confidence_score)} ({_confidence_band(confidence_score)})`",
+        f"- Risk Score: `{_metric_display(extra, 'risk_score')} ({_risk_band(risk_score)})`",
+        f"- Elite Score: `{elite if elite is not None else 'N/A'}`",
+        f"- Tier: `{_quality_tier(to_optional_float(get_metric_value(extra, 'attention_score')), risk_score, elite)}`",
+        f"- Holder Distribution: `{holder_note}`",
+    ]
+    return "\n".join(lines[:5])
+
+
+def get_signal_color(signal_type: str, risk_score: float | None) -> int:
+    if signal_type == "risk_alert" or (risk_score is not None and risk_score >= 0.70):
+        return DARK_RED
+    if signal_type in ("breakout", "promoted"):
+        return 0x2ECC71
+    if signal_type == "setup":
+        return AMBER
+    return 0x2F6BFF
+
+
+def _signal_type(e: Event, attention_score: float | None, risk_score: float | None) -> str:
+    if e.type == "promoted":
+        return "promoted"
+    if risk_score is not None and risk_score >= 0.70:
+        return "risk_alert"
+    if attention_score is not None and attention_score >= 0.80 and (risk_score is None or risk_score <= 0.35):
+        return "breakout"
+    if attention_score is not None and attention_score >= 0.55:
+        return "setup"
+    return "watch"
+
+
+def _signal_title(signal_type: str, symbol: str) -> str:
+    mapping = {
+        "promoted": "🔥 SE BREAKOUT",
+        "breakout": "🔥 SE BREAKOUT",
+        "setup": "🟡 SE SETUP",
+        "watch": "🔵 SE WATCH",
+        "risk_alert": "🔴 SE RISK ALERT",
+    }
+    prefix = mapping.get(signal_type, "🔵 SE WATCH")
+    return truncate_text(f"{prefix}  ${symbol}", 256)
+
+
+def _decision_field(extra: dict | None, confidence_pct: str, lifecycle: str, conviction: str, confidence_score: float | None, risk_score: float | None) -> dict:
+    return {
+        "name": "Command View",
+        "value": _section_lines(
+            [
+                _decision_strip(extra, confidence_pct, lifecycle),
+                f"**Conviction:** {conviction}",
+                f"**Read:** {_confidence_band(confidence_score)} confidence / {_risk_band(risk_score)} risk",
+            ],
+            indent=0,
+        ),
+        "inline": False,
+    }
+
+
+def _trigger_field(e: Event) -> dict | None:
+    value = _reason_stack(e)
+    if not value or value == "- flow + structure":
+        return None
+    return {"name": "Signal Intelligence", "value": _section_lines([value]), "inline": False}
+
+
+def _social_field(e: Event) -> dict | None:
+    value = _build_social_section(e)
+    if not value:
+        return None
+    return {"name": "Social", "value": _section_lines([value]), "inline": True}
+
+
+def _links_field(token: str, metrics: dict) -> dict | None:
+    value = _links_lines(token, metrics)
+    if not value:
+        return None
+    return {"name": "Actions", "value": value, "inline": False}
+
+
+def _trim_field(field: dict) -> dict:
+    trimmed = dict(field)
+    trimmed["name"] = truncate_text(str(trimmed.get("name") or ""), 256)
+    trimmed["value"] = truncate_text(str(trimmed.get("value") or ""), 1024)
+    return trimmed
+
+
+def _finalize_fields(fields: list[dict]) -> list[dict]:
+    compact = [_trim_field(field) for field in fields if field and field.get("value")]
+    return compact[:25]
 
 
 def _candidate_header(attention_score: float | None, risk_score: float | None) -> str:
@@ -420,13 +659,6 @@ def _token_labels_from_event(e: Event) -> tuple[str, str]:
         raw_name = e.extra.get("name")
         if isinstance(raw_name, str) and raw_name.strip():
             name = raw_name.strip()
-    if e.token and (not symbol or not name):
-        meta = fetch_token_metadata(e.token)
-        if meta:
-            if not symbol:
-                symbol = str(meta.get("symbol") or "").strip().upper()
-            if not name:
-                name = str(meta.get("name") or "").strip()
     if not symbol:
         symbol = "UNK"
     if not name:
@@ -477,6 +709,7 @@ def _build_overview_lines(
 ) -> list[str]:
     return [
         f"**{name}**  `${symbol}`",
+        f"CA: `{shorten_address(full_addr)}`",
         f"`{full_addr}`",
         *lines,
     ]
@@ -507,7 +740,8 @@ def _format_candidate_like(e: Event, description: str) -> dict:
 
     metrics = _extract_metrics(e)
     lifecycle = str(metrics.get("lifecycle") or "")
-    confidence_pct = render_confidence_pct(_display_confidence_score(e, attention_score))
+    confidence_score = _display_confidence_score(e, attention_score)
+    confidence_pct = render_confidence_pct(confidence_score)
     mc_value = metrics.get("market_cap")
     liq_value = metrics.get("liq")
     liq_mc = "—"
@@ -517,69 +751,61 @@ def _format_candidate_like(e: Event, description: str) -> dict:
     except Exception:
         liq_mc = "—"
 
-    fields = [
-        _summary_field("Attention", f"`{format_metric_number(attention_score, decimals=2, missing_label='N/A')}`"),
-        _summary_field("Risk", f"`{_metric_display(e.extra if isinstance(e.extra, dict) else {}, 'risk_score')}`"),
-        _summary_field("Confidence", f"`{confidence_pct}`"),
-        _summary_field("Conviction", f"`{_conviction_label(attention_score, risk_score, str(metrics.get('lifecycle') or ''))}`"),
-        {
-            "name": "Overview",
-            "value": _section_lines(
-                _build_overview_lines(
-                    symbol,
-                    name,
-                    full_addr,
-                    _token_risk_lines(e.extra if isinstance(e.extra, dict) else {}, lifecycle, risk_score, attention_score),
-                )
-            ),
-            "inline": False,
-        },
-        {
-            "name": "Tape",
-            "value": _section_lines([
-                _market_tape(metrics),
-                f"Structure: attention {_score_band(attention_score)} / risk {_score_band(risk_score, invert=True)}",
-            ]),
-            "inline": False,
-        },
-        {
-            "name": "Market",
-            "value": _section_lines(_market_snapshot(metrics) + [f"Liq / MC: {liq_mc}"]),
-            "inline": False,
-        },
-        {
-            "name": "Stats",
-            "value": _section_lines([_stats_lines(metrics)]),
-            "inline": True,
-        },
-        {
-            "name": "Signals",
-            "value": _section_lines([_attention_signal_lines(e, metrics.get("risk_flags"))]),
-            "inline": True,
-        },
-        {
-            "name": "Security",
-            "value": _section_lines([_security_lines(e, metrics, risk_score)]),
-            "inline": True,
-        },
-        {
-            "name": "Why It Triggered",
-            "value": _section_lines([_reason_stack(e)]),
-            "inline": False,
-        },
-        {
-            "name": "Links",
-            "value": _links_lines(token, metrics),
-            "inline": False,
-        },
-    ]
+    vm = SignalViewModel(
+        token=token,
+        symbol=symbol,
+        name=name,
+        lifecycle=lifecycle,
+        attention_score=attention_score,
+        risk_score=risk_score,
+        confidence_score=confidence_score,
+        elite_score=e.extra.get("elite_score") if isinstance(e.extra, dict) and isinstance(e.extra.get("elite_score"), int) else None,
+        market=metrics,
+    )
+    conviction = _conviction_label(vm.attention_score, vm.risk_score, vm.lifecycle)
+    signal_type = _signal_type(e, vm.attention_score, vm.risk_score)
+    fields = _finalize_fields(
+        [
+                _decision_field(e.extra if isinstance(e.extra, dict) else {}, confidence_pct, vm.lifecycle, conviction, vm.confidence_score, vm.risk_score),
+            {
+                "name": "Token Identity",
+                "value": _section_lines(
+                    _build_overview_lines(
+                        symbol,
+                        name,
+                        full_addr,
+                        _token_risk_lines(e.extra if isinstance(e.extra, dict) else {}, vm.lifecycle, vm.risk_score, vm.attention_score),
+                    )
+                ),
+                "inline": False,
+            },
+            {
+                "name": "Market Snapshot",
+                "value": _section_lines([_market_tape(metrics)] + _market_snapshot(metrics) + [f"Liq / MC: {liq_mc}"]),
+                "inline": False,
+            },
+            {
+                "name": "Flow + Structure",
+                    "value": _section_lines([_build_flow_section(metrics, vm.attention_score, vm.risk_score)]),
+                "inline": True,
+            },
+            {
+                "name": "Quality",
+                    "value": _section_lines([_build_quality_section(e, metrics, vm.risk_score, vm.confidence_score)]),
+                "inline": True,
+            },
+            _social_field(e),
+            _trigger_field(e),
+            _links_field(token, metrics),
+        ]
+    )
 
     embed = {
-        "title": _candidate_header(attention_score, risk_score),
-        "description": f"{description}\n{_summary_blurb(attention_score, risk_score, lifecycle)}\n",
-        "color": SLATE if attention_score is None or attention_score < 0.85 else AMBER,
+        "title": _signal_title(signal_type, vm.symbol),
+        "description": f"{description}\n{_summary_blurb(vm.attention_score, vm.risk_score, vm.lifecycle)}\n",
+        "color": get_signal_color(signal_type, vm.risk_score),
         "fields": fields,
-        "footer": {"text": "Signal Engine / Radar Deck"},
+        "footer": {"text": truncate_text(f"Signal Engine  Radar Deck  {e.type}", 2048)},
     }
     return {"embeds": [embed]}
 
@@ -597,7 +823,8 @@ def format_discord(e: Event) -> dict:
         ascore = to_optional_float(get_metric_value(e.extra, "attention_score")) if isinstance(e.extra, dict) else None
         metrics = _extract_metrics(e)
         lifecycle = str(metrics.get("lifecycle") or "")
-        confidence_pct = render_confidence_pct(_display_confidence_score(e, ascore))
+        confidence_score = _display_confidence_score(e, ascore)
+        confidence_pct = render_confidence_pct(confidence_score)
         mc_value = metrics.get("market_cap")
         liq_value = metrics.get("liq")
         liq_mc = "—"
@@ -607,91 +834,62 @@ def format_discord(e: Event) -> dict:
         except Exception:
             liq_mc = "—"
 
-        fields = [
-            _summary_field("Final Score", f"`{e.confidence:.2f}`"),
-            _summary_field("Risk", f"`{_metric_display(e.extra if isinstance(e.extra, dict) else {}, 'risk_score')}`"),
-            _summary_field("Confidence", f"`{confidence_pct}`"),
-            _summary_field("Conviction", f"`{_conviction_label(ascore, rscore, str(metrics.get('lifecycle') or ''))}`"),
-            {
-                "name": "Overview",
-                "value": _section_lines(
-                    _build_overview_lines(
-                        symbol,
-                        name,
-                        full_addr,
-                        _token_risk_lines(e.extra if isinstance(e.extra, dict) else {}, lifecycle, rscore, ascore),
-                    )
-                ),
-                "inline": False,
-            }
-        ]
-        fields.append(
-            {
-                "name": "Tape",
-                "value": _section_lines([
-                    _market_tape(metrics),
-                    f"Structure: attention {_score_band(ascore)} / risk {_score_band(rscore, invert=True)}",
-                ]),
-                "inline": False,
-            }
+        vm = SignalViewModel(
+            token=token,
+            symbol=symbol,
+            name=name,
+            lifecycle=lifecycle,
+            attention_score=ascore,
+            risk_score=rscore,
+            confidence_score=confidence_score,
+            elite_score=e.extra.get("elite_score") if isinstance(e.extra, dict) and isinstance(e.extra.get("elite_score"), int) else None,
+            market=metrics,
         )
-        fields.append(
-            {
-                "name": "Market",
-                "value": _section_lines(_market_snapshot(metrics) + [f"Liq / MC: {liq_mc}"]),
-                "inline": False,
-            }
-        )
-        fields.append(
-            {
-                "name": "Stats",
-                "value": _section_lines([_stats_lines(metrics)]),
-                "inline": True,
-            }
-        )
-        fields.append(
-            {
-                "name": "Signals",
-                "value": _section_lines([_attention_signal_lines(e, metrics.get("risk_flags"))]),
-                "inline": True,
-            }
-        )
-        fields.append(
-            {
-                "name": "Security",
-                "value": _section_lines([_security_lines(e, metrics, rscore)]),
-                "inline": True,
-            }
-        )
-        fields.append(
-            {
-                "name": "Why It Triggered",
-                "value": _section_lines([_reason_stack(e)]),
-                "inline": False,
-            }
-        )
-        if reasons:
-            fields.append(
+        conviction = _conviction_label(vm.attention_score, vm.risk_score, vm.lifecycle)
+        signal_type = _signal_type(e, vm.attention_score, vm.risk_score)
+        fields = _finalize_fields(
+            [
+                _decision_field(e.extra if isinstance(e.extra, dict) else {}, confidence_pct, vm.lifecycle, conviction, vm.confidence_score, vm.risk_score),
                 {
-                    "name": "Why Promoted",
-                    "value": _section_lines([f"- {r}" for r in reasons]),
+                    "name": "Token Identity",
+                    "value": _section_lines(
+                        _build_overview_lines(
+                            symbol,
+                            name,
+                            full_addr,
+                            _token_risk_lines(e.extra if isinstance(e.extra, dict) else {}, vm.lifecycle, vm.risk_score, vm.attention_score),
+                        )
+                    ),
                     "inline": False,
-                }
-            )
-        fields.append(
-            {
-                "name": "Links",
-                "value": _links_lines(token, metrics),
-                "inline": False,
-            }
+                },
+                {
+                    "name": "Market Snapshot",
+                    "value": _section_lines([_market_tape(metrics)] + _market_snapshot(metrics) + [f"Liq / MC: {liq_mc}"]),
+                    "inline": False,
+                },
+                {
+                    "name": "Flow + Structure",
+                    "value": _section_lines([_build_flow_section(metrics, vm.attention_score, vm.risk_score)]),
+                    "inline": True,
+                },
+                {
+                    "name": "Quality",
+                    "value": _section_lines([_build_quality_section(e, metrics, vm.risk_score, vm.confidence_score)]),
+                    "inline": True,
+                },
+                _social_field(e),
+                _trigger_field(e),
+                {"name": "Why Promoted", "value": _section_lines([f"- {_pretty_reason(r)}" for r in reasons]), "inline": False} if reasons else None,
+                _links_field(token, metrics),
+            ]
         )
 
         embed = {
-            "title": _promoted_header(e.confidence),
-            "description": f"Validated by layered gates.\n{_summary_blurb(ascore, rscore, lifecycle)}\n",
-            "color": DARK_RED,
+            "title": _signal_title(signal_type, vm.symbol),
+            "description": f"Validated by layered gates.\n{_summary_blurb(vm.attention_score, vm.risk_score, vm.lifecycle)}\n",
+            "color": get_signal_color(signal_type, vm.risk_score),
             "fields": fields,
-            "footer": {"text": "Signal Engine / Alpha Deck"},
+            "footer": {"text": truncate_text(f"Signal Engine  Alpha Deck  {e.type}", 2048)},
         }
         return {"embeds": [embed]}
 

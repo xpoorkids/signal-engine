@@ -2,6 +2,22 @@ import html
 import re
 from typing import Any
 
+from app.services.signal_presentation import (
+    SignalViewModel,
+    confidence_band,
+    flow_bias_label,
+    format_currency_compact,
+    format_percent_compact,
+    momentum_label,
+    quality_tier,
+    risk_band,
+    score_band,
+    shorten_address,
+    signal_color,
+    signal_title,
+    signal_type,
+    summary_blurb,
+)
 from app.services.signal_metrics import get_metric_meta, metric_label, metric_state, to_optional_float
 from app.services.wallet_service import wallet_risk_score
 from worker.discord import format_discord
@@ -427,43 +443,120 @@ def render_review_html(review: dict[str, Any]) -> str:
     social = review.get("social") if isinstance(review.get("social"), dict) else {}
     links = review.get("links") if isinstance(review.get("links"), dict) else {}
     rug_check = review.get("rug_check") if isinstance(review.get("rug_check"), dict) else {}
+    metric_states = review.get("metric_states") if isinstance(review.get("metric_states"), dict) else {}
 
-    name = html.escape(str(review.get("name") or "UNK"))
-    symbol = html.escape(str(review.get("symbol") or "UNK"))
-    token = html.escape(str(review.get("token") or ""))
+    token_raw = str(review.get("token") or "")
+    symbol_raw = str(review.get("symbol") or "UNK").upper()
+    name_raw = str(review.get("name") or symbol_raw)
     lifecycle = str(review.get("lifecycle") or "unknown")
-    lifecycle_label = "DEX" if lifecycle == "dex" else "BONDING CURVE"
     attention = to_optional_float(review.get("attention_score"))
     risk = to_optional_float(review.get("risk_score"))
     elite = review.get("elite_score") if isinstance(review.get("elite_score"), int) else None
+    confidence = attention
 
-    if attention is not None and attention >= 0.85:
-        stage = "BREAKOUT"
-    elif attention is not None and attention >= 0.70:
-        stage = "SETUP"
-    else:
-        stage = "WATCH"
+    vm = SignalViewModel(
+        token=token_raw,
+        symbol=symbol_raw,
+        name=name_raw,
+        lifecycle=lifecycle,
+        attention_score=attention,
+        risk_score=risk,
+        confidence_score=confidence,
+        elite_score=elite,
+        market=market,
+        social=social,
+        links=links,
+    )
 
-    attention_reasons = review.get("attention_reasons") if isinstance(review.get("attention_reasons"), list) else []
-    risk_reasons = review.get("risk_reasons") if isinstance(review.get("risk_reasons"), list) else []
-    reasons = attention_reasons + risk_reasons
-    if not reasons:
-        reasons = ["Signals are still developing"]
+    signal_class = signal_type("review", vm.attention_score, vm.risk_score)
+    title = html.escape(signal_title(signal_class, vm.symbol))
+    quick_read = html.escape(summary_blurb(vm.attention_score, vm.risk_score, vm.lifecycle))
+    lifecycle_label_raw = (
+        "Dex"
+        if vm.lifecycle == "dex"
+        else "Bonding Curve"
+        if vm.lifecycle == "bonding_curve"
+        else vm.lifecycle.title()
+    )
+    lifecycle_label = html.escape(lifecycle_label_raw)
+    confidence_value = (
+        f"{int(round(vm.confidence_score * 100))}%"
+        if vm.confidence_score is not None
+        else metric_label(get_metric_meta(review, "confidence"))
+    )
+    risk_value = f"{risk:.2f}" if risk is not None else metric_label(get_metric_meta(review, "risk_score"))
+    attention_value = (
+        f"{attention:.2f}" if attention is not None else metric_label(get_metric_meta(review, "attention_score"))
+    )
+    conviction = html.escape(
+        "Momentum confirmed"
+        if vm.attention_score is not None and vm.attention_score >= 0.85 and (vm.risk_score is None or vm.risk_score <= 0.15)
+        else "Early follow-through"
+        if vm.attention_score is not None and vm.attention_score >= 0.65
+        else "Developing flow"
+        if vm.attention_score is not None
+        else "Not computed"
+    )
+    decision_strip = " ".join(
+        [
+            f"<span class=\"metric-pill\">CONF {html.escape(confidence_value)}</span>",
+            f"<span class=\"metric-pill\">RISK {html.escape(risk_value)}</span>",
+            f"<span class=\"metric-pill\">ATTN {html.escape(attention_value)}</span>",
+            f"<span class=\"metric-pill\">LIFE {html.escape(vm.lifecycle.upper() if vm.lifecycle else 'N/A')}</span>",
+        ]
+    )
 
-    x_count = _int(social.get("tweet_count"))
-    x_authors = _int(social.get("unique_authors"))
-    x_likes = _int(social.get("likes"))
+    buys = market.get("txns_m5_buys") if isinstance(market.get("txns_m5_buys"), int) else _int(market.get("txns_m5_buys")) if market.get("txns_m5_buys") is not None else None
+    sells = market.get("txns_m5_sells") if isinstance(market.get("txns_m5_sells"), int) else _int(market.get("txns_m5_sells")) if market.get("txns_m5_sells") is not None else None
+    flow_bias = flow_bias_label(buys, sells) or "Unavailable"
+    momentum = momentum_label(vm.attention_score, market)
+    structure = f"{score_band(vm.attention_score)} attention / {score_band(vm.risk_score, invert=True)} risk"
+    tier = quality_tier(vm.attention_score, vm.risk_score, vm.elite_score)
+
     holder_risk = security.get("holder_risk") if isinstance(security.get("holder_risk"), dict) else {}
+    holder_distribution = "Concentrated" if str(holder_risk.get("risk") or "") in ("warn", "high") else "Organic / unknown"
+    top_holder = to_optional_float(holder_risk.get("top_holder_pct"))
     rug_score = _int(rug_check.get("score"))
     rug_verdict = str(rug_check.get("verdict") or "low").upper()
     rug_flags = rug_check.get("flags") if isinstance(rug_check.get("flags"), list) else []
+    attention_reasons = review.get("attention_reasons") if isinstance(review.get("attention_reasons"), list) else []
+    risk_reasons = review.get("risk_reasons") if isinstance(review.get("risk_reasons"), list) else []
+    reasons = [str(item) for item in (attention_reasons + risk_reasons) if isinstance(item, str)][:5]
 
-    def chip(label: str, value: str, tone: str = "") -> str:
-        tone_class = f" chip-{tone}" if tone else ""
-        return f'<div class="chip{tone_class}"><span>{html.escape(label)}</span><strong>{html.escape(value)}</strong></div>'
+    chips = [
+        ("Confidence", confidence_value, confidence_band(vm.confidence_score)),
+        ("Risk", risk_value, risk_band(vm.risk_score)),
+        ("Attention", attention_value, score_band(vm.attention_score)),
+        ("Lifecycle", lifecycle_label, ""),
+        ("Tier", tier, ""),
+    ]
 
-    def stat(label: str, value: str) -> str:
-        return f'<div class="stat"><span>{html.escape(label)}</span><strong>{html.escape(value)}</strong></div>'
+    market_strip_parts = [
+        f"LIQ {format_currency_compact(market.get('liquidity_usd'))}" if market.get("liquidity_usd") is not None else "",
+        f"MC {format_currency_compact(market.get('market_cap'))}" if market.get("market_cap") is not None else "",
+        f"VOL5 {format_currency_compact(market.get('volume_m5'))}" if market.get("volume_m5") is not None else "",
+        f"AGE {_fmt_num(market.get('age_minutes'), 1)}m" if market.get("age_minutes") is not None else "",
+        f"M5 {format_percent_compact(market.get('price_change_m5'), decimals=1)}" if market.get("price_change_m5") is not None else "",
+    ]
+    market_strip = " ".join(
+        f"<span class=\"metric-pill\">{html.escape(part)}</span>" for part in market_strip_parts if part
+    )
+    liq_mc = "--"
+    if to_optional_float(market.get("market_cap")) and to_optional_float(market.get("liquidity_usd")) is not None:
+        liq_mc = f"{round((float(market.get('liquidity_usd')) / float(market.get('market_cap'))) * 100)}%"
+
+    def chip(label: str, value: str, sub: str) -> str:
+        return (
+            f'<div class="chip"><span>{html.escape(label)}</span>'
+            f"<strong>{html.escape(value)}</strong>"
+            f'<em>{html.escape(sub)}</em></div>'
+        )
+
+    def panel(title_text: str, body: str) -> str:
+        return f'<section class="panel"><h3>{html.escape(title_text)}</h3>{body}</section>'
+
+    def kv(label: str, value: str) -> str:
+        return f'<div class="kv"><span>{html.escape(label)}</span><strong>{html.escape(value)}</strong></div>'
 
     def link_button(label: str, url: Any) -> str:
         if not isinstance(url, str) or not url:
@@ -471,301 +564,221 @@ def render_review_html(review: dict[str, Any]) -> str:
         safe_url = html.escape(url, quote=True)
         return f'<a class="link-btn" href="{safe_url}" target="_blank" rel="noopener noreferrer">{html.escape(label)}</a>'
 
-    reason_items = "".join(f"<li>{html.escape(str(reason))}</li>" for reason in reasons[:8])
+    def safe_join(items: list[str]) -> str:
+        return "".join(item for item in items if item)
+
+    social_bits = []
+    if social.get("tweet_count") or social.get("unique_authors"):
+        social_bits.append(kv("X Momentum", f"{_int(social.get('tweet_count'))} mentions / {_int(social.get('unique_authors'))} authors"))
+    if social.get("likes"):
+        social_bits.append(kv("X Likes", str(_int(social.get("likes")))))
+
+    reason_items = "".join(f"<li>{html.escape(item)}</li>" for item in reasons)
+    quality_bits = [
+        kv("Confidence", f"{confidence_value} ({confidence_band(vm.confidence_score)})"),
+        kv("Risk Score", f"{risk_value} ({risk_band(vm.risk_score)})"),
+        kv("Elite Score", str(vm.elite_score) if vm.elite_score is not None else metric_label(get_metric_meta(review, "elite_score"))),
+        kv("Tier", tier),
+        kv("Holder Distribution", holder_distribution),
+    ]
+    action_links = safe_join(
+        [
+            link_button("Dexscreener", links.get("dexscreener")),
+            link_button("Birdeye", links.get("birdeye")),
+            link_button("X", links.get("twitter_url")),
+            link_button("Web", links.get("website_url")),
+            link_button("TG", links.get("telegram_url")),
+        ]
+    )
+    social_html = safe_join(social_bits) if social_bits else kv("X Momentum", "N/A")
+    token_panel = panel(
+        "Token Identity",
+        (
+            '<div class="stack">'
+            f'<div><strong>{html.escape(vm.name)}</strong> <span class="mono">${html.escape(vm.symbol)}</span></div>'
+            f'<div class="mono">CA: {html.escape(shorten_address(vm.token))}</div>'
+            f'<div class="mono">{html.escape(vm.token)}</div>'
+            f"<div>Lifecycle: <strong>{lifecycle_label}</strong></div>"
+            "</div>"
+        ),
+    )
+    actions_panel = panel(
+        "Actions",
+        f'<div class="links">{action_links}</div>',
+    )
+    market_panel = panel(
+        "Market Snapshot",
+        (
+            '<div class="stack">'
+            f'<div>{market_strip}</div>'
+            '<div class="kv-grid">'
+            f'{kv("Liquidity", format_currency_compact(market.get("liquidity_usd")))}'
+            f'{kv("Market Cap", format_currency_compact(market.get("market_cap")))}'
+            f'{kv("5m Volume", format_currency_compact(market.get("volume_m5")))}'
+            f'{kv("Age", (_fmt_num(market.get("age_minutes"), 1) + "m") if market.get("age_minutes") is not None else "N/A")}'
+            f'{kv("5m Change", format_percent_compact(market.get("price_change_m5"), decimals=1))}'
+            f'{kv("Liq / MC", liq_mc)}'
+            "</div>"
+            "</div>"
+        ),
+    )
+    flow_panel = panel(
+        "Flow + Structure",
+        (
+            '<div class="kv-grid">'
+            f'{kv("5m Buy Flow", str(buys) if buys is not None else "N/A")}'
+            f'{kv("5m Sell Flow", str(sells) if sells is not None else "N/A")}'
+            f'{kv("Flow Bias", flow_bias)}'
+            f'{kv("Momentum", momentum)}'
+            f'{kv("Structure", structure)}'
+            f'{kv("Lifecycle", lifecycle_label_raw)}'
+            "</div>"
+        ),
+    )
+    quality_panel = panel("Quality", f'<div class="kv-grid">{"".join(quality_bits)}</div>')
+    intelligence_panel = panel(
+        "Signal Intelligence",
+        f'<ul class="list">{reason_items}</ul>' if reason_items else '<div class="subtitle">No trigger explanation available.</div>',
+    )
+    security_panel = panel(
+        "Security",
+        (
+            '<div class="kv-grid">'
+            f'{kv("Risk Score", f"{risk_value} ({risk_band(vm.risk_score)})")}'
+            f'{kv("Elite Score", str(vm.elite_score) if vm.elite_score is not None else metric_label(get_metric_meta(review, "elite_score")))}'
+            f'{kv("Holder Distribution", holder_distribution)}'
+            f'{kv("Top Holder", format_percent_compact((top_holder or 0.0) * 100.0, decimals=1) if top_holder is not None else "N/A")}'
+            f'{kv("Mint Auth", "ON" if security.get("mint_authority_active") else "OFF")}'
+            f'{kv("Freeze Auth", "ON" if security.get("freeze_authority_active") else "OFF")}'
+            f'{kv("LP Locked", "YES" if security.get("liquidity_locked") is True else "NO" if security.get("liquidity_locked") is False else "UNK")}'
+            f'{kv("Rug Check", f"{rug_verdict} / {rug_score}")}'
+            "</div>"
+            f'<div class="subtitle">{html.escape(", ".join(rug_flags) if rug_flags else "No major rug flags")}</div>'
+        ),
+    )
+    social_panel = panel(
+        "Social",
+        f'<div class="kv-grid">{social_html}</div>',
+    )
 
     html_out = f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Signal Engine Review // {symbol}</title>
+  <title>Signal Engine Review // {html.escape(vm.symbol)}</title>
   <style>
     :root {{
-      --panel: rgba(11, 24, 36, 0.88);
-      --panel-2: rgba(16, 33, 48, 0.92);
-      --line: rgba(123, 162, 196, 0.18);
-      --text: #e8f0f7;
-      --muted: #8ea4b8;
-      --gold: #f3bd3f;
-      --teal: #49dcb1;
-      --red: #ff6b6b;
-      --shadow: 0 20px 60px rgba(0,0,0,0.45);
+      --bg: #07111a;
+      --panel: rgba(10, 20, 31, 0.86);
+      --panel-2: rgba(15, 30, 46, 0.94);
+      --line: rgba(120, 160, 198, 0.16);
+      --text: #edf4fb;
+      --muted: #89a1b5;
+      --accent: {signal_color(signal_class, vm.risk_score)};
+      --shadow: 0 24px 70px rgba(0,0,0,.42);
     }}
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
+      color: var(--text);
       font-family: "Segoe UI", "SF Pro Display", sans-serif;
       background:
-        radial-gradient(circle at top left, rgba(243,189,63,0.18), transparent 28%),
-        radial-gradient(circle at top right, rgba(73,220,177,0.12), transparent 24%),
-        linear-gradient(180deg, #071019 0%, #0b1723 100%);
-      color: var(--text);
-      min-height: 100vh;
+        radial-gradient(circle at top left, rgba(244,196,48,.18), transparent 24%),
+        radial-gradient(circle at bottom right, rgba(47,107,255,.18), transparent 26%),
+        linear-gradient(180deg, #061019 0%, #09131d 100%);
     }}
-    .shell {{
-      max-width: 1180px;
-      margin: 0 auto;
-      padding: 28px 18px 40px;
-    }}
-    .hero {{
-      display: grid;
-      grid-template-columns: 1.3fr .7fr;
-      gap: 18px;
-      margin-bottom: 18px;
-    }}
-    .card {{
+    .shell {{ max-width: 1240px; margin: 0 auto; padding: 28px 18px 40px; }}
+    .hero {{ display:grid; grid-template-columns:1.35fr .65fr; gap:18px; margin-bottom:18px; }}
+    .panel {{
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 22px;
+      border-radius: 24px;
       box-shadow: var(--shadow);
-      backdrop-filter: blur(10px);
-    }}
-    .hero-main {{
+      backdrop-filter: blur(12px);
       padding: 22px;
+    }}
+    .command {{
       background:
-        linear-gradient(135deg, rgba(243,189,63,0.12), rgba(124,183,255,0.08)),
+        linear-gradient(135deg, rgba(244,196,48,.10), rgba(47,107,255,.08)),
         var(--panel);
     }}
-    .eyebrow {{
-      color: var(--gold);
-      font-size: 12px;
-      font-weight: 700;
-      letter-spacing: .18em;
-      text-transform: uppercase;
+    .eyebrow {{ color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .18em; }}
+    .title {{ display:flex; justify-content:space-between; gap:16px; margin:12px 0 10px; align-items:flex-start; }}
+    h1 {{ margin:0; font-size: clamp(28px, 4vw, 42px); line-height: 1; }}
+    .subtitle {{ color: var(--muted); margin-top: 10px; max-width: 760px; line-height: 1.5; }}
+    .strip {{ margin-top: 18px; font-size: 14px; line-height: 1.9; display:flex; flex-wrap:wrap; gap:8px; }}
+    .conviction {{ margin-top: 10px; font-size: 15px; }}
+    .badge {{
+      padding: 10px 14px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+      color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); font-weight: 700; white-space: nowrap;
+      letter-spacing: .12em; text-transform: uppercase; font-size: 12px;
     }}
-    .title-row {{
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 16px;
-      margin-top: 10px;
+    .chips {{ display:grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 10px; margin-top: 18px; }}
+    .chip {{ background: var(--panel-2); border: 1px solid var(--line); border-radius: 18px; padding: 12px 14px; }}
+    .chip span, .kv span {{ display:block; font-size:11px; color: var(--muted); text-transform: uppercase; letter-spacing: .12em; margin-bottom: 6px; }}
+    .chip strong, .kv strong {{ display:block; font-size: 18px; }}
+    .chip em {{ display:block; margin-top: 6px; color: var(--muted); font-style: normal; font-size: 12px; }}
+    .metric-pill {{
+      display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; border:1px solid var(--line);
+      background: var(--panel-2); color: var(--text); font-size:12px; letter-spacing:.08em; text-transform: uppercase;
     }}
-    .title h1 {{
-      margin: 0;
-      font-size: clamp(28px, 4vw, 44px);
-      line-height: 1;
-    }}
-    .title .sub {{
-      margin-top: 8px;
-      color: var(--muted);
-      font-size: 14px;
-      word-break: break-all;
-    }}
-    .stage {{
-      border: 1px solid rgba(243,189,63,0.28);
-      color: var(--gold);
-      background: rgba(243,189,63,0.08);
-      padding: 10px 14px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 800;
-      letter-spacing: .14em;
-      text-transform: uppercase;
-      white-space: nowrap;
-    }}
-    .chips {{
-      display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
-      gap: 10px;
-      margin-top: 18px;
-    }}
-    .chip {{
-      padding: 12px 14px;
-      border-radius: 16px;
-      border: 1px solid var(--line);
-      background: var(--panel-2);
-    }}
-    .chip span {{
-      display: block;
-      color: var(--muted);
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: .12em;
-      margin-bottom: 6px;
-    }}
-    .chip strong {{
-      font-size: 18px;
-      font-weight: 700;
-    }}
-    .chip-good strong {{ color: var(--teal); }}
-    .chip-warn strong {{ color: var(--gold); }}
-    .chip-bad strong {{ color: var(--red); }}
-    .hero-side {{
-      padding: 22px;
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-      gap: 18px;
-    }}
-    .hero-side h3, .section h3 {{
-      margin: 0 0 12px;
-      font-size: 13px;
-      letter-spacing: .12em;
-      text-transform: uppercase;
-      color: var(--muted);
-    }}
-    .tape {{
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-    }}
-    .stat {{
-      padding: 12px 14px;
-      border-radius: 16px;
-      background: var(--panel-2);
-      border: 1px solid var(--line);
-    }}
-    .stat span {{
-      display: block;
-      font-size: 11px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: .11em;
-      margin-bottom: 6px;
-    }}
-    .stat strong {{
-      font-size: 18px;
-    }}
-    .grid {{
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 18px;
-    }}
-    .section {{
-      padding: 20px;
-    }}
-    .list {{
-      margin: 0;
-      padding-left: 18px;
-      color: var(--text);
-    }}
-    .list li {{
-      margin: 0 0 8px;
-    }}
-    .muted {{
-      color: var(--muted);
-    }}
-    .link-row {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 10px;
-    }}
+    .grid {{ display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 18px; }}
+    .grid-wide {{ display:grid; grid-template-columns: 1.2fr .8fr; gap: 18px; margin-bottom: 18px; }}
+    h3 {{ margin:0 0 14px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .16em; }}
+    .mono {{ font-family: "Consolas", "SFMono-Regular", monospace; }}
+    .kv-grid {{ display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }}
+    .kv {{ background: var(--panel-2); border:1px solid var(--line); border-radius: 16px; padding: 12px 14px; }}
+    .stack {{ display:grid; gap: 10px; }}
+    .list {{ margin:0; padding-left: 18px; }}
+    .list li {{ margin-bottom: 8px; line-height: 1.45; }}
+    .links {{ display:flex; flex-wrap:wrap; gap: 10px; }}
     .link-btn {{
-      text-decoration: none;
-      color: var(--text);
-      border: 1px solid var(--line);
-      background: var(--panel-2);
-      padding: 10px 14px;
-      border-radius: 999px;
-      font-size: 13px;
-      font-weight: 600;
+      text-decoration:none; color: var(--text); background: var(--panel-2); border:1px solid var(--line);
+      border-radius:999px; padding:10px 14px; font-size:13px; font-weight:600;
     }}
-    .footer {{
-      margin-top: 18px;
-      padding: 14px 18px;
-      border-radius: 16px;
-      border: 1px solid var(--line);
-      background: rgba(7, 16, 25, 0.75);
-      color: var(--muted);
-      font-size: 12px;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-    }}
-    @media (max-width: 1180px) {{
-      .grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-    }}
-    @media (max-width: 980px) {{
-      .hero, .grid {{ grid-template-columns: 1fr; }}
-      .chips {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    .footer {{ margin-top:18px; padding: 14px 18px; border:1px solid var(--line); border-radius: 18px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; font-size: 12px; }}
+    @media (max-width: 1020px) {{
+      .hero, .grid-wide, .grid {{ grid-template-columns: 1fr; }}
+      .chips {{ grid-template-columns: repeat(2, minmax(0,1fr)); }}
     }}
     @media (max-width: 640px) {{
-      .shell {{ padding: 16px 12px 28px; }}
-      .title-row {{ flex-direction: column; }}
-      .chips, .tape {{ grid-template-columns: 1fr; }}
+      .shell {{ padding: 14px 12px 28px; }}
+      .title {{ flex-direction: column; }}
+      .chips, .kv-grid {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
 <body>
   <div class="shell">
-    <div class="hero">
-      <section class="card hero-main">
-        <div class="eyebrow">Signal Engine Review</div>
-        <div class="title-row">
-          <div class="title">
-            <h1>{name} <span class="muted">${symbol}</span></h1>
-            <div class="sub">{token}</div>
-          </div>
-          <div class="stage">SE // {html.escape(stage)}</div>
-        </div>
-        <div class="chips">
-          {chip("Attention", f"{attention * 100:.1f}%" if attention is not None else metric_label(get_metric_meta(review, "attention_score")), "good" if attention is not None and attention >= 0.7 else "warn")}
-          {chip("Risk", f"{risk * 100:.1f}%" if risk is not None else metric_label(get_metric_meta(review, "risk_score")), "bad" if risk is not None and risk >= 0.4 else "warn" if risk is not None and risk >= 0.2 else "good")}
-          {chip("Rug", rug_verdict, "bad" if rug_verdict == "HIGH" else "warn" if rug_verdict == "WATCH" else "good")}
-          {chip("Elite", str(elite) if elite is not None else metric_label(get_metric_meta(review, "elite_score")), "good" if elite is not None and elite >= 8 else "warn" if elite is not None and elite >= 4 else "bad")}
-          {chip("Lifecycle", lifecycle_label, "warn" if lifecycle == "bonding_curve" else "good")}
-        </div>
-      </section>
-      <aside class="card hero-side">
+    <section class="panel command">
+      <div class="eyebrow">Signal Engine Review</div>
+      <div class="title">
         <div>
-          <h3>Tape</h3>
-          <div class="tape">
-            {stat("Liquidity", _fmt_num(market.get("liquidity_usd"), prefix="$"))}
-            {stat("Market Cap", _fmt_num(market.get("market_cap"), prefix="$"))}
-            {stat("Volume 5m", _fmt_num(market.get("volume_m5"), prefix="$"))}
-            {stat("Volume 1h", _fmt_num(market.get("volume_h1"), prefix="$"))}
-            {stat("M5 Change", _fmt_pct(market.get("price_change_m5"), 1))}
-            {stat("Age", _fmt_num(market.get("age_minutes"), 1) + "m" if market.get("age_minutes") is not None else "--")}
-          </div>
+          <h1>{title}</h1>
+          <div class="subtitle">{quick_read}</div>
         </div>
-        <div>
-          <h3>Links</h3>
-          <div class="link-row">
-            {link_button("DexScreener", links.get("dexscreener"))}
-            {link_button("Birdeye", links.get("birdeye"))}
-            {link_button("Website", links.get("website_url"))}
-            {link_button("X", links.get("twitter_url"))}
-            {link_button("Telegram", links.get("telegram_url"))}
-          </div>
-        </div>
-      </aside>
+        <div class="badge">{html.escape(quality_tier(vm.attention_score, vm.risk_score, vm.elite_score))}</div>
+      </div>
+      <div class="strip">{decision_strip}</div>
+      <div class="conviction"><strong>Conviction:</strong> {conviction}</div>
+      <div class="chips">
+        {''.join(chip(label, value, sub) for label, value, sub in chips)}
+      </div>
+    </section>
+    <div class="grid-wide">
+      {token_panel}
+      {actions_panel}
     </div>
     <div class="grid">
-      <section class="card section">
-        <h3>Why It Triggered</h3>
-        <ul class="list">{reason_items}</ul>
-      </section>
-      <section class="card section">
-        <h3>Rug Check</h3>
-        <div class="tape">
-          {stat("Verdict", rug_verdict)}
-          {stat("Rug Score", str(rug_score))}
-          {stat("Top Holder", _fmt_pct((to_optional_float(holder_risk.get("top_holder_pct")) or 0.0) * 100.0, 1) if to_optional_float(holder_risk.get("top_holder_pct")) is not None else "N/A")}
-          {stat("Vol / Liq", f"{(_float(market.get('volume_m5')) / _float(market.get('liquidity_usd'))):.1f}x" if _float(market.get('liquidity_usd')) > 0 else "--")}
-        </div>
-        <div style="margin-top:12px" class="muted">{html.escape(', '.join(rug_flags) if rug_flags else 'No major rug flags')}</div>
-      </section>
-      <section class="card section">
-        <h3>Security</h3>
-        <div class="tape">
-          {stat("Mint Auth", "ON" if security.get("mint_authority_active") else "OFF")}
-          {stat("Freeze Auth", "ON" if security.get("freeze_authority_active") else "OFF")}
-          {stat("LP Locked", "YES" if security.get("liquidity_locked") is True else "NO" if security.get("liquidity_locked") is False else "UNK")}
-          {stat("Holder Risk", str(holder_risk.get("risk") or metric_label({"status": holder_risk.get("status"), "reason": holder_risk.get("reason")})).upper())}
-        </div>
-        <div style="margin-top:12px" class="muted">{html.escape(str(holder_risk.get("reason") or "holder_ok"))}</div>
-      </section>
-      <section class="card section">
-        <h3>Social</h3>
-        <div class="tape">
-          {stat("X Mentions", str(x_count))}
-          {stat("Authors", str(x_authors))}
-          {stat("Likes", str(x_likes))}
-          {stat("24h Move", _fmt_pct(market.get("price_change_h24"), 1))}
-        </div>
-      </section>
+      {market_panel}
+      {flow_panel}
+      {quality_panel}
+      {intelligence_panel}
+      {security_panel}
+      {social_panel}
     </div>
-    <div class="footer">Signal Engine // Contract Intelligence Deck</div>
+    <div class="footer">Signal Engine  Radar Deck  review</div>
   </div>
 </body>
 </html>"""
