@@ -815,6 +815,52 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
         )
     reason_quality.sort(key=lambda item: (-item["total"], item["reason"]))
 
+    threshold_guidance: list[dict[str, Any]] = []
+    for item in reason_quality:
+        total = int(item.get("total") or 0)
+        positive_rate = float(item.get("positive_rate") or 0.0)
+        fail_rate = float(item.get("fail_rate") or 0.0)
+        action = "hold"
+        rationale = "Not enough evidence to tune this blocker yet."
+        confidence = "low"
+
+        if total >= 10:
+            confidence = "high"
+        elif total >= 5:
+            confidence = "medium"
+
+        if total >= 5 and positive_rate >= 60.0 and positive_rate >= fail_rate + 20.0:
+            action = "relax_slightly"
+            rationale = "This blocker is excluding a meaningful share of setups that later worked."
+        elif total >= 5 and fail_rate >= 60.0 and fail_rate >= positive_rate + 20.0:
+            action = "tighten"
+            rationale = "This blocker is protecting the engine from a large share of failing setups."
+        elif total >= 3 and positive_rate >= 35.0 and fail_rate >= 35.0:
+            action = "review"
+            rationale = "This blocker is mixed. Review nearby thresholds before changing production gates."
+        elif total < 3:
+            action = "hold"
+            rationale = "Sample size is too small to justify a threshold change."
+
+        threshold_guidance.append(
+            {
+                "reason": item["reason"],
+                "action": action,
+                "confidence": confidence,
+                "sample_size": total,
+                "positive_rate": positive_rate,
+                "fail_rate": fail_rate,
+                "rationale": rationale,
+            }
+        )
+    threshold_guidance.sort(
+        key=lambda item: (
+            {"tighten": 0, "relax_slightly": 1, "review": 2, "hold": 3}.get(str(item["action"]), 4),
+            -int(item["sample_size"]),
+            str(item["reason"]),
+        )
+    )
+
     return {
         "lookback_hours": hours,
         "counts_by_decision": counts_by_decision,
@@ -828,6 +874,7 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
         "session_quality": session_quality,
         "conversion": conversion,
         "reason_quality": reason_quality[:25],
+        "threshold_guidance": threshold_guidance[:12],
     }
 
 
@@ -842,6 +889,7 @@ def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
     session_quality = summary.get("session_quality") or []
     conversion = summary.get("conversion") or {}
     reason_quality = summary.get("reason_quality") or []
+    threshold_guidance = summary.get("threshold_guidance") or []
 
     if counts_by_decision.get("candidate_gate_skip", 0) > 0:
         recs.append(
@@ -918,6 +966,23 @@ def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
                     ),
                 }
             )
+    for guidance in threshold_guidance[:3]:
+        action_text = {
+            "tighten": "Tighten",
+            "relax_slightly": "Relax slightly",
+            "review": "Review",
+            "hold": "Hold",
+        }.get(str(guidance.get("action") or "hold"), "Hold")
+        recs.append(
+            {
+                "title": f"Threshold: {guidance.get('reason')}",
+                "detail": (
+                    f"{action_text} with {guidance.get('confidence')} confidence. "
+                    f"Sample={int(guidance.get('sample_size') or 0)}, "
+                    f"positive={guidance.get('positive_rate')}%, fail={guidance.get('fail_rate')}%."
+                ),
+            }
+        )
 
     best_session = None
     best_sent = -1
@@ -981,6 +1046,7 @@ def render_diagnostics_html(hours: int = 24) -> str:
     session_quality = summary.get("session_quality") or []
     conversion = summary.get("conversion") or {}
     reason_quality = summary.get("reason_quality") or []
+    threshold_guidance = summary.get("threshold_guidance") or []
 
     def metric_card(label: str, value: Any) -> str:
         return (
@@ -1057,6 +1123,16 @@ def render_diagnostics_html(hours: int = 24) -> str:
         "</tr>"
         for item in reason_quality[:12]
     ) or "<tr><td colspan='4'>No blocker outcome data yet</td></tr>"
+
+    threshold_guidance_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('reason') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('action') or 'hold'))}</td>"
+        f"<td>{html.escape(str(item.get('confidence') or 'low'))}</td>"
+        f"<td>{int(item.get('sample_size') or 0)}</td>"
+        "</tr>"
+        for item in threshold_guidance[:10]
+    ) or "<tr><td colspan='4'>No threshold guidance yet</td></tr>"
 
     recent_rows = "".join(
         "<tr>"
@@ -1249,6 +1325,15 @@ def render_diagnostics_html(hours: int = 24) -> str:
             <tr><th>Reason</th><th>Total</th><th>Positive Rate</th><th>Fail Rate</th></tr>
           </thead>
           <tbody>{reason_quality_rows}</tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Threshold Guidance</h2>
+        <table>
+          <thead>
+            <tr><th>Reason</th><th>Action</th><th>Confidence</th><th>Sample</th></tr>
+          </thead>
+          <tbody>{threshold_guidance_rows}</tbody>
         </table>
       </section>
     </div>

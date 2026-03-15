@@ -526,10 +526,126 @@ def test_diagnostics_summary_builds_reason_quality_scorecards(tmp_path, monkeypa
     recommendations = sls.get_diagnostics_recommendations(hours=10_000)
 
     scorecards = {item["reason"]: item for item in summary["reason_quality"]}
+    guidance = {item["reason"]: item for item in summary["threshold_guidance"]}
     assert scorecards["buyers_low"]["total"] == 2
     assert scorecards["buyers_low"]["positive"] == 1
     assert scorecards["buyers_low"]["negative"] == 1
     assert scorecards["buyers_low"]["positive_rate"] == 50.0
     assert scorecards["dex_gate:liq<12000.0"]["negative"] == 1
+    assert guidance["buyers_low"]["action"] in {"review", "hold"}
+    assert guidance["buyers_low"]["sample_size"] == 2
     assert any(item["title"] == "Most Costly Blocker" for item in recommendations)
     assert any(item["title"] == "Most Protective Blocker" for item in recommendations)
+
+
+def test_threshold_guidance_recommends_relax_or_tighten(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    positive_ids = []
+    negative_ids = []
+    base_ts = 1_773_620_000
+    for offset in range(6):
+        positive_ids.append(
+            sls.record_signal_decision(
+                token=f"token-positive-{offset}",
+                event_type="candidate",
+                stage="candidate",
+                decision="candidate_gate_skip",
+                reasons=["attention<0.20"],
+                attention_score=0.19,
+                risk_score=0.22,
+                confidence_score=0.30,
+                lifecycle="dex",
+                ts_value=base_ts + offset,
+                source="test",
+            )
+        )
+        negative_ids.append(
+            sls.record_signal_decision(
+                token=f"token-negative-{offset}",
+                event_type="candidate",
+                stage="promoted",
+                decision="promotion_block",
+                reasons=["dex_gate:liq<12000.0"],
+                attention_score=0.42,
+                risk_score=0.28,
+                confidence_score=0.48,
+                lifecycle="dex",
+                ts_value=base_ts + 100 + offset,
+                source="test",
+            )
+        )
+
+    with sls._connect() as c:
+        for idx, signal_id in enumerate(positive_ids):
+            c.execute(
+                """
+                INSERT INTO signal_snapshots (
+                    signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                    volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                    txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                    outcome_label, snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    60,
+                    base_ts + 3600 + idx,
+                    "dex",
+                    18000,
+                    4200,
+                    3000,
+                    64.0,
+                    25.0,
+                    60.0,
+                    40,
+                    18,
+                    80.0,
+                    3.0,
+                    35.0,
+                    "worked",
+                    json.dumps({"outcome_label": "worked"}),
+                ),
+            )
+        for idx, signal_id in enumerate(negative_ids):
+            c.execute(
+                """
+                INSERT INTO signal_snapshots (
+                    signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                    volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                    txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                    outcome_label, snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    60,
+                    base_ts + 7200 + idx,
+                    "dex",
+                    7000,
+                    2600,
+                    700,
+                    65.0,
+                    -25.0,
+                    -45.0,
+                    20,
+                    70,
+                    -41.0,
+                    -42.0,
+                    -70.0,
+                    "failed",
+                    json.dumps({"outcome_label": "failed"}),
+                ),
+            )
+
+    summary = sls.get_diagnostics_summary(hours=10_000)
+    guidance = {item["reason"]: item for item in summary["threshold_guidance"]}
+    recommendations = sls.get_diagnostics_recommendations(hours=10_000)
+
+    assert guidance["attention<0.20"]["action"] == "relax_slightly"
+    assert guidance["attention<0.20"]["confidence"] == "medium"
+    assert guidance["dex_gate:liq<12000.0"]["action"] == "tighten"
+    assert guidance["dex_gate:liq<12000.0"]["confidence"] == "medium"
+    assert any(item["title"] == "Threshold: attention<0.20" for item in recommendations)
