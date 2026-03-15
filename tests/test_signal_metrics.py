@@ -11,6 +11,14 @@ def _candidate_field(embed: dict, name: str) -> str:
     raise AssertionError(f"missing field: {name}")
 
 
+def _candidate_field_name_contains(embed: dict, fragment: str) -> str:
+    for field in embed.get("fields", []):
+        name = str(field.get("name") or "")
+        if fragment in name:
+            return name
+    raise AssertionError(f"missing field name fragment: {fragment}")
+
+
 def test_risk_score_uses_real_inputs():
     metric = compute_risk_score(
         wallet_cluster_ratio=0.62,
@@ -166,7 +174,7 @@ def test_format_discord_regression_sample_payload_keeps_real_risk():
     quality_field = _candidate_field(embed, "Quality")
     flow_field = _candidate_field(embed, "Flow + Structure")
 
-    assert "0.47" in identity_field
+    assert "**Token:** Test Token (`$TEST`)" in identity_field
     assert "Risk Score: `0.47" in quality_field
     assert "Flow Bias:" in flow_field
     assert "**Contract:** `So11111111111111111111111111111111111111112`" in identity_field
@@ -236,8 +244,10 @@ def test_format_discord_overview_uses_new_hierarchy():
 
     assert embed["fields"][0]["name"] == "Command View"
     assert "**Token:** Pumpers (`$PUMPERS`)" in _candidate_field(embed, "Token Identity")
-    assert "5m Buy Flow:" in _candidate_field(embed, "Flow + Structure")
-    assert "5m Volume:" in _candidate_field(embed, "Market Snapshot")
+    assert "Up 5m Buy Flow:" in _candidate_field(embed, "Flow + Structure")
+    assert "`LIQ $25,482`" in _candidate_field(embed, "Market Snapshot")
+    assert "VOL5  $141.4K" == _candidate_field_name_contains(embed, "VOL5")
+    assert "AGE  3.2m" == _candidate_field_name_contains(embed, "AGE")
     assert "\n" not in embed["description"].strip()
     assert "Watch-only" in embed["description"] or "Constructive setup" in embed["description"]
 

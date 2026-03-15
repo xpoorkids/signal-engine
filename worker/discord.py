@@ -334,8 +334,8 @@ def _build_flow_section(metrics: dict, attention_score: float | None, risk_score
     flow_bias = _flow_bias_label(buys if isinstance(buys, int) else None, sells if isinstance(sells, int) else None)
     lines = []
     if buys is not None or sells is not None:
-        lines.append(f"- 5m Buy Flow: `{buys if buys is not None else 'N/A'}`")
-        lines.append(f"- 5m Sell Flow: `{sells if sells is not None else 'N/A'}`")
+        lines.append(f"- Up 5m Buy Flow: `{buys if buys is not None else 'N/A'}`")
+        lines.append(f"- Down 5m Sell Flow: `{sells if sells is not None else 'N/A'}`")
     if flow_bias:
         lines.append(f"- Flow Bias: `{flow_bias}`")
     lines.append(f"- Momentum: `{_momentum_label(attention_score, metrics)}`")
@@ -370,6 +370,59 @@ def _build_quality_section(e: Event, metrics: dict, risk_score: float | None, co
         f"- Holder Distribution: `{holder_note}`",
     ]
     return "\n".join(lines[:5])
+
+
+def _market_header_field(metrics: dict) -> dict:
+    return {
+        "name": "Market Snapshot",
+        "value": _market_tape(metrics),
+        "inline": False,
+    }
+
+
+def _market_tile_fields(metrics: dict, liq_mc: str) -> list[dict]:
+    liq = format_currency_compact(metrics.get("liq"))
+    mc = format_currency_compact(metrics.get("market_cap"))
+    vol5 = format_currency_compact(metrics.get("volume_m5"))
+    buys = metrics.get("txns_m5_buys")
+    sells = metrics.get("txns_m5_sells")
+    flow = "N/A" if buys is None and sells is None else f"B {buys if buys is not None else 'N/A'} / S {sells if sells is not None else 'N/A'}"
+    age = _fmt_age_minutes(metrics.get("age"))
+    chg5 = _format_change_pct(metrics.get("price_change_m5")) or "N/A"
+    return [
+        {
+            "name": f"LIQ  {liq}",
+            "value": _section_lines(
+                [
+                    f"Market Cap: {mc}",
+                    f"Liq / MC: {liq_mc}",
+                ],
+                indent=0,
+            ),
+            "inline": True,
+        },
+        {
+            "name": f"VOL5  {vol5}",
+            "value": _section_lines(
+                [
+                    f"5m Volume: {vol5}",
+                    f"5m Flow: {flow}",
+                ],
+                indent=0,
+            ),
+            "inline": True,
+        },
+        {
+            "name": f"AGE  {age}",
+            "value": _section_lines(
+                [
+                    f"Age / M5: {age} / {chg5}",
+                ],
+                indent=0,
+            ),
+            "inline": True,
+        },
+    ]
 
 
 def get_signal_color(signal_type: str, risk_score: float | None) -> int:
@@ -780,7 +833,7 @@ def _format_candidate_like(e: Event, description: str) -> dict:
     signal_type = _signal_type(e, vm.attention_score, vm.risk_score)
     fields = _finalize_fields(
         [
-                _decision_field(e.extra if isinstance(e.extra, dict) else {}, confidence_pct, vm.lifecycle, conviction, vm.confidence_score, vm.risk_score),
+            _decision_field(e.extra if isinstance(e.extra, dict) else {}, confidence_pct, vm.lifecycle, conviction, vm.confidence_score, vm.risk_score),
             {
                 "name": "Token Identity",
                 "value": _section_lines(
@@ -792,19 +845,16 @@ def _format_candidate_like(e: Event, description: str) -> dict:
                 ),
                 "inline": False,
             },
-            {
-                "name": "Market Snapshot",
-                "value": _section_lines([_market_tape(metrics)] + _market_snapshot(metrics) + [f"Liq / MC: {liq_mc}"]),
-                "inline": False,
-            },
+            _market_header_field(metrics),
+            *_market_tile_fields(metrics, liq_mc),
             {
                 "name": "Flow + Structure",
-                    "value": _section_lines([_build_flow_section(metrics, vm.attention_score, vm.risk_score)]),
+                "value": _section_lines([_build_flow_section(metrics, vm.attention_score, vm.risk_score)]),
                 "inline": True,
             },
             {
                 "name": "Quality",
-                    "value": _section_lines([_build_quality_section(e, metrics, vm.risk_score, vm.confidence_score)]),
+                "value": _section_lines([_build_quality_section(e, metrics, vm.risk_score, vm.confidence_score)]),
                 "inline": True,
             },
             _social_field(e),
@@ -874,11 +924,8 @@ def format_discord(e: Event) -> dict:
                     ),
                     "inline": False,
                 },
-                {
-                    "name": "Market Snapshot",
-                    "value": _section_lines([_market_tape(metrics)] + _market_snapshot(metrics) + [f"Liq / MC: {liq_mc}"]),
-                    "inline": False,
-                },
+                _market_header_field(metrics),
+                *_market_tile_fields(metrics, liq_mc),
                 {
                     "name": "Flow + Structure",
                     "value": _section_lines([_build_flow_section(metrics, vm.attention_score, vm.risk_score)]),
