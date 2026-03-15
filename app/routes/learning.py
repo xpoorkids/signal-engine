@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from app.services.signal_learning_service import (
     get_engine_health_digest,
@@ -12,7 +12,12 @@ from app.services.signal_learning_service import (
     render_learning_digest_html,
     render_learning_report_html,
 )
-from app.services.tuning_service import build_tuning_proposals, render_tuning_proposals_html
+from app.services.tuning_service import (
+    build_tuning_proposals,
+    render_tuning_apply_diff,
+    render_tuning_env_snippet,
+    render_tuning_proposals_html,
+)
 
 
 router = APIRouter()
@@ -105,6 +110,16 @@ def learning_tuning_proposals(hours: int = 72):
 @router.get("/learning/tuning/proposals/dashboard")
 def learning_tuning_proposals_dashboard(hours: int = 72):
     return HTMLResponse(content=render_tuning_proposals_html(hours=max(1, hours)))
+
+
+@router.get("/learning/tuning/proposals/env")
+def learning_tuning_proposals_env(hours: int = 72):
+    return PlainTextResponse(content=render_tuning_env_snippet(hours=max(1, hours)))
+
+
+@router.get("/learning/tuning/proposals/diff")
+def learning_tuning_proposals_diff(hours: int = 72):
+    return PlainTextResponse(content=render_tuning_apply_diff(hours=max(1, hours)))
 
 
 @router.get("/learning/diagnostics/dashboard")

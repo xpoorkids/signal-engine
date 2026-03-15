@@ -30,6 +30,16 @@ def _proposal(
     }
 
 
+def _format_env_value(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
+def _format_diff_value(value: Any) -> str:
+    return _format_env_value(value)
+
+
 def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:
     summary = get_diagnostics_summary(hours=max(1, hours))
     guidance = summary.get("threshold_guidance") if isinstance(summary.get("threshold_guidance"), list) else []
@@ -139,11 +149,60 @@ def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:
     }
 
 
+def render_tuning_env_snippet(hours: int = 72) -> str:
+    payload = build_tuning_proposals(hours=max(1, hours))
+    proposals = payload.get("proposals") if isinstance(payload.get("proposals"), list) else []
+    lines = [
+        "# Signal Engine tuning proposal export",
+        f"# Generated from the last {int(payload.get('lookback_hours') or hours)} hours of diagnostics",
+        "# Apply manually after review. Nothing here is auto-applied.",
+    ]
+    if not proposals:
+        lines.append("# No concrete proposal overrides available.")
+        return "\n".join(lines)
+
+    for item in proposals:
+        key = str(item.get("config_key") or "").strip()
+        if not key:
+            continue
+        reason = str(item.get("reason") or "unknown")
+        action = str(item.get("action") or "hold")
+        confidence = str(item.get("confidence") or "low")
+        sample_size = int(item.get("sample_size") or 0)
+        lines.append(f"# {reason} | {action} | {confidence} confidence | sample {sample_size}")
+        lines.append(f"{key}={_format_env_value(item.get('proposed_value'))}")
+    return "\n".join(lines)
+
+
+def render_tuning_apply_diff(hours: int = 72) -> str:
+    payload = build_tuning_proposals(hours=max(1, hours))
+    proposals = payload.get("proposals") if isinstance(payload.get("proposals"), list) else []
+    header = [
+        "# Apply Manually",
+        f"# Proposed config changes from the last {int(payload.get('lookback_hours') or hours)} hours",
+    ]
+    if not proposals:
+        header.append("- No concrete proposal changes available.")
+        return "\n".join(header)
+
+    rows = []
+    for item in proposals:
+        rows.append(
+            "- "
+            f"{item.get('config_key')}: "
+            f"{_format_diff_value(item.get('current_value'))} -> {_format_diff_value(item.get('proposed_value'))} "
+            f"[{item.get('action')} | {item.get('confidence')} | {item.get('reason')}]"
+        )
+    return "\n".join(header + rows)
+
+
 def render_tuning_proposals_html(hours: int = 72) -> str:
     payload = build_tuning_proposals(hours=max(1, hours))
     proposals = payload.get("proposals") if isinstance(payload.get("proposals"), list) else []
     deferred = payload.get("deferred") if isinstance(payload.get("deferred"), list) else []
     preset_overrides = payload.get("preset_overrides") if isinstance(payload.get("preset_overrides"), dict) else {}
+    env_snippet = render_tuning_env_snippet(hours=max(1, hours))
+    apply_diff = render_tuning_apply_diff(hours=max(1, hours))
 
     proposal_rows = "".join(
         "<tr>"
@@ -212,11 +271,25 @@ def render_tuning_proposals_html(hours: int = 72) -> str:
       margin-top: 18px;
     }}
     .preset-grid {{ display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap:16px; }}
+    .export-grid {{ display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap:16px; }}
     .preset-card {{
       background: var(--panel-2);
       border: 1px solid var(--line);
       border-radius: 18px;
       padding: 16px;
+    }}
+    pre {{
+      margin: 0;
+      padding: 16px;
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      background: rgba(6, 16, 24, 0.92);
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #d7e4ef;
+      font-size: 13px;
+      line-height: 1.5;
     }}
     h1 {{ margin: 0 0 8px; font-size: 34px; }}
     h2 {{ margin: 0 0 14px; font-size: 15px; letter-spacing: .12em; color: var(--muted); text-transform: uppercase; }}
@@ -228,6 +301,7 @@ def render_tuning_proposals_html(hours: int = 72) -> str:
     th {{ color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .10em; }}
     @media (max-width: 1020px) {{
       .preset-grid {{ grid-template-columns: 1fr; }}
+      .export-grid {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
@@ -247,6 +321,19 @@ def render_tuning_proposals_html(hours: int = 72) -> str:
     <section class="panel">
       <h2>Preset Overrides</h2>
       <div class="preset-grid">{preset_rows}</div>
+    </section>
+    <section class="panel">
+      <h2>Operational Exports</h2>
+      <div class="export-grid">
+        <div>
+          <h3>.env Snippet</h3>
+          <pre>{html.escape(env_snippet)}</pre>
+        </div>
+        <div>
+          <h3>Apply Manually Diff</h3>
+          <pre>{html.escape(apply_diff)}</pre>
+        </div>
+      </div>
     </section>
     <section class="panel">
       <h2>Deferred</h2>
