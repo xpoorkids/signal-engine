@@ -335,6 +335,7 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     incidents_dashboard_response = client.get("/learning/tuning/incidents/dashboard?limit=20")
     assert incidents_dashboard_response.status_code == 200
     assert "Notification Incidents" in incidents_dashboard_response.text
+    assert "State" in incidents_dashboard_response.text
 
     first_notification_id = notifications_payload["notifications"][0]["notification_id"]
     ack_response = client.post(
@@ -355,6 +356,33 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     )
     assert unsnooze_response.status_code == 200
     assert unsnooze_response.json()["snoozed_until_ts"] is not None
+
+    incident_ack_response = client.post(
+        "/learning/tuning/incidents/state",
+        json={
+            "event_type": incidents_payload["incidents"][0]["event_type"],
+            "target_name": incidents_payload["incidents"][0]["target_name"],
+            "deployment_service": incidents_payload["incidents"][0]["deployment_service"],
+            "acknowledged": True,
+            "acknowledged_by": "ops-user",
+        },
+    )
+    assert incident_ack_response.status_code == 200
+    assert incident_ack_response.json()["state"] == "acknowledged"
+
+    incident_resolve_response = client.post(
+        "/learning/tuning/incidents/state",
+        json={
+            "event_type": incidents_payload["incidents"][0]["event_type"],
+            "target_name": incidents_payload["incidents"][0]["target_name"],
+            "deployment_service": incidents_payload["incidents"][0]["deployment_service"],
+            "resolved": True,
+            "resolved_by": "ops-user",
+            "resolution_note": "Handled by operator",
+        },
+    )
+    assert incident_resolve_response.status_code == 200
+    assert incident_resolve_response.json()["state"] == "resolved"
 
     command_center_response = client.get("/learning/command-center?hours=24")
     assert command_center_response.status_code == 200

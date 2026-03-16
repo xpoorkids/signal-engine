@@ -31,6 +31,7 @@ from app.services.tuning_service import (
     render_tuning_env_snippet,
     render_tuning_profiles_html,
     render_tuning_proposals_html,
+    update_incident_state,
     update_tuning_approval_status,
 )
 
@@ -504,3 +505,48 @@ def test_notification_incidents_cluster_repeated_events(tmp_path, monkeypatch):
     incidents_html = render_notification_incidents_html(limit=10)
     assert "Notification Incidents" in incidents_html
     assert "Blocked rollout again for strict profile" in incidents_html
+
+
+def test_incident_resolution_tracking(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    from app.services.tuning_service import emit_rollout_notification
+
+    emit_rollout_notification(
+        event_type="rollout_blocked",
+        level="warning",
+        message="Blocked rollout for strict profile",
+        target_name="strict",
+        deployment_service="worker",
+    )
+    emit_rollout_notification(
+        event_type="rollout_blocked",
+        level="warning",
+        message="Blocked rollout again for strict profile",
+        target_name="strict",
+        deployment_service="worker",
+    )
+
+    acknowledged_incident = update_incident_state(
+        event_type="rollout_blocked",
+        target_name="strict",
+        deployment_service="worker",
+        acknowledged=True,
+        acknowledged_by="ops-user",
+    )
+    assert acknowledged_incident["state"] == "acknowledged"
+    assert acknowledged_incident["time_to_first_ack_seconds"] is not None
+
+    resolved_incident = update_incident_state(
+        event_type="rollout_blocked",
+        target_name="strict",
+        deployment_service="worker",
+        resolved=True,
+        resolved_by="ops-user",
+        resolution_note="Resolved after rollout rollback",
+    )
+    assert resolved_incident["state"] == "resolved"
+    assert resolved_incident["time_to_resolve_seconds"] is not None
+    assert resolved_incident["resolution_note"] == "Resolved after rollout rollback"

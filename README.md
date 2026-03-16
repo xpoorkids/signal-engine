@@ -80,6 +80,7 @@ Features:
 - `GET /learning/tuning/notifications/dashboard`
 - `GET /learning/tuning/incidents`
 - `GET /learning/tuning/incidents/dashboard`
+- `POST /learning/tuning/incidents/state`
 - `POST /learning/tuning/notifications/{notification_id}/state`
 - `GET /learning/command-center`
 - `GET /learning/command-center/dashboard`
@@ -101,6 +102,7 @@ Ops digest behavior:
 Notification controls:
 - `GET /learning/tuning/notifications?active_only=true` returns only unacknowledged and unsnoozed notifications.
 - `GET /learning/tuning/incidents` returns clustered incidents by event, target, and service.
+- `POST /learning/tuning/incidents/state` supports incident-level `acknowledged`, `snoozed`, and `resolved` transitions.
 - `POST /learning/tuning/notifications/{notification_id}/state` supports acknowledgment and snoozing for operator triage.
 
 ## Running Locally

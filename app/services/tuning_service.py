@@ -268,6 +268,9 @@ def _record_rollout_notification(
         "acknowledged_ts": None,
         "acknowledged_by": "",
         "snoozed_until_ts": None,
+        "resolved_ts": None,
+        "resolved_by": "",
+        "resolution_note": "",
     }
     with sls._connect() as c:
         c.execute(
@@ -275,8 +278,9 @@ def _record_rollout_notification(
             INSERT INTO rollout_notifications (
                 notification_id, created_ts, event_type, level, target_name, approval_id,
                 deployment_service, deployment_sha, message, payload_json, delivery_status,
-                delivered_ts, last_error, acknowledged_ts, acknowledged_by, snoozed_until_ts
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                delivered_ts, last_error, acknowledged_ts, acknowledged_by, snoozed_until_ts,
+                resolved_ts, resolved_by, resolution_note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 notification["notification_id"],
@@ -295,6 +299,9 @@ def _record_rollout_notification(
                 notification["acknowledged_ts"],
                 notification["acknowledged_by"],
                 notification["snoozed_until_ts"],
+                notification["resolved_ts"],
+                notification["resolved_by"],
+                notification["resolution_note"],
             ),
         )
     return notification
@@ -378,7 +385,23 @@ def _notification_active(row: dict[str, Any], now_ts: int | None = None) -> bool
     current_ts = int(now_ts or time.time())
     acknowledged = bool(row.get("acknowledged_ts"))
     snoozed_until = int(row.get("snoozed_until_ts") or 0)
-    return (not acknowledged) and (snoozed_until <= current_ts)
+    resolved = bool(row.get("resolved_ts"))
+    return (not acknowledged) and (not resolved) and (snoozed_until <= current_ts)
+
+
+def _incident_state(notifications: list[dict[str, Any]], now_ts: int | None = None) -> str:
+    current_ts = int(now_ts or time.time())
+    if not notifications:
+        return "resolved"
+    if any(_notification_active(item, current_ts) for item in notifications):
+        return "open"
+    if any(int(item.get("snoozed_until_ts") or 0) > current_ts and not item.get("resolved_ts") for item in notifications):
+        return "snoozed"
+    if all(bool(item.get("resolved_ts")) for item in notifications):
+        return "resolved"
+    if any(bool(item.get("acknowledged_ts")) for item in notifications):
+        return "acknowledged"
+    return "resolved"
 
 
 def _notification_cluster_key(row: dict[str, Any]) -> str:
@@ -392,6 +415,7 @@ def _notification_cluster_key(row: dict[str, Any]) -> str:
 
 
 def list_notification_incidents(limit: int = 20, *, active_only: bool = False) -> list[dict[str, Any]]:
+    current_ts = int(time.time())
     notifications = list_rollout_notifications(limit=max(1, limit * 10), active_only=active_only)
     clusters: dict[str, dict[str, Any]] = {}
     for item in notifications:
@@ -411,8 +435,14 @@ def list_notification_incidents(limit: int = 20, *, active_only: bool = False) -
                 "latest_notification_id": item.get("notification_id") or "",
                 "delivery_status": item.get("delivery_status") or "pending",
                 "active": False,
+                "state": "open",
                 "acknowledged_count": 0,
                 "snoozed_count": 0,
+                "resolved_count": 0,
+                "time_to_first_ack_seconds": None,
+                "time_to_resolve_seconds": None,
+                "resolved_by": "",
+                "resolution_note": "",
                 "notifications": [],
             }
             clusters[key] = cluster
@@ -427,11 +457,29 @@ def list_notification_incidents(limit: int = 20, *, active_only: bool = False) -
             cluster["level"] = item.get("level") or cluster["level"]
         if bool(item.get("acknowledged_ts")):
             cluster["acknowledged_count"] = int(cluster["acknowledged_count"]) + 1
-        if int(item.get("snoozed_until_ts") or 0) > int(time.time()):
+        if int(item.get("snoozed_until_ts") or 0) > current_ts:
             cluster["snoozed_count"] = int(cluster["snoozed_count"]) + 1
+        if bool(item.get("resolved_ts")):
+            cluster["resolved_count"] = int(cluster["resolved_count"]) + 1
         if _notification_active(item):
             cluster["active"] = True
         cluster["notifications"].append(item)
+
+    for cluster in clusters.values():
+        cluster_notifications = cluster["notifications"]
+        cluster["state"] = _incident_state(cluster_notifications, current_ts)
+        ack_ts_values = [int(item["acknowledged_ts"]) for item in cluster_notifications if item.get("acknowledged_ts")]
+        if ack_ts_values:
+            cluster["time_to_first_ack_seconds"] = max(0, min(ack_ts_values) - int(cluster["first_seen_ts"] or 0))
+        resolved_ts_values = [int(item["resolved_ts"]) for item in cluster_notifications if item.get("resolved_ts")]
+        if resolved_ts_values:
+            cluster["time_to_resolve_seconds"] = max(0, max(resolved_ts_values) - int(cluster["first_seen_ts"] or 0))
+            latest_resolved = max(
+                (item for item in cluster_notifications if item.get("resolved_ts")),
+                key=lambda item: int(item.get("resolved_ts") or 0),
+            )
+            cluster["resolved_by"] = latest_resolved.get("resolved_by") or ""
+            cluster["resolution_note"] = latest_resolved.get("resolution_note") or ""
 
     incidents = sorted(
         clusters.values(),
@@ -441,13 +489,64 @@ def list_notification_incidents(limit: int = 20, *, active_only: bool = False) -
     return incidents[: max(1, limit)]
 
 
+def update_incident_state(
+    *,
+    event_type: str,
+    target_name: str | None = None,
+    deployment_service: str | None = None,
+    acknowledged: bool | None = None,
+    acknowledged_by: str | None = None,
+    snooze_minutes: int | None = None,
+    unsnooze: bool = False,
+    resolved: bool | None = None,
+    resolved_by: str | None = None,
+    resolution_note: str | None = None,
+) -> dict[str, Any]:
+    target_event = str(event_type or "").strip()
+    if not target_event:
+        raise ValueError("event_type_required")
+    target_name_value = str(target_name or "").strip()
+    target_service_value = str(deployment_service or "").strip()
+
+    notifications = list_rollout_notifications(limit=500)
+    matched = [
+        item
+        for item in notifications
+        if str(item.get("event_type") or "") == target_event
+        and str(item.get("target_name") or "") == target_name_value
+        and str(item.get("deployment_service") or "") == target_service_value
+    ]
+    if not matched:
+        raise KeyError(f"{target_event}|{target_name_value}|{target_service_value}")
+
+    for item in matched:
+        update_rollout_notification_state(
+            str(item["notification_id"]),
+            acknowledged=acknowledged,
+            acknowledged_by=acknowledged_by,
+            snooze_minutes=snooze_minutes,
+            unsnooze=unsnooze,
+            resolved=resolved,
+            resolved_by=resolved_by,
+            resolution_note=resolution_note,
+        )
+
+    incidents = list_notification_incidents(limit=200)
+    incident_key = "|".join([target_event, target_name_value, target_service_value])
+    for incident in incidents:
+        if incident["incident_key"] == incident_key:
+            return incident
+    raise KeyError(incident_key)
+
+
 def list_rollout_notifications(limit: int = 20, *, active_only: bool = False) -> list[dict[str, Any]]:
     with sls._connect() as c:
         rows = c.execute(
             """
             SELECT notification_id, created_ts, event_type, level, target_name, approval_id,
                    deployment_service, deployment_sha, message, payload_json, delivery_status,
-                   delivered_ts, last_error, acknowledged_ts, acknowledged_by, snoozed_until_ts
+                   delivered_ts, last_error, acknowledged_ts, acknowledged_by, snoozed_until_ts,
+                   resolved_ts, resolved_by, resolution_note
             FROM rollout_notifications
             ORDER BY created_ts DESC
             LIMIT ?
@@ -472,6 +571,9 @@ def list_rollout_notifications(limit: int = 20, *, active_only: bool = False) ->
             "acknowledged_ts": row["acknowledged_ts"],
             "acknowledged_by": row["acknowledged_by"] or "",
             "snoozed_until_ts": row["snoozed_until_ts"],
+            "resolved_ts": row["resolved_ts"],
+            "resolved_by": row["resolved_by"] or "",
+            "resolution_note": row["resolution_note"] or "",
         }
         for row in rows
     ]
@@ -487,7 +589,8 @@ def _latest_rollout_notification(event_type: str) -> dict[str, Any] | None:
             """
             SELECT notification_id, created_ts, event_type, level, target_name, approval_id,
                    deployment_service, deployment_sha, message, payload_json, delivery_status,
-                   delivered_ts, last_error, acknowledged_ts, acknowledged_by, snoozed_until_ts
+                   delivered_ts, last_error, acknowledged_ts, acknowledged_by, snoozed_until_ts,
+                   resolved_ts, resolved_by, resolution_note
             FROM rollout_notifications
             WHERE event_type=?
             ORDER BY created_ts DESC
@@ -514,6 +617,9 @@ def _latest_rollout_notification(event_type: str) -> dict[str, Any] | None:
         "acknowledged_ts": row["acknowledged_ts"],
         "acknowledged_by": row["acknowledged_by"] or "",
         "snoozed_until_ts": row["snoozed_until_ts"],
+        "resolved_ts": row["resolved_ts"],
+        "resolved_by": row["resolved_by"] or "",
+        "resolution_note": row["resolution_note"] or "",
     }
 
 
@@ -524,6 +630,9 @@ def update_rollout_notification_state(
     acknowledged_by: str | None = None,
     snooze_minutes: int | None = None,
     unsnooze: bool = False,
+    resolved: bool | None = None,
+    resolved_by: str | None = None,
+    resolution_note: str | None = None,
 ) -> dict[str, Any]:
     target_id = str(notification_id or "").strip()
     if not target_id:
@@ -554,6 +663,14 @@ def update_rollout_notification_state(
         elif unsnooze:
             updates.append("snoozed_until_ts=?")
             params.append(None)
+
+        if resolved is not None:
+            updates.append("resolved_ts=?")
+            params.append(int(time.time()) if resolved else None)
+            updates.append("resolved_by=?")
+            params.append(str(resolved_by or "").strip() if resolved else "")
+            updates.append("resolution_note=?")
+            params.append(str(resolution_note or "").strip() if resolved else "")
 
         if not updates:
             raise ValueError("no_notification_state_change")
@@ -701,11 +818,14 @@ def render_notification_incidents_html(limit: int = 20, *, active_only: bool = F
         f"<td>{html.escape(str(item.get('target_name') or 'n/a'))}</td>"
         f"<td>{html.escape(str(item.get('deployment_service') or 'n/a'))}</td>"
         f"<td>{int(item.get('count') or 0)}</td>"
+        f"<td>{html.escape(str(item.get('state') or 'open'))}</td>"
         f"<td>{'yes' if item.get('active') else 'no'}</td>"
+        f"<td>{html.escape(str(item.get('time_to_first_ack_seconds') or '-'))}</td>"
+        f"<td>{html.escape(str(item.get('time_to_resolve_seconds') or '-'))}</td>"
         f"<td>{html.escape(str(item.get('latest_message') or ''))}</td>"
         "</tr>"
         for item in incidents
-    ) or "<tr><td colspan='6'>No incident clusters recorded yet.</td></tr>"
+    ) or "<tr><td colspan='9'>No incident clusters recorded yet.</td></tr>"
 
     return f"""<!doctype html>
 <html lang="en">
@@ -738,7 +858,7 @@ def render_notification_incidents_html(limit: int = 20, *, active_only: bool = F
       <h1>Notification Incidents</h1>
       <p>Clustered notification view by event, target, and service. Filtered to {"active only" if active_only else "recent history"}.</p>
       <table>
-        <thead><tr><th>Event</th><th>Target</th><th>Service</th><th>Count</th><th>Active</th><th>Latest Message</th></tr></thead>
+        <thead><tr><th>Event</th><th>Target</th><th>Service</th><th>Count</th><th>State</th><th>Active</th><th>TTA Ack</th><th>TTR</th><th>Latest Message</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </section>

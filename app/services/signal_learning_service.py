@@ -157,7 +157,10 @@ def init() -> None:
                 last_error TEXT,
                 acknowledged_ts INTEGER,
                 acknowledged_by TEXT,
-                snoozed_until_ts INTEGER
+                snoozed_until_ts INTEGER,
+                resolved_ts INTEGER,
+                resolved_by TEXT,
+                resolution_note TEXT
             )
             """
         )
@@ -210,6 +213,12 @@ def init() -> None:
             c.execute("ALTER TABLE rollout_notifications ADD COLUMN acknowledged_by TEXT")
         if "snoozed_until_ts" not in notification_cols:
             c.execute("ALTER TABLE rollout_notifications ADD COLUMN snoozed_until_ts INTEGER")
+        if "resolved_ts" not in notification_cols:
+            c.execute("ALTER TABLE rollout_notifications ADD COLUMN resolved_ts INTEGER")
+        if "resolved_by" not in notification_cols:
+            c.execute("ALTER TABLE rollout_notifications ADD COLUMN resolved_by TEXT")
+        if "resolution_note" not in notification_cols:
+            c.execute("ALTER TABLE rollout_notifications ADD COLUMN resolution_note TEXT")
         decision_cols = {row[1] for row in c.execute("PRAGMA table_info(signal_decisions)").fetchall()}
         if "signal_id" not in decision_cols:
             c.execute("ALTER TABLE signal_decisions ADD COLUMN signal_id TEXT")
