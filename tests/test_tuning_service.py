@@ -600,10 +600,59 @@ def test_rollout_verification_compares_pre_and_post_windows(tmp_path, monkeypatc
     monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_ENV", "production")
     sls.init()
 
+    guidance_base_ts = 1_773_620_000
+    guidance_ids = []
+    for offset in range(6):
+        guidance_ids.append(
+            sls.record_signal_decision(
+                token=f"guide-{offset}",
+                event_type="candidate",
+                stage="candidate",
+                decision="candidate_gate_skip",
+                reasons=["attention<0.20"],
+                attention_score=0.19,
+                risk_score=0.22,
+                confidence_score=0.30,
+                lifecycle="dex",
+                ts_value=guidance_base_ts + offset,
+                source="test",
+            )
+        )
+    with sls._connect() as c:
+        for idx, signal_id in enumerate(guidance_ids):
+            c.execute(
+                """
+                INSERT INTO signal_snapshots (
+                    signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                    volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                    txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                    outcome_label, snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    60,
+                    guidance_base_ts + 3600 + idx,
+                    "dex",
+                    18000,
+                    4200,
+                    3000,
+                    64.0,
+                    25.0,
+                    60.0,
+                    40,
+                    18,
+                    80.0,
+                    3.0,
+                    35.0,
+                    "worked",
+                    json.dumps({"outcome_label": "worked"}),
+                ),
+            )
+
     approval = create_tuning_approval(
-        approval_kind="profile",
+        approval_kind="proposal",
         artifact_kind="env",
-        target_name="balanced",
         hours=48,
         approved_by="ops",
         notes="verification candidate",
@@ -681,15 +730,22 @@ def test_rollout_verification_compares_pre_and_post_windows(tmp_path, monkeypatc
     assert verification["post_metrics"]["sent"] >= 6
     assert verification["post_outcomes"]["positive"] >= 4
     assert verification["verification_status"] in {"improved", "mixed"}
+    assert "changed_config" in verification
+    assert "EARLY_ATTENTION_MIN" in verification["changed_config"]["changed_config_keys"]
+    assert verification["attribution"]["summary"]
+    assert verification["changed_config"]["changed_config_families"]
 
     verification_html = render_rollout_verification_html(approval_id=approval["approval_id"], baseline_hours=1, post_hours=2)
     assert "Rollout Verification" in verification_html
     assert "Post-Rollout Deltas" in verification_html
+    assert "Changed Config" in verification_html
+    assert "EARLY_ATTENTION_MIN" in verification_html
 
     applied = apply_rollout_verification(approval_id=approval["approval_id"], baseline_hours=1, post_hours=2)
     assert applied["approval"]["approval_id"] == approval["approval_id"]
     assert applied["approval"]["verification_status"] in {"validated", "review_needed", "degraded", "pending_outcomes"}
     assert applied["approval"]["verification_summary"]
+    assert "changed_keys=EARLY_ATTENTION_MIN" in applied["approval"]["verification_summary"]
 
     batch = apply_pending_rollout_verifications(baseline_hours=1, post_hours=2, limit=10, force=True)
     assert batch["applied_count"] >= 1

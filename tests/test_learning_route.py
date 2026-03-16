@@ -316,10 +316,12 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     verification_payload = verification_response.json()
     assert verification_payload["approval"]["approval_id"] == approval_id
     assert "verification_status" in verification_payload
+    assert "changed_config" in verification_payload
 
     verification_dashboard_response = client.get("/learning/tuning/verification/dashboard?approval_id=" + approval_id)
     assert verification_dashboard_response.status_code == 200
     assert "Rollout Verification" in verification_dashboard_response.text
+    assert "Changed Config" in verification_dashboard_response.text
 
     verification_apply_response = client.post(
         "/learning/tuning/verification/apply",

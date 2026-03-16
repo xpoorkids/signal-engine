@@ -35,6 +35,19 @@ PROFILE_LABELS: dict[str, str] = {
     "balanced": "Current live baseline with no proposal overrides applied.",
     "aggressive": "Relaxed early filters for faster candidate capture.",
 }
+CONFIG_KEY_FAMILIES: dict[str, str] = {
+    "CAND_MIN_TOKEN_AGE_SEC": "candidate_timing",
+    "EARLY_ATTENTION_MIN": "candidate_attention",
+    "EARLY_CREATOR_MIN": "candidate_attention",
+    "ATTENTION_CANDIDATE_THRESHOLD": "candidate_attention",
+    "PROM_MIN_LIQ_USD": "market_quality",
+    "GATE_PROMOTE_MIN_LIQ": "market_quality",
+    "GATE_PROMOTE_MIN_VOL5M": "market_quality",
+    "GATE_PROMOTE_MIN_BUYS5M": "market_quality",
+    "PROMOTION_MIN_ATTENTION": "promotion_quality",
+    "PROMOTION_MAX_RISK": "promotion_risk",
+    "PROMOTE_MIN_CONFIDENCE": "promotion_quality",
+}
 APPROVAL_STATUSES: set[str] = {"pending", "approved", "rolled_out", "rejected"}
 ROLLOUT_COMPARISON_SERVICES: tuple[str, str] = ("worker", "engine")
 
@@ -79,6 +92,17 @@ def _profile_baseline() -> dict[str, Any]:
 def _required_aligned_profiles() -> set[str]:
     raw = os.getenv("SIGNAL_ENGINE_REQUIRED_ALIGNED_PROFILES", "").strip()
     return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
+def _family_label(family: str) -> str:
+    labels = {
+        "candidate_timing": "candidate timing",
+        "candidate_attention": "candidate attention",
+        "market_quality": "market quality",
+        "promotion_quality": "promotion quality",
+        "promotion_risk": "promotion risk",
+    }
+    return labels.get(family, family.replace("_", " "))
 
 
 def _default_deployment_metadata() -> dict[str, str]:
@@ -141,6 +165,150 @@ def _approval_matches(
         if needle not in haystack:
             return False
     return True
+
+
+def _changed_config_entries(approval: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(approval, dict):
+        return []
+    payload = approval.get("payload") if isinstance(approval.get("payload"), dict) else {}
+    kind = str(approval.get("approval_kind") or "").lower()
+    target = str(approval.get("target_name") or "").lower()
+    entries: list[dict[str, Any]] = []
+
+    if kind == "proposal":
+        proposals = payload.get("proposals") if isinstance(payload.get("proposals"), list) else []
+        for item in proposals:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("config_key") or "").strip()
+            if not key:
+                continue
+            entries.append(
+                {
+                    "config_key": key,
+                    "current_value": item.get("current_value"),
+                    "proposed_value": item.get("proposed_value"),
+                    "family": CONFIG_KEY_FAMILIES.get(key, "other"),
+                }
+            )
+        return entries
+
+    if kind == "profile":
+        diffs = payload.get("profile_diffs") if isinstance(payload.get("profile_diffs"), dict) else {}
+        profile_diffs = diffs.get(target) if isinstance(diffs.get(target), list) else []
+        for item in profile_diffs:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("config_key") or "").strip()
+            if not key:
+                continue
+            entries.append(
+                {
+                    "config_key": key,
+                    "current_value": item.get("current_value"),
+                    "proposed_value": item.get("proposed_value"),
+                    "family": CONFIG_KEY_FAMILIES.get(key, "other"),
+                }
+            )
+    return entries
+
+
+def _summarize_changed_config(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    families: dict[str, list[str]] = {}
+    for item in entries:
+        key = str(item.get("config_key") or "").strip()
+        if not key:
+            continue
+        family = str(item.get("family") or "other")
+        families.setdefault(family, []).append(key)
+
+    ordered_families = sorted(
+        (
+            {
+                "family": family,
+                "label": _family_label(family),
+                "config_keys": sorted(keys),
+                "count": len(keys),
+            }
+            for family, keys in families.items()
+        ),
+        key=lambda item: (-int(item.get("count") or 0), str(item.get("family") or "")),
+    )
+    return {
+        "changed_config_keys": [str(item.get("config_key") or "") for item in entries if item.get("config_key")],
+        "changed_config_entries": entries,
+        "changed_config_families": ordered_families,
+        "primary_family": ordered_families[0]["family"] if ordered_families else "",
+    }
+
+
+def _verification_attribution(
+    changed_config: dict[str, Any],
+    pre_metrics: dict[str, Any],
+    post_metrics: dict[str, Any],
+    deltas: dict[str, Any],
+    post_outcomes: dict[str, Any],
+) -> dict[str, Any]:
+    families = changed_config.get("changed_config_families") if isinstance(changed_config.get("changed_config_families"), list) else []
+    notes: list[str] = []
+    actions: list[str] = []
+
+    send_delta = float(deltas.get("send_rate_delta") or 0.0)
+    skip_delta = float(deltas.get("skip_pressure_delta") or 0.0)
+    block_delta = float(deltas.get("block_pressure_delta") or 0.0)
+    win_rate = float(post_outcomes.get("win_rate") or 0.0)
+    fail_rate = float(post_outcomes.get("fail_rate") or 0.0)
+    post_total = int(post_outcomes.get("total") or 0)
+
+    family_names = {str(item.get("family") or "") for item in families}
+
+    if "candidate_attention" in family_names or "candidate_timing" in family_names:
+        if skip_delta < 0:
+            notes.append(f"Candidate-admission pressure improved after changing {_family_label('candidate_attention' if 'candidate_attention' in family_names else 'candidate_timing')}.")
+            actions.append("candidate_admission_relief")
+        elif skip_delta > 0:
+            notes.append("Candidate-admission pressure increased after the rollout, which suggests tighter early gating.")
+            actions.append("candidate_admission_tighter")
+
+    if "market_quality" in family_names or "promotion_quality" in family_names:
+        if block_delta < 0:
+            notes.append("Promotion friction eased on the changed market/promotion quality gates.")
+            actions.append("promotion_friction_down")
+        elif block_delta > 0:
+            notes.append("Promotion blocking increased on the changed market/promotion quality gates.")
+            actions.append("promotion_friction_up")
+
+    if "promotion_risk" in family_names:
+        if post_total >= 3 and win_rate >= 50.0:
+            notes.append("Risk-oriented changes held up in realized post-rollout outcomes.")
+            actions.append("risk_gate_constructive")
+        elif post_total >= 3 and fail_rate >= 50.0:
+            notes.append("Risk-oriented changes degraded realized post-rollout outcomes.")
+            actions.append("risk_gate_weak")
+
+    if send_delta > 0 and not notes:
+        notes.append("Send-through improved after the rollout, but the changed keys span multiple threshold families.")
+        actions.append("send_through_up")
+    elif send_delta < 0 and not notes:
+        notes.append("Send-through declined after the rollout, which suggests the updated thresholds are more restrictive.")
+        actions.append("send_through_down")
+
+    if not notes and not families:
+        notes.append("No changed config keys were captured for this approval, so attribution is limited to generic pre/post deltas.")
+        actions.append("no_changed_keys")
+
+    family_summary = ", ".join(str(item.get("label") or "") for item in families[:3])
+    summary = notes[0] if notes else "No attribution insight available."
+    if family_summary:
+        summary = f"{summary} Focus: {family_summary}."
+
+    return {
+        "summary": summary,
+        "notes": notes,
+        "signals": actions,
+        "pre_total_decisions": int(pre_metrics.get("total_decisions") or 0),
+        "post_total_decisions": int(post_metrics.get("total_decisions") or 0),
+    }
 
 
 def _normalize_approval(row: Any) -> dict[str, Any]:
@@ -1065,12 +1233,14 @@ def get_rollout_verification(
     post_metrics = _decision_metrics_between(rollout_ts, post_end)
     post_outcomes = _outcome_metrics_between(rollout_ts, post_end)
     status, reasons = _verification_status(pre_metrics, post_metrics, post_outcomes)
+    changed_config = _summarize_changed_config(_changed_config_entries(approval))
 
     deltas = {
         "send_rate_delta": round(float(post_metrics.get("send_rate") or 0.0) - float(pre_metrics.get("send_rate") or 0.0), 1),
         "skip_pressure_delta": round(float(post_metrics.get("skip_pressure") or 0.0) - float(pre_metrics.get("skip_pressure") or 0.0), 1),
         "block_pressure_delta": round(float(post_metrics.get("block_pressure") or 0.0) - float(pre_metrics.get("block_pressure") or 0.0), 1),
     }
+    attribution = _verification_attribution(changed_config, pre_metrics, post_metrics, deltas, post_outcomes)
     drift = (
         get_config_drift_report(target_name=str(approval.get("target_name") or ""), rollout_status="rolled_out")
         if str(approval.get("target_name") or "") in {"strict", "balanced", "aggressive"}
@@ -1088,6 +1258,8 @@ def get_rollout_verification(
         "deltas": deltas,
         "verification_status": status,
         "verification_reasons": reasons,
+        "changed_config": changed_config,
+        "attribution": attribution,
         "drift": drift,
     }
 
@@ -1113,7 +1285,12 @@ def render_rollout_verification_html(
     outcomes = verification.get("post_outcomes") if isinstance(verification.get("post_outcomes"), dict) else {}
     deltas = verification.get("deltas") if isinstance(verification.get("deltas"), dict) else {}
     reasons = verification.get("verification_reasons") if isinstance(verification.get("verification_reasons"), list) else []
+    changed_config = verification.get("changed_config") if isinstance(verification.get("changed_config"), dict) else {}
+    attribution = verification.get("attribution") if isinstance(verification.get("attribution"), dict) else {}
     drift = verification.get("drift") if isinstance(verification.get("drift"), dict) else {}
+
+    changed_families = changed_config.get("changed_config_families") if isinstance(changed_config.get("changed_config_families"), list) else []
+    changed_entries = changed_config.get("changed_config_entries") if isinstance(changed_config.get("changed_config_entries"), list) else []
 
     def metric_card(label: str, value: Any) -> str:
         return (
@@ -1122,6 +1299,28 @@ def render_rollout_verification_html(
             f"<strong>{html.escape(str(value))}</strong>"
             "</div>"
         )
+
+    changed_family_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('label') or item.get('family') or 'other'))}</td>"
+        f"<td>{html.escape(', '.join(item.get('config_keys') or []))}</td>"
+        f"<td>{int(item.get('count') or 0)}</td>"
+        "</tr>"
+        for item in changed_families
+    ) or "<tr><td colspan='3'>No changed config families captured for this approval.</td></tr>"
+    changed_key_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('config_key') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('current_value') or ''))}</td>"
+        f"<td>{html.escape(str(item.get('proposed_value') or ''))}</td>"
+        f"<td>{html.escape(_family_label(str(item.get('family') or 'other')))}</td>"
+        "</tr>"
+        for item in changed_entries
+    ) or "<tr><td colspan='4'>No changed config keys captured for this approval.</td></tr>"
+    attribution_rows = "".join(
+        f"<li>{html.escape(str(item))}</li>"
+        for item in (attribution.get("notes") if isinstance(attribution.get("notes"), list) else [])
+    ) or "<li>No attribution notes available.</li>"
 
     return f"""<!doctype html>
 <html lang="en">
@@ -1178,6 +1377,25 @@ def render_rollout_verification_html(
       <ul>{"".join(f"<li>{html.escape(str(item))}</li>" for item in reasons) or "<li>No specific reason.</li>"}</ul>
     </section>
     <section class="panel">
+      <h2>Changed Config</h2>
+      <p>{html.escape(str(attribution.get('summary') or 'No attribution summary available.'))}</p>
+      <table>
+        <thead><tr><th>Family</th><th>Keys</th><th>Count</th></tr></thead>
+        <tbody>{changed_family_rows}</tbody>
+      </table>
+    </section>
+    <section class="panel">
+      <h2>Changed Keys Detail</h2>
+      <table>
+        <thead><tr><th>Config Key</th><th>Current</th><th>Proposed</th><th>Family</th></tr></thead>
+        <tbody>{changed_key_rows}</tbody>
+      </table>
+    </section>
+    <section class="panel">
+      <h2>Attribution Notes</h2>
+      <ul>{attribution_rows}</ul>
+    </section>
+    <section class="panel">
       <h2>Runtime Drift</h2>
       <p>{html.escape(str((drift or {}).get('drift_count', 0)))} drift items against current runtime.</p>
     </section>
@@ -1212,11 +1430,16 @@ def apply_rollout_verification(
         "insufficient_data": "pending_outcomes",
     }
     verification_status = status_map.get(str(verification.get("verification_status") or "mixed"), "review_needed")
+    changed_config = verification.get("changed_config") if isinstance(verification.get("changed_config"), dict) else {}
+    attribution = verification.get("attribution") if isinstance(verification.get("attribution"), dict) else {}
+    changed_keys = changed_config.get("changed_config_keys") if isinstance(changed_config.get("changed_config_keys"), list) else []
     summary = (
         f"{verification_status}: send_rate_delta={verification['deltas']['send_rate_delta']} "
         f"skip_delta={verification['deltas']['skip_pressure_delta']} "
         f"block_delta={verification['deltas']['block_pressure_delta']} "
-        f"post_win_rate={verification['post_outcomes']['win_rate']}"
+        f"post_win_rate={verification['post_outcomes']['win_rate']} "
+        f"changed_keys={','.join(str(item) for item in changed_keys[:5]) or 'none'} "
+        f"focus={str(attribution.get('summary') or '')}"
     )
     verification_ts = int(time.time())
 
@@ -1243,6 +1466,8 @@ def apply_rollout_verification(
                 "verification_status": verification_status,
                 "verification_summary": summary,
                 "verification_reasons": verification.get("verification_reasons") or [],
+                "changed_config_keys": changed_keys,
+                "attribution": attribution,
             },
         )
 
