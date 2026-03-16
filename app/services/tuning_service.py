@@ -5,12 +5,16 @@ import json
 import os
 import time
 import uuid
+import logging
+import asyncio
 from typing import Any
 
 import requests
 
 from app.services import signal_learning_service as sls
 from worker import config as cfg
+
+logger = logging.getLogger(__name__)
 
 PROFILE_CONFIG_KEYS: tuple[str, ...] = (
     "CAND_MIN_TOKEN_AGE_SEC",
@@ -437,6 +441,24 @@ def _ops_digest_cooldown_seconds() -> int:
     except ValueError:
         value = 3600
     return max(60, value)
+
+
+def _ops_digest_poll_seconds() -> int:
+    raw = os.getenv("SIGNAL_ENGINE_OPS_DIGEST_POLL_SEC", "").strip()
+    try:
+        value = int(raw) if raw else 900
+    except ValueError:
+        value = 900
+    return max(60, value)
+
+
+def _ops_digest_default_hours() -> int:
+    raw = os.getenv("SIGNAL_ENGINE_OPS_DIGEST_HOURS", "").strip()
+    try:
+        value = int(raw) if raw else 24
+    except ValueError:
+        value = 24
+    return max(1, value)
 
 
 def _ops_digest_signature(digest: dict[str, Any]) -> str:
@@ -917,6 +939,22 @@ def dispatch_ops_digest(hours: int = 24, *, force: bool = False) -> dict[str, An
         "notification": notification,
         "digest": digest,
     }
+
+
+async def ops_digest_worker() -> None:
+    while True:
+        try:
+            result = dispatch_ops_digest(hours=_ops_digest_default_hours(), force=False)
+            logger.info(
+                "[ops-digest] dispatched=%s reason=%s severity=%s needs_attention=%s",
+                bool(result.get("dispatched")),
+                result.get("reason") or "",
+                (result.get("digest") or {}).get("severity") if isinstance(result.get("digest"), dict) else "",
+                (result.get("digest") or {}).get("needs_attention") if isinstance(result.get("digest"), dict) else "",
+            )
+        except Exception as exc:
+            logger.exception("[ops-digest] worker iteration failed: %s", exc)
+        await asyncio.sleep(_ops_digest_poll_seconds())
 
 
 def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:

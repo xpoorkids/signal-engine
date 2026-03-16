@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 from app.services import signal_learning_service as sls
@@ -18,6 +19,7 @@ from app.services.tuning_service import (
     render_ops_digest_html,
     render_ops_digest_text,
     render_operator_command_center_html,
+    ops_digest_worker,
     render_profile_apply_diff,
     render_profile_env_snippet,
     render_latest_tuning_bundle_artifact,
@@ -349,3 +351,31 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     assert final_rollout["rollout_status"] == "rolled_out"
     aligned_notifications = list_rollout_notifications(limit=30)
     assert any(item["event_type"] == "required_profile_aligned" for item in aligned_notifications)
+
+
+def test_ops_digest_worker_runs_single_iteration(monkeypatch):
+    calls: list[tuple[int, bool]] = []
+
+    def fake_dispatch_ops_digest(hours: int = 24, *, force: bool = False):
+        calls.append((hours, force))
+        return {
+            "dispatched": False,
+            "reason": "no_attention_needed",
+            "digest": {"severity": "info", "needs_attention": False},
+        }
+
+    async def fake_sleep(_: int):
+        raise RuntimeError("stop-loop")
+
+    monkeypatch.setenv("SIGNAL_ENGINE_OPS_DIGEST_HOURS", "12")
+    monkeypatch.setenv("SIGNAL_ENGINE_OPS_DIGEST_POLL_SEC", "120")
+    monkeypatch.setattr("app.services.tuning_service.dispatch_ops_digest", fake_dispatch_ops_digest)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    try:
+        asyncio.run(ops_digest_worker())
+        assert False, "expected stop-loop"
+    except RuntimeError as exc:
+        assert str(exc) == "stop-loop"
+
+    assert calls == [(12, False)]

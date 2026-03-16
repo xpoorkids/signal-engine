@@ -87,6 +87,8 @@ Features:
 
 Ops digest behavior:
 - `SIGNAL_ENGINE_OPS_DIGEST_COOLDOWN_SEC` controls duplicate digest suppression for unchanged alert states.
+- `SIGNAL_ENGINE_OPS_DIGEST_POLL_SEC` controls how often the worker evaluates and emits the ops digest.
+- `SIGNAL_ENGINE_OPS_DIGEST_HOURS` controls the digest lookback window used by the background worker.
 
 ## Running Locally
 
