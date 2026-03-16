@@ -5,6 +5,7 @@ import json
 
 from app.services import signal_learning_service as sls
 from app.services.tuning_service import (
+    apply_rollout_verification,
     build_tuning_profiles,
     build_tuning_proposals,
     create_tuning_approval,
@@ -678,3 +679,8 @@ def test_rollout_verification_compares_pre_and_post_windows(tmp_path, monkeypatc
     verification_html = render_rollout_verification_html(approval_id=approval["approval_id"], baseline_hours=1, post_hours=2)
     assert "Rollout Verification" in verification_html
     assert "Post-Rollout Deltas" in verification_html
+
+    applied = apply_rollout_verification(approval_id=approval["approval_id"], baseline_hours=1, post_hours=2)
+    assert applied["approval"]["approval_id"] == approval["approval_id"]
+    assert applied["approval"]["verification_status"] in {"validated", "review_needed", "degraded", "pending_outcomes"}
+    assert applied["approval"]["verification_summary"]

@@ -78,6 +78,7 @@ Features:
 - `GET /learning/tuning/rollout/dashboard`
 - `GET /learning/tuning/verification`
 - `GET /learning/tuning/verification/dashboard`
+- `POST /learning/tuning/verification/apply`
 - `GET /learning/tuning/notifications`
 - `GET /learning/tuning/notifications/dashboard`
 - `GET /learning/tuning/incidents`
@@ -118,6 +119,7 @@ Notification controls:
 Rollout verification:
 - `GET /learning/tuning/verification` compares pre- and post-rollout engine behavior for a rolled-out approval.
 - `GET /learning/tuning/verification/dashboard` renders the same verification as an operator HTML page.
+- `POST /learning/tuning/verification/apply` persists verification state back onto the approval record.
 
 ## Running Locally
 

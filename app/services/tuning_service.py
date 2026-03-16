@@ -157,6 +157,9 @@ def _normalize_approval(row: Any) -> dict[str, Any]:
         "deployment_service": row["deployment_service"] or "",
         "deployment_sha": row["deployment_sha"] or "",
         "deployment_env": row["deployment_env"] or "",
+        "verification_status": row["verification_status"] or "",
+        "verification_ts": row["verification_ts"],
+        "verification_summary": row["verification_summary"] or "",
         "notes": row["notes"] or "",
         "artifact_text": row["artifact_text"],
         "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
@@ -1165,6 +1168,80 @@ def render_rollout_verification_html(
 </html>"""
 
 
+def apply_rollout_verification(
+    *,
+    approval_id: str | None = None,
+    target_name: str | None = None,
+    deployment_service: str | None = None,
+    baseline_hours: int = 24,
+    post_hours: int = 24,
+) -> dict[str, Any]:
+    verification = get_rollout_verification(
+        approval_id=approval_id,
+        target_name=target_name,
+        deployment_service=deployment_service,
+        baseline_hours=baseline_hours,
+        post_hours=post_hours,
+    )
+    approval = verification.get("approval") if isinstance(verification.get("approval"), dict) else None
+    if not approval:
+        raise KeyError("rollout_not_found")
+
+    status_map = {
+        "improved": "validated",
+        "mixed": "review_needed",
+        "degraded": "degraded",
+        "insufficient_data": "pending_outcomes",
+    }
+    verification_status = status_map.get(str(verification.get("verification_status") or "mixed"), "review_needed")
+    summary = (
+        f"{verification_status}: send_rate_delta={verification['deltas']['send_rate_delta']} "
+        f"skip_delta={verification['deltas']['skip_pressure_delta']} "
+        f"block_delta={verification['deltas']['block_pressure_delta']} "
+        f"post_win_rate={verification['post_outcomes']['win_rate']}"
+    )
+    verification_ts = int(time.time())
+
+    with sls._connect() as c:
+        c.execute(
+            """
+            UPDATE tuning_approvals
+            SET verification_status=?, verification_ts=?, verification_summary=?
+            WHERE approval_id=?
+            """,
+            (verification_status, verification_ts, summary[:500], approval["approval_id"]),
+        )
+
+    if verification_status in {"degraded", "review_needed"}:
+        emit_rollout_notification(
+            event_type="rollout_verification",
+            level="warning" if verification_status == "degraded" else "info",
+            message=f"Rollout verification for {approval.get('target_name') or approval['approval_id']} returned {verification_status}.",
+            target_name=str(approval.get("target_name") or ""),
+            approval_id=str(approval["approval_id"]),
+            deployment_service=str(approval.get("deployment_service") or ""),
+            deployment_sha=str(approval.get("deployment_sha") or ""),
+            payload={
+                "verification_status": verification_status,
+                "verification_summary": summary,
+                "verification_reasons": verification.get("verification_reasons") or [],
+            },
+        )
+
+    refreshed = get_latest_tuning_approval(
+        approval_kind=str(approval.get("approval_kind") or "profile"),
+        artifact_kind=str(approval.get("artifact_kind") or "env"),
+        target_name=str(approval.get("target_name") or "") or None,
+        rollout_status=str(approval.get("rollout_status") or "rolled_out"),
+    )
+    return {
+        "approval": refreshed or approval,
+        "verification": verification,
+        "applied_status": verification_status,
+        "applied_summary": summary,
+    }
+
+
 def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
     lookback = max(1, int(hours))
     engine_health = sls.get_engine_health_digest(hours=lookback)
@@ -1180,6 +1257,12 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
     rollout_actions = rollout_summary.get("recommended_actions")
     if isinstance(rollout_actions, list):
         recommended_actions.extend(str(item) for item in rollout_actions if item)
+    latest_rollouts = rollout_summary.get("latest_by_service") if isinstance(rollout_summary.get("latest_by_service"), dict) else {}
+    verification_notes = []
+    for service_name, item in latest_rollouts.items():
+        verification_status = str(item.get("verification_status") or "")
+        if verification_status:
+            verification_notes.append(f"{service_name}: {verification_status}")
 
     status = str(engine_health.get("status") or "unknown")
     if status in {"cold", "quiet"}:
@@ -1190,6 +1273,8 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
     unresolved_drift = [name for name, payload in drift.items() if int(payload.get("drift_count") or 0) > 0]
     if unresolved_drift:
         recommended_actions.insert(0, f"Runtime config drift exists for: {', '.join(unresolved_drift)}.")
+    if verification_notes:
+        recommended_actions.insert(0, f"Latest rollout verification: {', '.join(verification_notes)}.")
 
     return {
         "lookback_hours": lookback,
@@ -1203,6 +1288,7 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         "rollout_summary": rollout_summary,
         "drift": drift,
         "notifications": incidents,
+        "rollout_verification": verification_notes,
         "recommended_actions": recommended_actions[:8],
     }
 
@@ -2209,6 +2295,9 @@ def create_tuning_approval(
         "deployment_service": "",
         "deployment_sha": "",
         "deployment_env": "",
+        "verification_status": "",
+        "verification_ts": None,
+        "verification_summary": "",
         "notes": (notes or "").strip(),
         "artifact_text": artifact_text,
         "payload": payload,
@@ -2220,8 +2309,9 @@ def create_tuning_approval(
                 approval_id, created_ts, approved_by, approval_kind, target_name,
                 artifact_kind, lookback_hours, rollout_status, rolled_out_ts,
                 deployment_service, deployment_sha, deployment_env,
+                verification_status, verification_ts, verification_summary,
                 notes, artifact_text, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record["approval_id"],
@@ -2236,6 +2326,9 @@ def create_tuning_approval(
                 record["deployment_service"],
                 record["deployment_sha"],
                 record["deployment_env"],
+                record["verification_status"],
+                record["verification_ts"],
+                record["verification_summary"],
                 record["notes"],
                 record["artifact_text"],
                 json.dumps(record["payload"]),
@@ -2259,6 +2352,7 @@ def list_tuning_approvals(
             SELECT approval_id, created_ts, approved_by, approval_kind, target_name,
                    artifact_kind, lookback_hours, rollout_status, rolled_out_ts,
                    deployment_service, deployment_sha, deployment_env,
+                   verification_status, verification_ts, verification_summary,
                    notes, artifact_text, payload_json
             FROM tuning_approvals
             ORDER BY created_ts DESC
@@ -2445,6 +2539,7 @@ def get_latest_tuning_approval(
             SELECT approval_id, created_ts, approved_by, approval_kind, target_name,
                    artifact_kind, lookback_hours, rollout_status, rolled_out_ts,
                    deployment_service, deployment_sha, deployment_env,
+                   verification_status, verification_ts, verification_summary,
                    notes, artifact_text, payload_json
             FROM tuning_approvals
             WHERE approval_kind=? AND artifact_kind=? AND rollout_status=?
@@ -2737,6 +2832,7 @@ def render_tuning_approvals_html(
         f"<td>{html.escape(str(item.get('target_name') or 'n/a'))}</td>"
         f"<td>{html.escape(str(item.get('artifact_kind') or 'unknown'))}</td>"
         f"<td>{html.escape(str(item.get('rollout_status') or 'approved'))}</td>"
+        f"<td>{html.escape(str(item.get('verification_status') or ''))}</td>"
         f"<td>{html.escape(str(item.get('approved_by') or 'unknown'))}</td>"
         f"<td>{html.escape(str(item.get('deployment_service') or ''))}</td>"
         f"<td>{html.escape(str(item.get('deployment_sha') or ''))}</td>"
@@ -2744,15 +2840,17 @@ def render_tuning_approvals_html(
         f"<td>{html.escape(str(item.get('notes') or ''))}</td>"
         "</tr>"
         for item in approvals
-    ) or "<tr><td colspan='9'>No tuning approvals recorded yet.</td></tr>"
+    ) or "<tr><td colspan='10'>No tuning approvals recorded yet.</td></tr>"
 
     artifacts = "".join(
         '<section class="panel">'
         f"<h2>{html.escape(str(item.get('approval_kind') or 'unknown').title())} / {html.escape(str(item.get('target_name') or 'default'))}</h2>"
         f"<p><strong>Approved by:</strong> {html.escape(str(item.get('approved_by') or 'unknown'))} &nbsp; "
         f"<strong>Artifact:</strong> {html.escape(str(item.get('artifact_kind') or 'unknown'))} &nbsp; "
-        f"<strong>Status:</strong> {html.escape(str(item.get('rollout_status') or 'pending'))}</p>"
+        f"<strong>Status:</strong> {html.escape(str(item.get('rollout_status') or 'pending'))} &nbsp; "
+        f"<strong>Verification:</strong> {html.escape(str(item.get('verification_status') or 'n/a'))}</p>"
         f"<p><strong>Deploy:</strong> {html.escape(str(item.get('deployment_service') or 'n/a'))} / {html.escape(str(item.get('deployment_env') or 'n/a'))} / {html.escape(str(item.get('deployment_sha') or 'n/a'))}</p>"
+        f"<p><strong>Verification Summary:</strong> {html.escape(str(item.get('verification_summary') or 'n/a'))}</p>"
         f"<pre>{html.escape(str(item.get('artifact_text') or ''))}</pre>"
         "</section>"
         for item in approvals[:5]
@@ -2795,7 +2893,7 @@ def render_tuning_approvals_html(
     <section class="panel">
       <h2>Approval Log</h2>
       <table>
-        <thead><tr><th>Kind</th><th>Target</th><th>Artifact</th><th>Status</th><th>Approved By</th><th>Service</th><th>SHA</th><th>Hours</th><th>Notes</th></tr></thead>
+        <thead><tr><th>Kind</th><th>Target</th><th>Artifact</th><th>Status</th><th>Verification</th><th>Approved By</th><th>Service</th><th>SHA</th><th>Hours</th><th>Notes</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </section>

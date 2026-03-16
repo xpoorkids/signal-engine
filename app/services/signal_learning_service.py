@@ -133,6 +133,9 @@ def init() -> None:
                 deployment_service TEXT,
                 deployment_sha TEXT,
                 deployment_env TEXT,
+                verification_status TEXT,
+                verification_ts INTEGER,
+                verification_summary TEXT,
                 notes TEXT,
                 artifact_text TEXT NOT NULL,
                 payload_json TEXT NOT NULL
@@ -206,6 +209,12 @@ def init() -> None:
             c.execute("ALTER TABLE tuning_approvals ADD COLUMN deployment_sha TEXT")
         if "deployment_env" not in approval_cols:
             c.execute("ALTER TABLE tuning_approvals ADD COLUMN deployment_env TEXT")
+        if "verification_status" not in approval_cols:
+            c.execute("ALTER TABLE tuning_approvals ADD COLUMN verification_status TEXT")
+        if "verification_ts" not in approval_cols:
+            c.execute("ALTER TABLE tuning_approvals ADD COLUMN verification_ts INTEGER")
+        if "verification_summary" not in approval_cols:
+            c.execute("ALTER TABLE tuning_approvals ADD COLUMN verification_summary TEXT")
         notification_cols = {row[1] for row in c.execute("PRAGMA table_info(rollout_notifications)").fetchall()}
         if "acknowledged_ts" not in notification_cols:
             c.execute("ALTER TABLE rollout_notifications ADD COLUMN acknowledged_ts INTEGER")

@@ -321,6 +321,15 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert verification_dashboard_response.status_code == 200
     assert "Rollout Verification" in verification_dashboard_response.text
 
+    verification_apply_response = client.post(
+        "/learning/tuning/verification/apply",
+        json={"approval_id": approval_id, "baseline_hours": 24, "post_hours": 24},
+    )
+    assert verification_apply_response.status_code == 200
+    verification_apply_payload = verification_apply_response.json()
+    assert verification_apply_payload["approval"]["approval_id"] == approval_id
+    assert "verification_status" in verification_apply_payload["approval"]
+
     notifications_response = client.get("/learning/tuning/notifications?limit=20")
     assert notifications_response.status_code == 200
     notifications_payload = notifications_response.json()
