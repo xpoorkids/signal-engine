@@ -76,6 +76,8 @@ Features:
 - `GET /learning/tuning/drift`
 - `GET /learning/tuning/rollout/summary`
 - `GET /learning/tuning/rollout/dashboard`
+- `GET /learning/tuning/verification`
+- `GET /learning/tuning/verification/dashboard`
 - `GET /learning/tuning/notifications`
 - `GET /learning/tuning/notifications/dashboard`
 - `GET /learning/tuning/incidents`
@@ -112,6 +114,10 @@ Notification controls:
 - `GET /learning/tuning/incidents` returns clustered incidents by event, target, and service.
 - `POST /learning/tuning/incidents/state` supports incident-level `acknowledged`, `snoozed`, and `resolved` transitions.
 - `POST /learning/tuning/notifications/{notification_id}/state` supports acknowledgment and snoozing for operator triage.
+
+Rollout verification:
+- `GET /learning/tuning/verification` compares pre- and post-rollout engine behavior for a rolled-out approval.
+- `GET /learning/tuning/verification/dashboard` renders the same verification as an operator HTML page.
 
 ## Running Locally
 

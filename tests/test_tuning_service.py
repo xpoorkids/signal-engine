@@ -14,6 +14,7 @@ from app.services.tuning_service import (
     get_latest_tuning_approval,
     get_ops_digest,
     get_operator_command_center,
+    get_rollout_verification,
     list_notification_incidents,
     list_rollout_notifications,
     get_tuning_rollout_summary,
@@ -26,6 +27,7 @@ from app.services.tuning_service import (
     render_profile_apply_diff,
     render_profile_env_snippet,
     render_latest_tuning_bundle_artifact,
+    render_rollout_verification_html,
     render_tuning_approvals_html,
     render_tuning_rollout_summary_html,
     render_tuning_apply_diff,
@@ -581,3 +583,98 @@ def test_policy_tiered_ops_digests_emit_incident_and_daily_summary(tmp_path, mon
     assert result["incident_level"] == "incident"
     assert "incident_digest" in dispatched_types
     assert "daily_summary" in dispatched_types
+
+
+def test_rollout_verification_compares_pre_and_post_windows(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SERVICE", "worker")
+    monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SHA", "verify123")
+    monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_ENV", "production")
+    sls.init()
+
+    approval = create_tuning_approval(
+        approval_kind="profile",
+        artifact_kind="env",
+        target_name="balanced",
+        hours=48,
+        approved_by="ops",
+        notes="verification candidate",
+    )
+    update_tuning_approval_status(approval["approval_id"], rollout_status="approved", notes="approved")
+    rolled_out = update_tuning_approval_status(approval["approval_id"], rollout_status="rolled_out", notes="rolled out")
+    rollout_ts = int(rolled_out["rolled_out_ts"] or rolled_out["created_ts"])
+
+    for offset in range(8):
+        sls.record_signal_decision(
+            token=f"pre-{offset}",
+            event_type="candidate",
+            stage="candidate",
+            decision="candidate_gate_skip",
+            reasons=["attention<0.20"],
+            attention_score=0.12,
+            risk_score=0.30,
+            confidence_score=0.18,
+            lifecycle="dex",
+            ts_value=rollout_ts - 1800 - offset,
+            source="test",
+        )
+    post_signal_ids = []
+    for offset in range(6):
+        signal_id = sls.record_signal_decision(
+            token=f"post-{offset}",
+            event_type="promoted",
+            stage="promoted",
+            decision="alert_sent",
+            reasons=["passed"],
+            attention_score=0.52,
+            risk_score=0.22,
+            confidence_score=0.58,
+            lifecycle="dex",
+            ts_value=rollout_ts + 600 + offset,
+            source="test",
+        )
+        post_signal_ids.append(signal_id)
+
+    with sls._connect() as c:
+        for idx, signal_id in enumerate(post_signal_ids[:4]):
+            c.execute(
+                """
+                INSERT INTO signal_snapshots (
+                    signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                    volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                    txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                    outcome_label, snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    60,
+                    rollout_ts + 3600 + idx,
+                    "dex",
+                    22000,
+                    5200,
+                    3300,
+                    80.0,
+                    16.0,
+                    35.0,
+                    40,
+                    20,
+                    55.0,
+                    8.0,
+                    21.0,
+                    "worked",
+                    json.dumps({"outcome_label": "worked"}),
+                ),
+            )
+
+    verification = get_rollout_verification(approval_id=approval["approval_id"], baseline_hours=1, post_hours=2)
+    assert verification["approval"]["approval_id"] == approval["approval_id"]
+    assert verification["pre_metrics"]["skipped"] >= 8
+    assert verification["post_metrics"]["sent"] >= 6
+    assert verification["post_outcomes"]["positive"] >= 4
+    assert verification["verification_status"] in {"improved", "mixed"}
+
+    verification_html = render_rollout_verification_html(approval_id=approval["approval_id"], baseline_hours=1, post_hours=2)
+    assert "Rollout Verification" in verification_html
+    assert "Post-Rollout Deltas" in verification_html

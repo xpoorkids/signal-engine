@@ -21,6 +21,7 @@ from app.services.tuning_service import (
     get_latest_tuning_approval,
     get_ops_digest,
     get_operator_command_center,
+    get_rollout_verification,
     get_tuning_rollout_summary,
     list_notification_incidents,
     list_rollout_notifications,
@@ -32,6 +33,7 @@ from app.services.tuning_service import (
     render_profile_apply_diff,
     render_profile_env_snippet,
     render_rollout_notifications_html,
+    render_rollout_verification_html,
     render_tuning_rollout_summary_html,
     render_tuning_approvals_html,
     render_tuning_apply_diff,
@@ -318,6 +320,48 @@ def learning_tuning_rollout_summary():
 @router.get("/learning/tuning/rollout/dashboard")
 def learning_tuning_rollout_dashboard():
     return HTMLResponse(content=render_tuning_rollout_summary_html())
+
+
+@router.get("/learning/tuning/verification")
+def learning_tuning_verification(
+    approval_id: str | None = None,
+    target_name: str | None = None,
+    deployment_service: str | None = None,
+    baseline_hours: int = 24,
+    post_hours: int = 24,
+):
+    try:
+        return get_rollout_verification(
+            approval_id=approval_id,
+            target_name=target_name,
+            deployment_service=deployment_service,
+            baseline_hours=max(1, baseline_hours),
+            post_hours=max(1, post_hours),
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="rollout_not_found")
+
+
+@router.get("/learning/tuning/verification/dashboard")
+def learning_tuning_verification_dashboard(
+    approval_id: str | None = None,
+    target_name: str | None = None,
+    deployment_service: str | None = None,
+    baseline_hours: int = 24,
+    post_hours: int = 24,
+):
+    try:
+        return HTMLResponse(
+            content=render_rollout_verification_html(
+                approval_id=approval_id,
+                target_name=target_name,
+                deployment_service=deployment_service,
+                baseline_hours=max(1, baseline_hours),
+                post_hours=max(1, post_hours),
+            )
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="rollout_not_found")
 
 
 @router.get("/learning/tuning/notifications")

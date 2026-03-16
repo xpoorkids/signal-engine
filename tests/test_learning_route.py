@@ -311,6 +311,16 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "Tuning Rollout Summary" in rollout_dashboard_response.text
     assert "Recommended Actions" in rollout_dashboard_response.text
 
+    verification_response = client.get("/learning/tuning/verification?approval_id=" + approval_id)
+    assert verification_response.status_code == 200
+    verification_payload = verification_response.json()
+    assert verification_payload["approval"]["approval_id"] == approval_id
+    assert "verification_status" in verification_payload
+
+    verification_dashboard_response = client.get("/learning/tuning/verification/dashboard?approval_id=" + approval_id)
+    assert verification_dashboard_response.status_code == 200
+    assert "Rollout Verification" in verification_dashboard_response.text
+
     notifications_response = client.get("/learning/tuning/notifications?limit=20")
     assert notifications_response.status_code == 200
     notifications_payload = notifications_response.json()

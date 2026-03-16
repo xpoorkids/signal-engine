@@ -889,6 +889,282 @@ def render_notification_incidents_html(limit: int = 20, *, active_only: bool = F
 </html>"""
 
 
+def _decision_metrics_between(start_ts: int, end_ts: int) -> dict[str, Any]:
+    with sls._connect() as c:
+        rows = c.execute(
+            """
+            SELECT decision
+            FROM signal_decisions
+            WHERE created_ts >= ? AND created_ts < ?
+            """,
+            (int(start_ts), int(end_ts)),
+        ).fetchall()
+    counts: dict[str, int] = {}
+    for row in rows:
+        decision = str(row["decision"] or "unknown")
+        counts[decision] = counts.get(decision, 0) + 1
+    sent = sum(int(value or 0) for key, value in counts.items() if str(key).endswith("sent"))
+    skipped = sum(int(value or 0) for key, value in counts.items() if "skip" in str(key))
+    blocked = sum(int(value or 0) for key, value in counts.items() if "block" in str(key))
+    total = sum(int(value or 0) for value in counts.values())
+    return {
+        "window_start_ts": int(start_ts),
+        "window_end_ts": int(end_ts),
+        "counts_by_decision": counts,
+        "total_decisions": total,
+        "sent": sent,
+        "skipped": skipped,
+        "blocked": blocked,
+        "send_rate": round((sent / total) * 100.0, 1) if total else 0.0,
+        "skip_pressure": round((skipped / total) * 100.0, 1) if total else 0.0,
+        "block_pressure": round((blocked / total) * 100.0, 1) if total else 0.0,
+    }
+
+
+def _outcome_metrics_between(start_ts: int, end_ts: int) -> dict[str, Any]:
+    with sls._connect() as c:
+        rows = c.execute(
+            """
+            SELECT COALESCE(ss.outcome_label, 'pending') AS outcome_label
+            FROM signals s
+            LEFT JOIN (
+                SELECT signal_id, outcome_label, MAX(horizon_minutes) AS max_horizon
+                FROM signal_snapshots
+                GROUP BY signal_id
+            ) ss ON ss.signal_id = s.signal_id
+            WHERE s.alert_ts >= ? AND s.alert_ts < ?
+            """,
+            (int(start_ts), int(end_ts)),
+        ).fetchall()
+    counts: dict[str, int] = {}
+    for row in rows:
+        label = str(row["outcome_label"] or "pending")
+        counts[label] = counts.get(label, 0) + 1
+    positive = int(counts.get("worked") or 0) + int(counts.get("strong_continuation") or 0)
+    negative = int(counts.get("failed") or 0)
+    total = sum(int(value or 0) for value in counts.values())
+    return {
+        "outcomes_by_label": counts,
+        "total": total,
+        "positive": positive,
+        "negative": negative,
+        "win_rate": round((positive / total) * 100.0, 1) if total else 0.0,
+        "fail_rate": round((negative / total) * 100.0, 1) if total else 0.0,
+    }
+
+
+def _latest_matching_rollout(
+    *,
+    target_name: str | None = None,
+    deployment_service: str | None = None,
+) -> dict[str, Any] | None:
+    approvals = list_tuning_approvals(
+        limit=100,
+        approval_kind="profile",
+        artifact_kind="env",
+        target_name=target_name,
+        rollout_status="rolled_out",
+    )
+    if deployment_service:
+        target_service = str(deployment_service or "").strip()
+        approvals = [item for item in approvals if str(item.get("deployment_service") or "") == target_service]
+    return approvals[0] if approvals else None
+
+
+def _verification_status(pre: dict[str, Any], post: dict[str, Any], post_outcomes: dict[str, Any]) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    improved = 0
+    degraded = 0
+
+    if float(post.get("send_rate") or 0.0) > float(pre.get("send_rate") or 0.0):
+        improved += 1
+        reasons.append("send_rate_up")
+    elif float(post.get("send_rate") or 0.0) < float(pre.get("send_rate") or 0.0):
+        degraded += 1
+        reasons.append("send_rate_down")
+
+    if float(post.get("skip_pressure") or 0.0) < float(pre.get("skip_pressure") or 0.0):
+        improved += 1
+        reasons.append("skip_pressure_down")
+    elif float(post.get("skip_pressure") or 0.0) > float(pre.get("skip_pressure") or 0.0):
+        degraded += 1
+        reasons.append("skip_pressure_up")
+
+    if float(post.get("block_pressure") or 0.0) < float(pre.get("block_pressure") or 0.0):
+        improved += 1
+        reasons.append("block_pressure_down")
+    elif float(post.get("block_pressure") or 0.0) > float(pre.get("block_pressure") or 0.0):
+        degraded += 1
+        reasons.append("block_pressure_up")
+
+    if int(post_outcomes.get("total") or 0) >= 3:
+        if float(post_outcomes.get("win_rate") or 0.0) >= 50.0:
+            improved += 1
+            reasons.append("post_rollout_outcomes_constructive")
+        elif float(post_outcomes.get("fail_rate") or 0.0) >= 50.0:
+            degraded += 1
+            reasons.append("post_rollout_outcomes_weak")
+
+    if int(pre.get("total_decisions") or 0) == 0 and int(post.get("total_decisions") or 0) == 0:
+        return "insufficient_data", ["no_decision_data"]
+    if improved > degraded:
+        return "improved", reasons
+    if degraded > improved:
+        return "degraded", reasons
+    return "mixed", reasons or ["balanced_change"]
+
+
+def get_rollout_verification(
+    *,
+    approval_id: str | None = None,
+    target_name: str | None = None,
+    deployment_service: str | None = None,
+    baseline_hours: int = 24,
+    post_hours: int = 24,
+) -> dict[str, Any]:
+    approval: dict[str, Any] | None = None
+    if approval_id:
+        for item in list_tuning_approvals(limit=200, rollout_status="rolled_out"):
+            if str(item.get("approval_id") or "") == str(approval_id):
+                approval = item
+                break
+    else:
+        approval = _latest_matching_rollout(
+            target_name=str(target_name or "").strip().lower() or None,
+            deployment_service=str(deployment_service or "").strip() or None,
+        )
+    if approval is None:
+        raise KeyError("rollout_not_found")
+
+    rollout_ts = int(approval.get("rolled_out_ts") or approval.get("created_ts") or 0)
+    baseline_start = rollout_ts - max(1, int(baseline_hours)) * 3600
+    post_end = min(int(time.time()), rollout_ts + max(1, int(post_hours)) * 3600)
+
+    pre_metrics = _decision_metrics_between(baseline_start, rollout_ts)
+    post_metrics = _decision_metrics_between(rollout_ts, post_end)
+    post_outcomes = _outcome_metrics_between(rollout_ts, post_end)
+    status, reasons = _verification_status(pre_metrics, post_metrics, post_outcomes)
+
+    deltas = {
+        "send_rate_delta": round(float(post_metrics.get("send_rate") or 0.0) - float(pre_metrics.get("send_rate") or 0.0), 1),
+        "skip_pressure_delta": round(float(post_metrics.get("skip_pressure") or 0.0) - float(pre_metrics.get("skip_pressure") or 0.0), 1),
+        "block_pressure_delta": round(float(post_metrics.get("block_pressure") or 0.0) - float(pre_metrics.get("block_pressure") or 0.0), 1),
+    }
+    drift = (
+        get_config_drift_report(target_name=str(approval.get("target_name") or ""), rollout_status="rolled_out")
+        if str(approval.get("target_name") or "") in {"strict", "balanced", "aggressive"}
+        else None
+    )
+
+    return {
+        "approval": approval,
+        "baseline_hours": int(baseline_hours),
+        "post_hours": int(post_hours),
+        "rollout_ts": rollout_ts,
+        "pre_metrics": pre_metrics,
+        "post_metrics": post_metrics,
+        "post_outcomes": post_outcomes,
+        "deltas": deltas,
+        "verification_status": status,
+        "verification_reasons": reasons,
+        "drift": drift,
+    }
+
+
+def render_rollout_verification_html(
+    *,
+    approval_id: str | None = None,
+    target_name: str | None = None,
+    deployment_service: str | None = None,
+    baseline_hours: int = 24,
+    post_hours: int = 24,
+) -> str:
+    verification = get_rollout_verification(
+        approval_id=approval_id,
+        target_name=target_name,
+        deployment_service=deployment_service,
+        baseline_hours=baseline_hours,
+        post_hours=post_hours,
+    )
+    approval = verification.get("approval") if isinstance(verification.get("approval"), dict) else {}
+    pre = verification.get("pre_metrics") if isinstance(verification.get("pre_metrics"), dict) else {}
+    post = verification.get("post_metrics") if isinstance(verification.get("post_metrics"), dict) else {}
+    outcomes = verification.get("post_outcomes") if isinstance(verification.get("post_outcomes"), dict) else {}
+    deltas = verification.get("deltas") if isinstance(verification.get("deltas"), dict) else {}
+    reasons = verification.get("verification_reasons") if isinstance(verification.get("verification_reasons"), list) else []
+    drift = verification.get("drift") if isinstance(verification.get("drift"), dict) else {}
+
+    def metric_card(label: str, value: Any) -> str:
+        return (
+            '<div class="metric-card">'
+            f"<span>{html.escape(label)}</span>"
+            f"<strong>{html.escape(str(value))}</strong>"
+            "</div>"
+        )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rollout Verification</title>
+  <style>
+    :root {{
+      --bg: #081119; --panel: rgba(11,24,38,.9); --line: rgba(116,153,186,.16); --text: #edf5fb; --muted: #8ca4b8;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; color: var(--text); font-family: "Segoe UI", sans-serif; background: linear-gradient(180deg, #071018 0%, #09131c 100%); }}
+    .shell {{ max-width: 1280px; margin: 0 auto; padding: 24px 18px 36px; }}
+    .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 22px; padding: 20px; margin-top: 18px; }}
+    .metric-grid {{ display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:16px; }}
+    .metric-card {{ background: rgba(18,34,52,.96); border: 1px solid var(--line); border-radius: 18px; padding: 16px; display:flex; flex-direction:column; gap:8px; }}
+    .metric-card span {{ color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }}
+    .metric-card strong {{ font-size: 24px; }}
+    h1 {{ margin: 0 0 8px; font-size: 34px; }}
+    h2 {{ margin: 0 0 12px; font-size: 18px; }}
+    p, li {{ color: var(--muted); line-height: 1.5; }}
+    ul {{ margin: 0; padding-left: 18px; }}
+    @media (max-width: 900px) {{ .metric-grid {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="panel">
+      <h1>Rollout Verification</h1>
+      <p><strong>Approval:</strong> {html.escape(str(approval.get('approval_id') or 'unknown'))} &nbsp; <strong>Target:</strong> {html.escape(str(approval.get('target_name') or 'n/a'))} &nbsp; <strong>Service:</strong> {html.escape(str(approval.get('deployment_service') or 'n/a'))}</p>
+      <p><strong>Status:</strong> {html.escape(str(verification.get('verification_status') or 'mixed'))}</p>
+    </section>
+    <section class="panel">
+      <h2>Post-Rollout Deltas</h2>
+      <div class="metric-grid">
+        {metric_card("Send Rate Δ", f"{deltas.get('send_rate_delta', 0)}%")}
+        {metric_card("Skip Pressure Δ", f"{deltas.get('skip_pressure_delta', 0)}%")}
+        {metric_card("Block Pressure Δ", f"{deltas.get('block_pressure_delta', 0)}%")}
+        {metric_card("Post Win Rate", f"{outcomes.get('win_rate', 0)}%")}
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Comparison</h2>
+      <div class="metric-grid">
+        {metric_card("Pre Send Rate", f"{pre.get('send_rate', 0)}%")}
+        {metric_card("Post Send Rate", f"{post.get('send_rate', 0)}%")}
+        {metric_card("Pre Skip", f"{pre.get('skip_pressure', 0)}%")}
+        {metric_card("Post Skip", f"{post.get('skip_pressure', 0)}%")}
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Verification Reasons</h2>
+      <ul>{"".join(f"<li>{html.escape(str(item))}</li>" for item in reasons) or "<li>No specific reason.</li>"}</ul>
+    </section>
+    <section class="panel">
+      <h2>Runtime Drift</h2>
+      <p>{html.escape(str((drift or {}).get('drift_count', 0)))} drift items against current runtime.</p>
+    </section>
+  </div>
+</body>
+</html>"""
+
+
 def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
     lookback = max(1, int(hours))
     engine_health = sls.get_engine_health_digest(hours=lookback)
