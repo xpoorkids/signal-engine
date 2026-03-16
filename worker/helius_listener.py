@@ -56,6 +56,12 @@ HELIUS_RPC = _get_helius_rpc_url()
 _last_rpc_log_ts = 0.0
 LAST_WS_ACTIVITY = time.time()
 
+
+def _mark_ws_activity(ts: float | None = None) -> float:
+    value = float(ts or time.time())
+    globals()["LAST_WS_ACTIVITY"] = value
+    return value
+
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 EXCLUDED_MINTS = {WSOL_MINT, USDC_MINT}
@@ -796,9 +802,11 @@ async def listen(q: asyncio.Queue) -> None:
                 close_timeout=5,
                 max_queue=None,
             ) as ws:
+                _mark_ws_activity()
                 print("[ws-connected]", flush=True)
                 if ENABLE_LOGS_SUB:
                     await ws.send(json.dumps(logs_sub))
+                    _mark_ws_activity()
                     print("[ws-subscribed]", flush=True)
                     if reconnect_count > 0:
                         print("[ws-reconnect-success]", flush=True)
@@ -827,7 +835,7 @@ async def listen(q: asyncio.Queue) -> None:
                     except Exception as e:
                         print("[helius] recv/parse failed:", e, flush=True)
                         continue
-                    globals()["LAST_WS_ACTIVITY"] = time.time()
+                    _mark_ws_activity()
 
                     if msg.get("id") == logs_sub.get("id"):
                         if "result" in msg:

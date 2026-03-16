@@ -41,3 +41,13 @@ def test_program_seen_path_reads_account_keys_from_partial_tx(monkeypatch):
     )
 
     assert listener.PUMP_FUN_PROGRAM_ID in accounts
+
+
+def test_mark_ws_activity_updates_global_timestamp(monkeypatch):
+    listener = _load_listener(monkeypatch)
+    monkeypatch.setattr(listener, "LAST_WS_ACTIVITY", 10.0)
+
+    updated = listener._mark_ws_activity(25.0)
+
+    assert updated == 25.0
+    assert listener.LAST_WS_ACTIVITY == 25.0
