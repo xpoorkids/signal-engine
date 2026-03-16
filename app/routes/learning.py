@@ -18,9 +18,11 @@ from app.services.tuning_service import (
     create_tuning_approval,
     get_config_drift_report,
     get_latest_tuning_approval,
+    get_operator_command_center,
     get_tuning_rollout_summary,
     list_rollout_notifications,
     list_tuning_approvals,
+    render_operator_command_center_html,
     render_profile_apply_diff,
     render_profile_env_snippet,
     render_rollout_notifications_html,
@@ -318,6 +320,16 @@ def learning_tuning_notifications(limit: int = 20):
 @router.get("/learning/tuning/notifications/dashboard")
 def learning_tuning_notifications_dashboard(limit: int = 20):
     return HTMLResponse(content=render_rollout_notifications_html(limit=max(1, limit)))
+
+
+@router.get("/learning/command-center")
+def learning_command_center(hours: int = 24):
+    return get_operator_command_center(hours=max(1, hours))
+
+
+@router.get("/learning/command-center/dashboard")
+def learning_command_center_dashboard(hours: int = 24):
+    return HTMLResponse(content=render_operator_command_center_html(hours=max(1, hours)))
 
 
 @router.get("/learning/diagnostics/dashboard")

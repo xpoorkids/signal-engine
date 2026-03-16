@@ -321,6 +321,18 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert notifications_dashboard_response.status_code == 200
     assert "Rollout Notifications" in notifications_dashboard_response.text
 
+    command_center_response = client.get("/learning/command-center?hours=24")
+    assert command_center_response.status_code == 200
+    command_center_payload = command_center_response.json()
+    assert "engine_health" in command_center_payload
+    assert "rollout_summary" in command_center_payload
+    assert "drift" in command_center_payload
+
+    command_center_dashboard_response = client.get("/learning/command-center/dashboard?hours=24")
+    assert command_center_dashboard_response.status_code == 200
+    assert "Operator Command Center" in command_center_dashboard_response.text
+    assert "Health Snapshot" in command_center_dashboard_response.text
+
     approvals_dashboard_response = client.get("/learning/tuning/approvals/dashboard?limit=10&rollout_status=rolled_out&q=render")
     assert approvals_dashboard_response.status_code == 200
     assert "Tuning Approvals" in approvals_dashboard_response.text

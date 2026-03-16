@@ -9,9 +9,11 @@ from app.services.tuning_service import (
     create_tuning_approval,
     get_config_drift_report,
     get_latest_tuning_approval,
+    get_operator_command_center,
     list_rollout_notifications,
     get_tuning_rollout_summary,
     list_tuning_approvals,
+    render_operator_command_center_html,
     render_profile_apply_diff,
     render_profile_env_snippet,
     render_latest_tuning_bundle_artifact,
@@ -257,6 +259,16 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     assert "Tuning Rollout Summary" in summary_html
     assert "Worker / Engine Alignment" in summary_html
     assert "Recommended Actions" in summary_html
+
+    command_center = get_operator_command_center(hours=24)
+    assert command_center["engine_health"]["status"] in {"cold", "quiet", "processing", "gated", "blocked", "active"}
+    assert "rollout_summary" in command_center
+    assert "drift" in command_center
+    assert "recommended_actions" in command_center
+
+    command_center_html = render_operator_command_center_html(hours=24)
+    assert "Operator Command Center" in command_center_html
+    assert "Health Snapshot" in command_center_html
 
     monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SERVICE", "engine")
     monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SHA", "diff999")

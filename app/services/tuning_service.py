@@ -449,6 +449,197 @@ def render_rollout_notifications_html(limit: int = 20) -> str:
 </html>"""
 
 
+def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
+    lookback = max(1, int(hours))
+    engine_health = sls.get_engine_health_digest(hours=lookback)
+    diagnostics = sls.get_diagnostics_summary(hours=lookback)
+    rollout_summary = get_tuning_rollout_summary()
+    notifications = list_rollout_notifications(limit=10)
+    drift = {
+        profile: get_config_drift_report(target_name=profile, rollout_status="rolled_out")
+        for profile in ("strict", "balanced", "aggressive")
+    }
+
+    recommended_actions: list[str] = []
+    rollout_actions = rollout_summary.get("recommended_actions")
+    if isinstance(rollout_actions, list):
+        recommended_actions.extend(str(item) for item in rollout_actions if item)
+
+    status = str(engine_health.get("status") or "unknown")
+    if status in {"cold", "quiet"}:
+        recommended_actions.insert(0, f"Engine status is {status}. Check gate pressure and recent decision flow before changing thresholds.")
+    elif status in {"gated", "blocked"}:
+        recommended_actions.insert(0, f"Engine status is {status}. Review recent skip/block reasons before rolling out more aggressive profiles.")
+
+    unresolved_drift = [name for name, payload in drift.items() if int(payload.get("drift_count") or 0) > 0]
+    if unresolved_drift:
+        recommended_actions.insert(0, f"Runtime config drift exists for: {', '.join(unresolved_drift)}.")
+
+    return {
+        "lookback_hours": lookback,
+        "engine_health": engine_health,
+        "diagnostics": {
+            "counts_by_decision": diagnostics.get("counts_by_decision") or {},
+            "top_skip_reasons": diagnostics.get("top_skip_reasons") or [],
+            "threshold_guidance": diagnostics.get("threshold_guidance") or [],
+            "reason_quality": diagnostics.get("reason_quality") or [],
+        },
+        "rollout_summary": rollout_summary,
+        "drift": drift,
+        "notifications": notifications,
+        "recommended_actions": recommended_actions[:8],
+    }
+
+
+def render_operator_command_center_html(hours: int = 24) -> str:
+    center = get_operator_command_center(hours=max(1, hours))
+    engine_health = center.get("engine_health") if isinstance(center.get("engine_health"), dict) else {}
+    diagnostics = center.get("diagnostics") if isinstance(center.get("diagnostics"), dict) else {}
+    rollout_summary = center.get("rollout_summary") if isinstance(center.get("rollout_summary"), dict) else {}
+    drift = center.get("drift") if isinstance(center.get("drift"), dict) else {}
+    notifications = center.get("notifications") if isinstance(center.get("notifications"), list) else []
+    recommended_actions = center.get("recommended_actions") if isinstance(center.get("recommended_actions"), list) else []
+
+    def metric_card(label: str, value: Any) -> str:
+        return (
+            '<div class="metric-card">'
+            f"<span>{html.escape(label)}</span>"
+            f"<strong>{html.escape(str(value))}</strong>"
+            "</div>"
+        )
+
+    top_skip_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('reason') or 'unknown'))}</td>"
+        f"<td>{int(item.get('count') or 0)}</td>"
+        "</tr>"
+        for item in (diagnostics.get("top_skip_reasons") or [])[:8]
+    ) or "<tr><td colspan='2'>No skip reasons in this window.</td></tr>"
+
+    action_rows = "".join(f"<li>{html.escape(str(item))}</li>" for item in recommended_actions) or "<li>No immediate actions.</li>"
+
+    notification_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('event_type') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('level') or 'info'))}</td>"
+        f"<td>{html.escape(str(item.get('deployment_service') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('message') or ''))}</td>"
+        "</tr>"
+        for item in notifications[:8]
+    ) or "<tr><td colspan='4'>No rollout notifications.</td></tr>"
+
+    alignment_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('target_name') or 'unknown'))}</td>"
+        f"<td>{'yes' if item.get('aligned') else 'no'}</td>"
+        f"<td>{html.escape(str(item.get('worker_sha') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('engine_sha') or 'n/a'))}</td>"
+        "</tr>"
+        for item in (rollout_summary.get("worker_engine_alignment") or [])
+    ) or "<tr><td colspan='4'>No worker/engine rollout alignment data yet.</td></tr>"
+
+    drift_cards = "".join(
+        '<div class="metric-card">'
+        f"<span>{html.escape(name.title())} Drift</span>"
+        f"<strong>{int(payload.get('drift_count') or 0)}</strong>"
+        "</div>"
+        for name, payload in drift.items()
+    ) or '<div class="metric-card"><span>Drift</span><strong>0</strong></div>'
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Operator Command Center</title>
+  <style>
+    :root {{
+      --bg: #081119;
+      --panel: rgba(11, 24, 38, 0.9);
+      --panel-2: rgba(18, 34, 52, 0.96);
+      --line: rgba(116, 153, 186, 0.16);
+      --text: #edf5fb;
+      --muted: #8ca4b8;
+      --accent: #d6b25e;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; color: var(--text); font-family: "Segoe UI", sans-serif; background: linear-gradient(180deg, #071018 0%, #09131c 100%); }}
+    .shell {{ max-width: 1440px; margin: 0 auto; padding: 24px 18px 36px; }}
+    .hero, .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 22px; padding: 20px; margin-top: 18px; }}
+    .hero {{ margin-top: 0; }}
+    .metric-grid {{ display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:16px; }}
+    .two-col {{ display:grid; grid-template-columns: 1.3fr 1fr; gap:18px; }}
+    .metric-card {{ background: var(--panel-2); border: 1px solid var(--line); border-radius: 18px; padding: 16px; display:flex; flex-direction:column; gap:8px; }}
+    .metric-card span {{ color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }}
+    .metric-card strong {{ font-size: 24px; }}
+    table {{ width:100%; border-collapse: collapse; }}
+    th, td {{ text-align:left; padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 14px; vertical-align: top; }}
+    th {{ color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .10em; }}
+    h1 {{ margin: 0 0 8px; font-size: 36px; }}
+    h2 {{ margin: 0 0 14px; font-size: 16px; letter-spacing: .10em; color: var(--muted); text-transform: uppercase; }}
+    p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
+    ul {{ margin: 0; padding-left: 18px; color: var(--text); }}
+    .accent {{ color: var(--accent); }}
+    @media (max-width: 1100px) {{
+      .metric-grid, .two-col {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <h1>Operator Command Center</h1>
+      <p>Single-view ops surface for engine health, rollout state, config drift, and the latest policy notifications over the last {int(center.get("lookback_hours") or hours)} hours.</p>
+    </section>
+    <section class="panel">
+      <h2>Health Snapshot</h2>
+      <div class="metric-grid">
+        {metric_card("Engine Status", engine_health.get("status", "unknown"))}
+        {metric_card("Send Rate", f"{engine_health.get('send_rate', 0)}%")}
+        {metric_card("Skip Pressure", f"{engine_health.get('skip_pressure', 0)}%")}
+        {metric_card("Block Pressure", f"{engine_health.get('block_pressure', 0)}%")}
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Drift Snapshot</h2>
+      <div class="metric-grid">
+        {drift_cards}
+      </div>
+    </section>
+    <section class="two-col">
+      <section class="panel">
+        <h2>Recommended Actions</h2>
+        <ul>{action_rows}</ul>
+      </section>
+      <section class="panel">
+        <h2>Top Skip Reasons</h2>
+        <table>
+          <thead><tr><th>Reason</th><th>Count</th></tr></thead>
+          <tbody>{top_skip_rows}</tbody>
+        </table>
+      </section>
+    </section>
+    <section class="two-col">
+      <section class="panel">
+        <h2>Rollout Notifications</h2>
+        <table>
+          <thead><tr><th>Event</th><th>Level</th><th>Service</th><th>Message</th></tr></thead>
+          <tbody>{notification_rows}</tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Worker / Engine Alignment</h2>
+        <table>
+          <thead><tr><th>Target</th><th>Aligned</th><th>Worker SHA</th><th>Engine SHA</th></tr></thead>
+          <tbody>{alignment_rows}</tbody>
+        </table>
+      </section>
+    </section>
+  </div>
+</body>
+</html>"""
+
+
 def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:
     summary = sls.get_diagnostics_summary(hours=max(1, hours))
     guidance = summary.get("threshold_guidance") if isinstance(summary.get("threshold_guidance"), list) else []

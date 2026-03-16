@@ -78,6 +78,8 @@ Features:
 - `GET /learning/tuning/rollout/dashboard`
 - `GET /learning/tuning/notifications`
 - `GET /learning/tuning/notifications/dashboard`
+- `GET /learning/command-center`
+- `GET /learning/command-center/dashboard`
 
 ## Running Locally
 
