@@ -397,6 +397,61 @@ def list_rollout_notifications(limit: int = 20) -> list[dict[str, Any]]:
     ]
 
 
+def _latest_rollout_notification(event_type: str) -> dict[str, Any] | None:
+    with sls._connect() as c:
+        row = c.execute(
+            """
+            SELECT notification_id, created_ts, event_type, level, target_name, approval_id,
+                   deployment_service, deployment_sha, message, payload_json, delivery_status,
+                   delivered_ts, last_error
+            FROM rollout_notifications
+            WHERE event_type=?
+            ORDER BY created_ts DESC
+            LIMIT 1
+            """,
+            (str(event_type or ""),),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "notification_id": row["notification_id"],
+        "created_ts": row["created_ts"],
+        "event_type": row["event_type"],
+        "level": row["level"],
+        "target_name": row["target_name"] or "",
+        "approval_id": row["approval_id"] or "",
+        "deployment_service": row["deployment_service"] or "",
+        "deployment_sha": row["deployment_sha"] or "",
+        "message": row["message"] or "",
+        "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
+        "delivery_status": row["delivery_status"] or "pending",
+        "delivered_ts": row["delivered_ts"],
+        "last_error": row["last_error"] or "",
+    }
+
+
+def _ops_digest_cooldown_seconds() -> int:
+    raw = os.getenv("SIGNAL_ENGINE_OPS_DIGEST_COOLDOWN_SEC", "").strip()
+    try:
+        value = int(raw) if raw else 3600
+    except ValueError:
+        value = 3600
+    return max(60, value)
+
+
+def _ops_digest_signature(digest: dict[str, Any]) -> str:
+    payload = {
+        "severity": digest.get("severity"),
+        "needs_attention": digest.get("needs_attention"),
+        "attention_reasons": digest.get("attention_reasons") or [],
+        "summary": digest.get("summary"),
+        "top_skip_reason": digest.get("top_skip_reason"),
+        "drift_profiles": digest.get("drift_profiles") or [],
+        "counts": digest.get("counts") or {},
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
 def render_rollout_notifications_html(limit: int = 20) -> str:
     notifications = list_rollout_notifications(limit=max(1, limit))
     rows = "".join(
@@ -824,6 +879,22 @@ def dispatch_ops_digest(hours: int = 24, *, force: bool = False) -> dict[str, An
             "digest": digest,
         }
 
+    signature = _ops_digest_signature(digest)
+    latest = _latest_rollout_notification("ops_digest")
+    if not force and latest:
+        latest_payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
+        latest_signature = str(latest_payload.get("digest_signature") or "")
+        age_seconds = max(0, int(time.time()) - int(latest.get("created_ts") or 0))
+        if latest_signature == signature and age_seconds < _ops_digest_cooldown_seconds():
+            return {
+                "dispatched": False,
+                "reason": "cooldown_unchanged_digest",
+                "cooldown_seconds": _ops_digest_cooldown_seconds(),
+                "age_seconds": age_seconds,
+                "latest_notification_id": latest.get("notification_id"),
+                "digest": digest,
+            }
+
     notification = emit_rollout_notification(
         event_type="ops_digest",
         level=str(digest.get("severity") or "info"),
@@ -838,6 +909,7 @@ def dispatch_ops_digest(hours: int = 24, *, force: bool = False) -> dict[str, An
             "highlights": digest.get("highlights"),
             "recommended_actions": digest.get("recommended_actions"),
             "counts": digest.get("counts"),
+            "digest_signature": signature,
         },
     )
     return {

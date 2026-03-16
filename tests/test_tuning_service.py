@@ -295,6 +295,10 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     assert forced_dispatch["dispatched"] is True
     assert forced_dispatch["notification"]["event_type"] == "ops_digest"
 
+    cooldown_dispatch = dispatch_ops_digest(hours=24, force=False)
+    assert cooldown_dispatch["dispatched"] is False
+    assert cooldown_dispatch["reason"] == "cooldown_unchanged_digest"
+
     monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SERVICE", "engine")
     monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SHA", "diff999")
     second_approval = create_tuning_approval(

@@ -353,6 +353,12 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert ops_digest_send_payload["dispatched"] is True
     assert ops_digest_send_payload["notification"]["event_type"] == "ops_digest"
 
+    ops_digest_cooldown_response = client.post("/learning/ops/digest/send", json={"hours": 24})
+    assert ops_digest_cooldown_response.status_code == 200
+    ops_digest_cooldown_payload = ops_digest_cooldown_response.json()
+    assert ops_digest_cooldown_payload["dispatched"] is False
+    assert ops_digest_cooldown_payload["reason"] == "cooldown_unchanged_digest"
+
     approvals_dashboard_response = client.get("/learning/tuning/approvals/dashboard?limit=10&rollout_status=rolled_out&q=render")
     assert approvals_dashboard_response.status_code == 200
     assert "Tuning Approvals" in approvals_dashboard_response.text

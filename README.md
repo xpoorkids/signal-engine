@@ -85,6 +85,9 @@ Features:
 - `GET /learning/ops/digest/text`
 - `POST /learning/ops/digest/send`
 
+Ops digest behavior:
+- `SIGNAL_ENGINE_OPS_DIGEST_COOLDOWN_SEC` controls duplicate digest suppression for unchanged alert states.
+
 ## Running Locally
 
 ## Tuning Rollout Flow
