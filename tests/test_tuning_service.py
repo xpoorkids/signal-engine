@@ -840,3 +840,48 @@ def test_command_center_tolerates_malformed_approval_payload(tmp_path, monkeypat
 
     html = render_operator_command_center_html(hours=24)
     assert "Operator Command Center" in html
+
+
+def test_command_center_tolerates_malformed_notification_payload(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO rollout_notifications (
+                notification_id, created_ts, event_type, level, target_name, approval_id,
+                deployment_service, deployment_sha, message, payload_json, delivery_status,
+                delivered_ts, last_error, acknowledged_ts, acknowledged_by, snoozed_until_ts,
+                resolved_ts, resolved_by, resolution_note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "bad-note-1",
+                1_773_620_200,
+                "rollout_blocked",
+                "warning",
+                "strict",
+                "approval-x",
+                "worker",
+                "sha-x",
+                "Malformed notification payload row",
+                "{not-json",
+                "disabled",
+                None,
+                "",
+                None,
+                "",
+                None,
+                None,
+                "",
+                "",
+            ),
+        )
+
+    center = get_operator_command_center(hours=24)
+    assert "notifications" in center
+
+    html = render_operator_command_center_html(hours=24)
+    assert "Operator Command Center" in html

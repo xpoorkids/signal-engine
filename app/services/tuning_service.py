@@ -105,6 +105,13 @@ def _family_label(family: str) -> str:
     return labels.get(family, family.replace("_", " "))
 
 
+def _safe_json_loads(raw: Any, default: Any) -> Any:
+    try:
+        return json.loads(raw) if raw else default
+    except Exception:
+        return default
+
+
 def _default_deployment_metadata() -> dict[str, str]:
     return {
         "deployment_service": (
@@ -312,10 +319,7 @@ def _verification_attribution(
 
 
 def _normalize_approval(row: Any) -> dict[str, Any]:
-    try:
-        payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
-    except Exception:
-        payload = {}
+    payload = _safe_json_loads(row["payload_json"], {})
     return {
         "approval_id": row["approval_id"],
         "created_ts": row["created_ts"],
@@ -739,7 +743,7 @@ def list_rollout_notifications(limit: int = 20, *, active_only: bool = False) ->
             "deployment_service": row["deployment_service"] or "",
             "deployment_sha": row["deployment_sha"] or "",
             "message": row["message"],
-            "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
+            "payload": _safe_json_loads(row["payload_json"], {}),
             "delivery_status": row["delivery_status"] or "pending",
             "delivered_ts": row["delivered_ts"],
             "last_error": row["last_error"] or "",
@@ -775,6 +779,7 @@ def _latest_rollout_notification(event_type: str) -> dict[str, Any] | None:
         ).fetchone()
     if row is None:
         return None
+    payload = _safe_json_loads(row["payload_json"], {})
     return {
         "notification_id": row["notification_id"],
         "created_ts": row["created_ts"],
@@ -785,7 +790,7 @@ def _latest_rollout_notification(event_type: str) -> dict[str, Any] | None:
         "deployment_service": row["deployment_service"] or "",
         "deployment_sha": row["deployment_sha"] or "",
         "message": row["message"] or "",
-        "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
+        "payload": payload,
         "delivery_status": row["delivery_status"] or "pending",
         "delivered_ts": row["delivered_ts"],
         "last_error": row["last_error"] or "",
