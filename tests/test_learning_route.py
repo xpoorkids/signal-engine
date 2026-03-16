@@ -422,6 +422,7 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "drift" in command_center_payload
     assert "incident_state_counts" in command_center_payload
     assert "rollout_verification_cards" in command_center_payload
+    assert all("changed_keys" in item for item in command_center_payload["rollout_verification_cards"])
 
     command_center_dashboard_response = client.get("/learning/command-center/dashboard?hours=24")
     assert command_center_dashboard_response.status_code == 200
@@ -429,6 +430,7 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "Health Snapshot" in command_center_dashboard_response.text
     assert "Incident Snapshot" in command_center_dashboard_response.text
     assert "Rollout Verification" in command_center_dashboard_response.text
+    assert "Families:" in command_center_dashboard_response.text or "Keys:" in command_center_dashboard_response.text
 
     ops_digest_response = client.get("/learning/ops/digest?hours=24")
     assert ops_digest_response.status_code == 200

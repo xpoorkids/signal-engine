@@ -1585,12 +1585,41 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         verification_status = str(item.get("verification_status") or "")
         if verification_status:
             verification_notes.append(f"{service_name}: {verification_status}")
+        changed_keys: list[str] = []
+        changed_families: list[str] = []
+        summary_text = str(item.get("verification_summary") or "")
+        approval_id = str(item.get("approval_id") or "")
+        if approval_id:
+            try:
+                verification = get_rollout_verification(
+                    approval_id=approval_id,
+                    baseline_hours=lookback,
+                    post_hours=lookback,
+                )
+                changed_config = verification.get("changed_config") if isinstance(verification.get("changed_config"), dict) else {}
+                attribution = verification.get("attribution") if isinstance(verification.get("attribution"), dict) else {}
+                changed_keys = [
+                    str(key)
+                    for key in (changed_config.get("changed_config_keys") if isinstance(changed_config.get("changed_config_keys"), list) else [])
+                    if key
+                ][:5]
+                changed_families = [
+                    str(family.get("label") or family.get("family") or "")
+                    for family in (changed_config.get("changed_config_families") if isinstance(changed_config.get("changed_config_families"), list) else [])
+                    if isinstance(family, dict)
+                ][:3]
+                if attribution.get("summary"):
+                    summary_text = str(attribution.get("summary"))
+            except KeyError:
+                pass
         verification_cards.append(
             {
                 "service": service_name,
                 "target_name": str(item.get("target_name") or "n/a"),
                 "verification_status": verification_status or "unverified",
-                "verification_summary": str(item.get("verification_summary") or ""),
+                "verification_summary": summary_text,
+                "changed_keys": changed_keys,
+                "changed_families": changed_families,
                 "deployment_sha": str(item.get("deployment_sha") or ""),
             }
         )
@@ -1702,7 +1731,11 @@ def render_operator_command_center_html(hours: int = 24) -> str:
         f"<td>{html.escape(str(item.get('target_name') or 'n/a'))}</td>"
         f"<td>{html.escape(str(item.get('verification_status') or 'unverified'))}</td>"
         f"<td>{html.escape(str(item.get('deployment_sha') or 'n/a'))}</td>"
-        f"<td>{html.escape(str(item.get('verification_summary') or ''))}</td>"
+        f"<td>"
+        f"{html.escape(str(item.get('verification_summary') or ''))}"
+        f"{'<br><small>Families: ' + html.escape(', '.join(item.get('changed_families') or [])) + '</small>' if item.get('changed_families') else ''}"
+        f"{'<br><small>Keys: ' + html.escape(', '.join(item.get('changed_keys') or [])) + '</small>' if item.get('changed_keys') else ''}"
+        f"</td>"
         "</tr>"
         for item in verification_cards
     ) or "<tr><td colspan='5'>No rollout verification data yet.</td></tr>"

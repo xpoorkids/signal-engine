@@ -282,12 +282,15 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     assert "incident_state_counts" in command_center
     assert "rollout_verification_cards" in command_center
     assert "recommended_actions" in command_center
+    assert all("changed_keys" in item for item in command_center["rollout_verification_cards"])
+    assert all("changed_families" in item for item in command_center["rollout_verification_cards"])
 
     command_center_html = render_operator_command_center_html(hours=24)
     assert "Operator Command Center" in command_center_html
     assert "Health Snapshot" in command_center_html
     assert "Incident Snapshot" in command_center_html
     assert "Rollout Verification" in command_center_html
+    assert "Families:" in command_center_html or "Keys:" in command_center_html
 
     digest = get_ops_digest(hours=24)
     assert digest["severity"] in {"info", "warning", "error"}
