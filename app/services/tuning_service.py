@@ -1905,6 +1905,20 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         profile: get_config_drift_report(target_name=profile, rollout_status="rolled_out")
         for profile in ("strict", "balanced", "aggressive")
     }
+    policy_profiles = sls.list_policy_profiles(limit=10)
+    policy_rollouts = sls.list_policy_rollouts(limit=10, active_only=False)
+    active_policy_rollouts = sls.list_policy_rollouts(limit=10, active_only=True)
+    latest_policy_replay = sls.get_latest_policy_replay()
+    policy_approvals = sls.list_policy_approvals(limit=10)
+    policy_events = sls.list_policy_rollout_events(limit=10)
+    policy_guardrails = sls.evaluate_policy_guardrails(
+        hours=lookback,
+        min_samples=3,
+        max_negative_rate=60.0,
+        auto_apply=False,
+    )
+    resolved_candidate_policy = sls.resolve_live_policy("candidate")
+    resolved_promoted_policy = sls.resolve_live_policy("promoted")
 
     recommended_actions: list[str] = []
     rollout_actions = rollout_summary.get("recommended_actions")
@@ -2029,6 +2043,17 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         "rollout_verification_cards": verification_cards,
         "rollout_verification_family_scorecards": verification_family_scorecards[:6],
         "incident_state_counts": incident_state_counts,
+        "policy_profiles": policy_profiles,
+        "policy_rollouts": policy_rollouts,
+        "active_policy_rollouts": active_policy_rollouts,
+        "latest_policy_replay": latest_policy_replay,
+        "policy_approvals": policy_approvals,
+        "policy_events": policy_events,
+        "policy_guardrails": policy_guardrails,
+        "resolved_policies": {
+            "candidate": resolved_candidate_policy,
+            "promoted": resolved_promoted_policy,
+        },
         "recommended_actions": recommended_actions[:8],
     }
 
@@ -2044,6 +2069,13 @@ def render_operator_command_center_html(hours: int = 24) -> str:
     verification_cards = center.get("rollout_verification_cards") if isinstance(center.get("rollout_verification_cards"), list) else []
     verification_family_scorecards = center.get("rollout_verification_family_scorecards") if isinstance(center.get("rollout_verification_family_scorecards"), list) else []
     incident_state_counts = center.get("incident_state_counts") if isinstance(center.get("incident_state_counts"), dict) else {}
+    policy_profiles = center.get("policy_profiles") if isinstance(center.get("policy_profiles"), list) else []
+    policy_rollouts = center.get("policy_rollouts") if isinstance(center.get("policy_rollouts"), list) else []
+    policy_approvals = center.get("policy_approvals") if isinstance(center.get("policy_approvals"), list) else []
+    policy_events = center.get("policy_events") if isinstance(center.get("policy_events"), list) else []
+    policy_guardrails = center.get("policy_guardrails") if isinstance(center.get("policy_guardrails"), dict) else {}
+    latest_policy_replay = center.get("latest_policy_replay") if isinstance(center.get("latest_policy_replay"), dict) else {}
+    resolved_policies = center.get("resolved_policies") if isinstance(center.get("resolved_policies"), dict) else {}
     recommended_actions = center.get("recommended_actions") if isinstance(center.get("recommended_actions"), list) else []
 
     def metric_card(label: str, value: Any) -> str:
@@ -2125,6 +2157,67 @@ def render_operator_command_center_html(hours: int = 24) -> str:
         "</tr>"
         for item in verification_family_scorecards[:6]
     ) or "<tr><td colspan='6'>No family scorecard data yet.</td></tr>"
+    resolved_candidate = resolved_policies.get("candidate") if isinstance(resolved_policies.get("candidate"), dict) else {}
+    resolved_promoted = resolved_policies.get("promoted") if isinstance(resolved_policies.get("promoted"), dict) else {}
+    replay_summary = "No replay runs recorded yet."
+    if latest_policy_replay:
+        replay_summary = (
+            f"{html.escape(str(latest_policy_replay.get('policy_name') or 'unknown'))}"
+            f" @ {html.escape(str(latest_policy_replay.get('policy_version') or 'n/a'))}"
+            f" changed {int(latest_policy_replay.get('changed_count') or 0)}"
+            f" / {int(latest_policy_replay.get('trace_count') or 0)} traces"
+            f" ({float(latest_policy_replay.get('change_rate') or 0.0)}%)."
+        )
+    policy_rollout_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('policy_name') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('policy_version') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('rollout_mode') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('rollout_status') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('stage_scope') or 'all'))}</td>"
+        f"<td>{int(item.get('traffic_percent') or 0)}%</td>"
+        "</tr>"
+        for item in policy_rollouts[:8]
+    ) or "<tr><td colspan='6'>No policy rollouts recorded.</td></tr>"
+    policy_guardrail_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('policy_name') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('policy_version') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('stage_scope') or 'all'))}</td>"
+        f"<td>{int(item.get('samples') or 0)}</td>"
+        f"<td>{float(item.get('negative_rate') or 0.0)}%</td>"
+        f"<td>{html.escape(str(item.get('recommended_action') or 'hold'))}</td>"
+        "</tr>"
+        for item in (policy_guardrails.get("evaluations") or [])[:8]
+    ) or "<tr><td colspan='6'>No active canary guardrail evaluations.</td></tr>"
+    policy_approval_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('policy_name') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('policy_version') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('approval_status') or 'draft'))}</td>"
+        f"<td>{html.escape(str(item.get('source_type') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('approved_by') or 'n/a'))}</td>"
+        "</tr>"
+        for item in policy_approvals[:8]
+    ) or "<tr><td colspan='5'>No policy approvals recorded.</td></tr>"
+    policy_event_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('event_type') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('event_status') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('policy_name') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('policy_version') or 'n/a'))}</td>"
+        "</tr>"
+        for item in policy_events[:8]
+    ) or "<tr><td colspan='4'>No policy events recorded.</td></tr>"
+    policy_profile_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('policy_name') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('policy_version') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('created_by') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('description') or ''))}</td>"
+        "</tr>"
+        for item in policy_profiles[:8]
+    ) or "<tr><td colspan='4'>No policy profiles recorded.</td></tr>"
 
     return f"""<!doctype html>
 <html lang="en">
@@ -2193,6 +2286,16 @@ def render_operator_command_center_html(hours: int = 24) -> str:
         {incident_cards}
       </div>
     </section>
+    <section class="panel">
+      <h2>Policy Ops</h2>
+      <div class="metric-grid">
+        {metric_card("Candidate Policy", f"{resolved_candidate.get('policy_name', 'default')} @ {resolved_candidate.get('policy_version', 'default')}")}
+        {metric_card("Promoted Policy", f"{resolved_promoted.get('policy_name', 'default')} @ {resolved_promoted.get('policy_version', 'default')}")}
+        {metric_card("Active Rollouts", len(center.get("active_policy_rollouts") or []))}
+        {metric_card("Replay Changes", int(latest_policy_replay.get("changed_count") or 0))}
+      </div>
+      <p style="margin-top:14px;"><strong>Latest Replay:</strong> {replay_summary}</p>
+    </section>
     <section class="two-col">
       <section class="panel">
         <h2>Recommended Actions</h2>
@@ -2227,6 +2330,43 @@ def render_operator_command_center_html(hours: int = 24) -> str:
       <table>
         <thead><tr><th>Service</th><th>Target</th><th>Verification</th><th>SHA</th><th>Summary</th></tr></thead>
         <tbody>{verification_rows}</tbody>
+      </table>
+    </section>
+    <section class="panel">
+      <h2>Policy Rollouts</h2>
+      <table>
+        <thead><tr><th>Policy</th><th>Version</th><th>Mode</th><th>Status</th><th>Stage</th><th>Traffic</th></tr></thead>
+        <tbody>{policy_rollout_rows}</tbody>
+      </table>
+    </section>
+    <section class="panel">
+      <h2>Policy Guardrails</h2>
+      <table>
+        <thead><tr><th>Policy</th><th>Version</th><th>Stage</th><th>Samples</th><th>Negative Rate</th><th>Action</th></tr></thead>
+        <tbody>{policy_guardrail_rows}</tbody>
+      </table>
+    </section>
+    <section class="two-col">
+      <section class="panel">
+        <h2>Policy Approvals</h2>
+        <table>
+          <thead><tr><th>Policy</th><th>Version</th><th>Status</th><th>Source</th><th>Approved By</th></tr></thead>
+          <tbody>{policy_approval_rows}</tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Policy Events</h2>
+        <table>
+          <thead><tr><th>Event</th><th>Status</th><th>Policy</th><th>Version</th></tr></thead>
+          <tbody>{policy_event_rows}</tbody>
+        </table>
+      </section>
+    </section>
+    <section class="panel">
+      <h2>Policy Profiles</h2>
+      <table>
+        <thead><tr><th>Policy</th><th>Version</th><th>Created By</th><th>Description</th></tr></thead>
+        <tbody>{policy_profile_rows}</tbody>
       </table>
     </section>
     <section class="panel">

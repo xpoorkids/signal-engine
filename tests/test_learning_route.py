@@ -758,12 +758,25 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "incident_state_counts" in command_center_payload
     assert "rollout_verification_cards" in command_center_payload
     assert "rollout_verification_family_scorecards" in command_center_payload
+    assert "policy_profiles" in command_center_payload
+    assert "policy_rollouts" in command_center_payload
+    assert "latest_policy_replay" in command_center_payload
+    assert "policy_approvals" in command_center_payload
+    assert "policy_events" in command_center_payload
+    assert "policy_guardrails" in command_center_payload
+    assert "resolved_policies" in command_center_payload
     assert all("changed_keys" in item for item in command_center_payload["rollout_verification_cards"])
 
     command_center_dashboard_response = client.get("/learning/command-center/dashboard?hours=24")
     assert command_center_dashboard_response.status_code == 200
     assert "Operator Command Center" in command_center_dashboard_response.text
     assert "Health Snapshot" in command_center_dashboard_response.text
+    assert "Policy Ops" in command_center_dashboard_response.text
+    assert "Policy Rollouts" in command_center_dashboard_response.text
+    assert "Policy Guardrails" in command_center_dashboard_response.text
+    assert "Policy Approvals" in command_center_dashboard_response.text
+    assert "Policy Events" in command_center_dashboard_response.text
+    assert "Policy Profiles" in command_center_dashboard_response.text
     assert "Incident Snapshot" in command_center_dashboard_response.text
     assert "Rollout Verification" in command_center_dashboard_response.text
     assert "Verification Family Scorecards" in command_center_dashboard_response.text
