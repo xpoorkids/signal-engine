@@ -716,6 +716,15 @@ def _ops_digest_default_hours() -> int:
     return max(1, value)
 
 
+def _ops_daily_summary_hours() -> int:
+    raw = os.getenv("SIGNAL_ENGINE_OPS_DAILY_SUMMARY_HOURS", "").strip()
+    try:
+        value = int(raw) if raw else 24
+    except ValueError:
+        value = 24
+    return max(1, value)
+
+
 def _ops_threshold_float(env_key: str, default: float) -> float:
     raw = os.getenv(env_key, "").strip()
     try:
@@ -741,6 +750,8 @@ def _ops_digest_policy() -> dict[str, float | int]:
         "incident_notification_count": _ops_threshold_int("SIGNAL_ENGINE_OPS_INCIDENT_NOTIFICATION_COUNT", 2),
         "critical_drift_profiles": _ops_threshold_int("SIGNAL_ENGINE_OPS_CRITICAL_DRIFT_PROFILES", 2),
         "incident_zero_send_min_skips": _ops_threshold_int("SIGNAL_ENGINE_OPS_INCIDENT_ZERO_SEND_MIN_SKIPS", 10),
+        "degraded_reminder_sec": _ops_threshold_int("SIGNAL_ENGINE_OPS_DEGRADED_REMINDER_SEC", 14400),
+        "daily_summary_interval_sec": _ops_threshold_int("SIGNAL_ENGINE_OPS_DAILY_SUMMARY_INTERVAL_SEC", 86400),
     }
 
 
@@ -755,6 +766,17 @@ def _ops_digest_signature(digest: dict[str, Any]) -> str:
         "counts": digest.get("counts") or {},
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _typed_ops_digest_signature(digest_type: str, digest: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "digest_type": str(digest_type or "ops_digest"),
+            "digest_signature": _ops_digest_signature(digest),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def render_rollout_notifications_html(limit: int = 20, *, active_only: bool = False) -> str:
@@ -1285,42 +1307,59 @@ def render_ops_digest_html(hours: int = 24) -> str:
 </html>"""
 
 
-def dispatch_ops_digest(hours: int = 24, *, force: bool = False) -> dict[str, Any]:
+def dispatch_ops_digest(
+    hours: int = 24,
+    *,
+    force: bool = False,
+    digest_type: str = "ops_digest",
+    summary_override: str | None = None,
+) -> dict[str, Any]:
     digest = get_ops_digest(hours=max(1, hours))
+    digest_kind = str(digest_type or "ops_digest").strip().lower()
     if not force and not bool(digest.get("needs_attention")):
         return {
             "dispatched": False,
             "reason": "no_attention_needed",
+            "digest_type": digest_kind,
             "digest": digest,
         }
 
-    signature = _ops_digest_signature(digest)
-    latest = _latest_rollout_notification("ops_digest")
+    signature = _typed_ops_digest_signature(digest_kind, digest)
+    latest = _latest_rollout_notification(digest_kind)
+    policy = _ops_digest_policy()
     if not force and latest:
         latest_payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
         latest_signature = str(latest_payload.get("digest_signature") or "")
         age_seconds = max(0, int(time.time()) - int(latest.get("created_ts") or 0))
-        if latest_signature == signature and age_seconds < _ops_digest_cooldown_seconds():
+        cooldown_seconds = _ops_digest_cooldown_seconds()
+        if digest_kind == "degraded_digest":
+            cooldown_seconds = int(policy["degraded_reminder_sec"])
+        elif digest_kind == "daily_summary":
+            cooldown_seconds = int(policy["daily_summary_interval_sec"])
+        if latest_signature == signature and age_seconds < cooldown_seconds:
             return {
                 "dispatched": False,
                 "reason": "cooldown_unchanged_digest",
-                "cooldown_seconds": _ops_digest_cooldown_seconds(),
+                "digest_type": digest_kind,
+                "cooldown_seconds": cooldown_seconds,
                 "age_seconds": age_seconds,
                 "latest_notification_id": latest.get("notification_id"),
                 "digest": digest,
             }
 
     notification = emit_rollout_notification(
-        event_type="ops_digest",
+        event_type=digest_kind,
         level=str(digest.get("severity") or "info"),
-        message=str(digest.get("summary") or "Signal Engine ops digest"),
+        message=str(summary_override or digest.get("summary") or "Signal Engine ops digest"),
         target_name="command-center",
         deployment_service=_default_deployment_metadata().get("deployment_service") or None,
         deployment_sha=_default_deployment_metadata().get("deployment_sha") or None,
         payload={
+            "digest_type": digest_kind,
             "lookback_hours": digest.get("lookback_hours"),
             "needs_attention": digest.get("needs_attention"),
             "attention_reasons": digest.get("attention_reasons"),
+            "incident_level": digest.get("incident_level"),
             "highlights": digest.get("highlights"),
             "recommended_actions": digest.get("recommended_actions"),
             "counts": digest.get("counts"),
@@ -1329,21 +1368,59 @@ def dispatch_ops_digest(hours: int = 24, *, force: bool = False) -> dict[str, An
     )
     return {
         "dispatched": True,
+        "digest_type": digest_kind,
         "notification": notification,
         "digest": digest,
+    }
+
+
+def dispatch_policy_tiered_ops_digests() -> dict[str, Any]:
+    digest = get_ops_digest(hours=_ops_digest_default_hours())
+    incident_level = str(digest.get("incident_level") or "normal")
+    dispatched: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    if incident_level in {"incident", "critical"}:
+        result = dispatch_ops_digest(
+            hours=int(digest.get("lookback_hours") or _ops_digest_default_hours()),
+            force=False,
+            digest_type="incident_digest",
+            summary_override=f"[incident] {digest.get('summary')}",
+        )
+        (dispatched if result.get("dispatched") else skipped).append(result)
+    elif incident_level == "degraded":
+        result = dispatch_ops_digest(
+            hours=int(digest.get("lookback_hours") or _ops_digest_default_hours()),
+            force=False,
+            digest_type="degraded_digest",
+            summary_override=f"[degraded] {digest.get('summary')}",
+        )
+        (dispatched if result.get("dispatched") else skipped).append(result)
+
+    summary_result = dispatch_ops_digest(
+        hours=_ops_daily_summary_hours(),
+        force=False,
+        digest_type="daily_summary",
+        summary_override=f"[daily-summary] {get_ops_digest(hours=_ops_daily_summary_hours()).get('summary')}",
+    )
+    (dispatched if summary_result.get("dispatched") else skipped).append(summary_result)
+
+    return {
+        "incident_level": incident_level,
+        "dispatched": dispatched,
+        "skipped": skipped,
     }
 
 
 async def ops_digest_worker() -> None:
     while True:
         try:
-            result = dispatch_ops_digest(hours=_ops_digest_default_hours(), force=False)
+            result = dispatch_policy_tiered_ops_digests()
             logger.info(
-                "[ops-digest] dispatched=%s reason=%s severity=%s needs_attention=%s",
-                bool(result.get("dispatched")),
-                result.get("reason") or "",
-                (result.get("digest") or {}).get("severity") if isinstance(result.get("digest"), dict) else "",
-                (result.get("digest") or {}).get("needs_attention") if isinstance(result.get("digest"), dict) else "",
+                "[ops-digest] incident_level=%s dispatched=%s skipped=%s",
+                result.get("incident_level") or "normal",
+                len(result.get("dispatched") or []),
+                len(result.get("skipped") or []),
             )
         except Exception as exc:
             logger.exception("[ops-digest] worker iteration failed: %s", exc)

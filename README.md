@@ -93,11 +93,19 @@ Ops digest behavior:
 - `SIGNAL_ENGINE_OPS_DIGEST_COOLDOWN_SEC` controls duplicate digest suppression for unchanged alert states.
 - `SIGNAL_ENGINE_OPS_DIGEST_POLL_SEC` controls how often the worker evaluates and emits the ops digest.
 - `SIGNAL_ENGINE_OPS_DIGEST_HOURS` controls the digest lookback window used by the background worker.
+- `SIGNAL_ENGINE_OPS_DAILY_SUMMARY_HOURS` controls the lookback window used for daily-summary digests.
 - `SIGNAL_ENGINE_OPS_DEGRADED_SKIP_PRESSURE` and `SIGNAL_ENGINE_OPS_INCIDENT_SKIP_PRESSURE` tune skip-pressure escalation.
 - `SIGNAL_ENGINE_OPS_DEGRADED_BLOCK_PRESSURE` and `SIGNAL_ENGINE_OPS_INCIDENT_BLOCK_PRESSURE` tune promotion-block escalation.
 - `SIGNAL_ENGINE_OPS_INCIDENT_NOTIFICATION_COUNT` tunes rollout-notification escalation.
 - `SIGNAL_ENGINE_OPS_CRITICAL_DRIFT_PROFILES` tunes multi-profile drift escalation.
 - `SIGNAL_ENGINE_OPS_INCIDENT_ZERO_SEND_MIN_SKIPS` tunes the zero-send-with-pressure incident trigger.
+- `SIGNAL_ENGINE_OPS_DEGRADED_REMINDER_SEC` controls degraded-state reminder cadence.
+- `SIGNAL_ENGINE_OPS_DAILY_SUMMARY_INTERVAL_SEC` controls daily-summary send cadence.
+
+Scheduled digest tiers:
+- `incident_digest` for `incident` and `critical` states
+- `degraded_digest` for degraded conditions
+- `daily_summary` on its own cadence regardless of urgent state
 
 Notification controls:
 - `GET /learning/tuning/notifications?active_only=true` returns only unacknowledged and unsnoozed notifications.

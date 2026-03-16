@@ -8,6 +8,7 @@ from app.services.tuning_service import (
     build_tuning_profiles,
     build_tuning_proposals,
     create_tuning_approval,
+    dispatch_policy_tiered_ops_digests,
     dispatch_ops_digest,
     get_config_drift_report,
     get_latest_tuning_approval,
@@ -361,14 +362,14 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
 
 
 def test_ops_digest_worker_runs_single_iteration(monkeypatch):
-    calls: list[tuple[int, bool]] = []
+    calls: list[str] = []
 
-    def fake_dispatch_ops_digest(hours: int = 24, *, force: bool = False):
-        calls.append((hours, force))
+    def fake_dispatch_policy_tiered_ops_digests():
+        calls.append("tick")
         return {
-            "dispatched": False,
-            "reason": "no_attention_needed",
-            "digest": {"severity": "info", "needs_attention": False},
+            "incident_level": "normal",
+            "dispatched": [],
+            "skipped": [],
         }
 
     async def fake_sleep(_: int):
@@ -376,7 +377,7 @@ def test_ops_digest_worker_runs_single_iteration(monkeypatch):
 
     monkeypatch.setenv("SIGNAL_ENGINE_OPS_DIGEST_HOURS", "12")
     monkeypatch.setenv("SIGNAL_ENGINE_OPS_DIGEST_POLL_SEC", "120")
-    monkeypatch.setattr("app.services.tuning_service.dispatch_ops_digest", fake_dispatch_ops_digest)
+    monkeypatch.setattr("app.services.tuning_service.dispatch_policy_tiered_ops_digests", fake_dispatch_policy_tiered_ops_digests)
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
     try:
@@ -385,7 +386,7 @@ def test_ops_digest_worker_runs_single_iteration(monkeypatch):
     except RuntimeError as exc:
         assert str(exc) == "stop-loop"
 
-    assert calls == [(12, False)]
+    assert calls == ["tick"]
 
 
 def test_ops_digest_escalates_to_incident_on_heavy_gate_pressure(tmp_path, monkeypatch):
@@ -550,3 +551,33 @@ def test_incident_resolution_tracking(tmp_path, monkeypatch):
     assert resolved_incident["state"] == "resolved"
     assert resolved_incident["time_to_resolve_seconds"] is not None
     assert resolved_incident["resolution_note"] == "Resolved after rollout rollback"
+
+
+def test_policy_tiered_ops_digests_emit_incident_and_daily_summary(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    base_ts = 1_773_620_000
+    for offset in range(12):
+        sls.record_signal_decision(
+            token=f"token-{offset}",
+            event_type="candidate",
+            stage="candidate",
+            decision="candidate_gate_skip",
+            reasons=["attention<0.20"],
+            attention_score=0.08,
+            risk_score=0.35,
+            confidence_score=0.18,
+            lifecycle="dex",
+            ts_value=base_ts + offset,
+            source="test",
+        )
+
+    monkeypatch.setenv("SIGNAL_ENGINE_OPS_INCIDENT_ZERO_SEND_MIN_SKIPS", "10")
+    result = dispatch_policy_tiered_ops_digests()
+
+    dispatched_types = {item["digest_type"] for item in result["dispatched"]}
+    assert result["incident_level"] == "incident"
+    assert "incident_digest" in dispatched_types
+    assert "daily_summary" in dispatched_types
