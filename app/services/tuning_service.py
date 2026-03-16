@@ -1864,10 +1864,20 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         incident_state_counts[state] = incident_state_counts.get(state, 0) + 1
 
     status = str(engine_health.get("status") or "unknown")
+    storage = engine_health.get("storage") if isinstance(engine_health.get("storage"), dict) else {}
     if status in {"cold", "quiet"}:
         recommended_actions.insert(0, f"Engine status is {status}. Check gate pressure and recent decision flow before changing thresholds.")
     elif status in {"gated", "blocked"}:
         recommended_actions.insert(0, f"Engine status is {status}. Review recent skip/block reasons before rolling out more aggressive profiles.")
+    if (
+        status == "cold"
+        and int(storage.get("signal_count") or 0) == 0
+        and int(storage.get("decision_count") or 0) == 0
+    ):
+        recommended_actions.insert(
+            0,
+            f"Learning DB is empty at {storage.get('db_path', 'unknown')}. Verify worker and engine share SIGNAL_ENGINE_DB_PATH or the same mounted disk path.",
+        )
 
     unresolved_drift = [name for name, payload in drift.items() if int(payload.get("drift_count") or 0) > 0]
     if unresolved_drift:
@@ -1886,6 +1896,7 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         },
         "rollout_summary": rollout_summary,
         "drift": drift,
+        "storage": storage,
         "notifications": incidents,
         "rollout_verification": verification_notes,
         "rollout_verification_cards": verification_cards,
@@ -1901,6 +1912,7 @@ def render_operator_command_center_html(hours: int = 24) -> str:
     diagnostics = center.get("diagnostics") if isinstance(center.get("diagnostics"), dict) else {}
     rollout_summary = center.get("rollout_summary") if isinstance(center.get("rollout_summary"), dict) else {}
     drift = center.get("drift") if isinstance(center.get("drift"), dict) else {}
+    storage = center.get("storage") if isinstance(center.get("storage"), dict) else {}
     notifications = center.get("notifications") if isinstance(center.get("notifications"), list) else []
     verification_cards = center.get("rollout_verification_cards") if isinstance(center.get("rollout_verification_cards"), list) else []
     verification_family_scorecards = center.get("rollout_verification_family_scorecards") if isinstance(center.get("rollout_verification_family_scorecards"), list) else []
@@ -2040,6 +2052,7 @@ def render_operator_command_center_html(hours: int = 24) -> str:
         {metric_card("Skip Pressure", f"{engine_health.get('skip_pressure', 0)}%")}
         {metric_card("Block Pressure", f"{engine_health.get('block_pressure', 0)}%")}
       </div>
+      <p style="margin-top:14px;"><strong>DB:</strong> {html.escape(str(storage.get("db_path") or "unknown"))} &nbsp; <strong>Signals:</strong> {int(storage.get("signal_count") or 0)} &nbsp; <strong>Decisions:</strong> {int(storage.get("decision_count") or 0)}</p>
     </section>
     <section class="panel">
       <h2>Drift Snapshot</h2>

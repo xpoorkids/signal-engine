@@ -2,13 +2,12 @@ import argparse
 import json
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
-from app.services.db_service import connect_sqlite
+from app.services.db_service import connect_sqlite, resolve_engine_db_path
 import worker.scanner as scanner
 
 
-DB_PATH = Path("state/engine.db")
+DB_PATH = resolve_engine_db_path()
 
 
 def _parse_from(value: str) -> int:

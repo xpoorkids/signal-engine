@@ -4,6 +4,7 @@ import asyncio
 import html
 import json
 import logging
+import os
 import sqlite3
 import time
 import uuid
@@ -11,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from app.services.db_service import connect_sqlite
+from app.services.db_service import connect_sqlite, resolve_engine_db_path
 from worker.dex import dex_enrich_token, select_best_pair, summarize_pair
 
 try:
@@ -24,7 +25,7 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path("state/engine.db")
+DB_PATH = resolve_engine_db_path()
 SNAPSHOT_HORIZONS_MINUTES = (5, 15, 60, 240)
 SNAPSHOT_POLL_SECONDS = 30
 REPORT_POLL_SECONDS = 600
@@ -32,12 +33,17 @@ _SCHEMA_READY = False
 
 
 def _connect() -> sqlite3.Connection:
-    return connect_sqlite(DB_PATH)
+    return connect_sqlite(_current_db_path())
+
+
+def _current_db_path() -> Path:
+    return resolve_engine_db_path(DB_PATH)
 
 
 def init() -> None:
     global _SCHEMA_READY
-    DB_PATH.parent.mkdir(exist_ok=True)
+    db_path = _current_db_path()
+    db_path.parent.mkdir(exist_ok=True)
     with _connect() as c:
         c.execute(
             """
@@ -242,6 +248,29 @@ def _ensure_schema() -> None:
     if _SCHEMA_READY:
         return
     init()
+
+
+def get_learning_storage_status() -> dict[str, Any]:
+    _ensure_schema()
+    db_path = _current_db_path()
+    file_exists = db_path.exists()
+    file_size_bytes = db_path.stat().st_size if file_exists else 0
+    with _connect() as c:
+        signal_count = int(c.execute("SELECT COUNT(1) FROM signals").fetchone()[0] or 0)
+        decision_count = int(c.execute("SELECT COUNT(1) FROM signal_decisions").fetchone()[0] or 0)
+        snapshot_count = int(c.execute("SELECT COUNT(1) FROM signal_snapshots").fetchone()[0] or 0)
+    return {
+        "db_path": str(db_path),
+        "db_path_env": (
+            os.getenv("SIGNAL_ENGINE_DB_PATH", "").strip()
+            or os.getenv("STATE_ENGINE_DB_PATH", "").strip()
+        ),
+        "file_exists": file_exists,
+        "file_size_bytes": file_size_bytes,
+        "signal_count": signal_count,
+        "decision_count": decision_count,
+        "snapshot_count": snapshot_count,
+    }
 
 
 def _to_float(value: Any) -> float | None:
@@ -1096,6 +1125,7 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
 def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
     _ensure_schema()
     summary = get_diagnostics_summary(hours=max(1, hours))
+    storage = get_learning_storage_status()
     cutoff = int(time.time()) - max(1, hours) * 3600
     with _connect() as c:
         latest_signal_row = c.execute(
@@ -1164,6 +1194,8 @@ def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
     elif latest_decision and latest_decision["age_minutes"] <= 15.0:
         status = "processing"
         status_detail = "The engine is processing fresh events, but none qualified for send yet."
+    if total_decisions == 0 and int(storage.get("decision_count") or 0) == 0 and int(storage.get("signal_count") or 0) == 0:
+        status_detail = "No learning rows exist in the current engine DB yet. This usually means the worker has not written here or both services are not sharing the same DB path."
 
     top_skip_reasons = summary.get("top_skip_reasons") if isinstance(summary.get("top_skip_reasons"), list) else []
     top_reasons = top_skip_reasons[:5]
@@ -1182,6 +1214,7 @@ def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
         "latest_signal": latest_signal,
         "latest_decision": latest_decision,
         "top_skip_reasons": top_reasons,
+        "storage": storage,
     }
 
 
@@ -1190,6 +1223,7 @@ def render_engine_health_html(hours: int = 6) -> str:
     latest_signal = digest.get("latest_signal") if isinstance(digest.get("latest_signal"), dict) else {}
     latest_decision = digest.get("latest_decision") if isinstance(digest.get("latest_decision"), dict) else {}
     top_skip_reasons = digest.get("top_skip_reasons") if isinstance(digest.get("top_skip_reasons"), list) else []
+    storage = digest.get("storage") if isinstance(digest.get("storage"), dict) else {}
 
     def metric_card(label: str, value: Any) -> str:
         return (
@@ -1258,6 +1292,12 @@ def render_engine_health_html(hours: int = 6) -> str:
       {metric_card("Sent", digest.get("sent_count", 0))}
       {metric_card("Skip Pressure", f"{digest.get('skip_pressure', 0)}%")}
       {metric_card("Block Pressure", f"{digest.get('block_pressure', 0)}%")}
+    </div>
+    <div class="grid">
+      {metric_card("DB Path", storage.get("db_path", "unknown"))}
+      {metric_card("Signals", storage.get("signal_count", 0))}
+      {metric_card("Decisions", storage.get("decision_count", 0))}
+      {metric_card("Snapshots", storage.get("snapshot_count", 0))}
     </div>
     <div class="wide-grid">
       <section class="panel">

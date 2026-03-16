@@ -30,6 +30,10 @@ Production-oriented crypto signal engine for Solana token discovery, scoring, al
 - `state/engine.db`
   SQLite database for engine state, candidate state, wallet state, and learning tables.
 
+Shared DB path:
+- `SIGNAL_ENGINE_DB_PATH` can be set on both `engine` and `worker` to force both services to use the same SQLite file, for example on a mounted Render disk.
+- `STATE_ENGINE_DB_PATH` is supported as a fallback alias.
+
 ## New Learning Layer
 
 The engine remains deterministic. The learning layer observes outcomes around emitted signals.

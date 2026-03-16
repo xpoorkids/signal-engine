@@ -120,10 +120,12 @@ def test_learning_engine_health_routes_return_status(tmp_path, monkeypatch):
     payload = json_response.json()
     assert payload["status"] in {"cold", "quiet", "processing", "gated", "blocked", "active"}
     assert "skip_pressure" in payload
+    assert "storage" in payload
 
     html_response = client.get("/learning/health/dashboard?hours=10000")
     assert html_response.status_code == 200
     assert "Engine Health" in html_response.text
+    assert "DB Path" in html_response.text
 
 
 def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, monkeypatch):
@@ -422,6 +424,7 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "engine_health" in command_center_payload
     assert "rollout_summary" in command_center_payload
     assert "drift" in command_center_payload
+    assert "storage" in command_center_payload
     assert "incident_state_counts" in command_center_payload
     assert "rollout_verification_cards" in command_center_payload
     assert "rollout_verification_family_scorecards" in command_center_payload

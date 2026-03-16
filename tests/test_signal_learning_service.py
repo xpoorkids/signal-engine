@@ -242,6 +242,8 @@ def test_diagnostics_and_health_bootstrap_schema_on_fresh_db(tmp_path, monkeypat
 
     health = sls.get_engine_health_digest(hours=24)
     assert health["status"] in {"cold", "quiet", "processing", "gated", "blocked", "active"}
+    assert health["storage"]["db_path"]
+    assert health["storage"]["decision_count"] == 0
 
 
 def test_diagnostics_summary_includes_outcome_analysis(tmp_path, monkeypatch):
