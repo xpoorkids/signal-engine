@@ -143,17 +143,13 @@ def test_format_discord_missing_metrics_do_not_render_as_zero():
 
     embed = format_discord(event)["embeds"][0]
     identity_field = _candidate_field(embed, "Token Identity")
-    quality_field = _candidate_field(embed, "Quality")
-    command_view = _candidate_field(embed, "Command View")
-    operator_brief = _candidate_field(embed, "Operator Brief")
+    quality_field = _candidate_field(embed, "Risk / Confidence")
 
     assert "0.00" not in identity_field
     assert "Insufficient data" in quality_field
-    assert "Not computed" in command_view
-    assert "**Contract:**" in identity_field
-    assert f"`{event.token}`" in identity_field
-    assert "Data:" in operator_brief
-    assert "risk: insufficient data" in operator_brief.lower() or "attention: not computed" in operator_brief.lower()
+    assert "ASSET   Test Token" in identity_field
+    assert "TICKER  $TEST" in identity_field
+    assert event.token in identity_field
 
 
 def test_review_html_missing_metrics_render_semantic_state():
@@ -221,16 +217,15 @@ def test_format_discord_regression_sample_payload_keeps_real_risk():
 
     embed = format_discord(event)["embeds"][0]
     identity_field = _candidate_field(embed, "Token Identity")
-    quality_field = _candidate_field(embed, "Quality")
-    flow_field = _candidate_field(embed, "Flow + Structure")
+    quality_field = _candidate_field(embed, "Risk / Confidence")
+    flow_field = _candidate_field(embed, "Flow")
     intelligence_field = _candidate_field(embed, "Signal Intelligence")
 
-    assert "**Asset:** Test Token" in identity_field
-    assert "**Ticker:** `$TEST`" in identity_field
+    assert "ASSET   Test Token" in identity_field
+    assert "TICKER  $TEST" in identity_field
     assert "🟡 Risk Score: `0.47" in quality_field
     assert "Flow Bias:" in flow_field
-    assert "**Contract:**" in identity_field
-    assert f"`{event.token}`" in identity_field
+    assert event.token in identity_field
     assert "X momentum:" in intelligence_field
 
 
@@ -259,8 +254,8 @@ def test_format_discord_fetches_metadata_when_identity_missing(monkeypatch):
     embed = format_discord(event)["embeds"][0]
     identity_field = _candidate_field(embed, "Token Identity")
 
-    assert "**Asset:** Real Token" in identity_field
-    assert "**Ticker:** `$REAL`" in identity_field
+    assert "ASSET   Real Token" in identity_field
+    assert "TICKER  $REAL" in identity_field
 
 
 def test_format_discord_actions_include_ops_links_when_public_base_url_set(monkeypatch):
@@ -328,9 +323,9 @@ def test_format_discord_overview_uses_new_hierarchy():
 
     assert embed["title"] == "$PUMPERS"
     assert embed["fields"][0]["name"] == "Token Identity"
-    assert "**Asset:** Pumpers" in _candidate_field(embed, "Token Identity")
-    assert "**Ticker:** `$PUMPERS`" in _candidate_field(embed, "Token Identity")
-    assert "▲ Buy Flow 5m:" in _candidate_field(embed, "Flow + Structure")
+    assert "ASSET   Pumpers" in _candidate_field(embed, "Token Identity")
+    assert "TICKER  $PUMPERS" in _candidate_field(embed, "Token Identity")
+    assert "▲ Buy Flow 5m:" in _candidate_field(embed, "Flow")
     assert "```text" in _candidate_field(embed, "Market Snapshot")
     assert "LIQ $25.5K | MC $21.7K | VOL5 $141.4K" in _candidate_field(embed, "Market Snapshot")
     assert "AGE 3.2m | ▲ M5 +190.0%" in _candidate_field(embed, "Market Snapshot")
@@ -368,8 +363,8 @@ def test_risk_alert_uses_colored_semantic_indicators():
     )
 
     embed = format_discord(event)["embeds"][0]
-    flow_field = _candidate_field(embed, "Flow + Structure")
-    quality_field = _candidate_field(embed, "Quality")
+    flow_field = _candidate_field(embed, "Flow")
+    quality_field = _candidate_field(embed, "Risk / Confidence")
 
     assert "defensive" in embed["description"].lower() or "risk is elevated" in embed["description"].lower()
     assert "LIQ N/A | MC $17.2K | VOL5 $29.3K" in _candidate_field(embed, "Market Snapshot")

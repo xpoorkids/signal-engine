@@ -996,6 +996,21 @@ def _build_overview_lines(
     ]
 
 
+def _identity_field(symbol: str, name: str, full_addr: str) -> dict:
+    return {
+        "name": "Token Identity",
+        "value": _boxed_lines(
+            [
+                f"ASSET   {_clean_text(name) or _clean_text(symbol) or 'Unknown'}",
+                f"TICKER  ${_clean_text(symbol).upper() or 'UNK'}",
+                "CONTRACT",
+                str(full_addr or "unknown"),
+            ]
+        ),
+        "inline": False,
+    }
+
+
 def _build_market_snapshot_lines(
     liq: str,
     mc: str,
@@ -1047,36 +1062,18 @@ def _format_candidate_like(e: Event, description: str) -> dict:
     signal_type = _signal_type(e, vm.attention_score, vm.risk_score)
     fields = _finalize_fields(
         [
-            {
-                "name": "Token Identity",
-                "value": _section_lines(
-                    _build_overview_lines(
-                        symbol,
-                        name,
-                        full_addr,
-                    )
-                ),
-                "inline": False,
-            },
+            _identity_field(symbol, name, full_addr),
             _market_header_field(metrics),
             {
-                "name": "Flow + Structure",
+                "name": "Flow",
                 "value": _section_lines([_build_flow_section(metrics, vm.attention_score, vm.risk_score)]),
                 "inline": True,
             },
             {
-                "name": "Quality",
+                "name": "Risk / Confidence",
                 "value": _section_lines([_build_quality_section(e, metrics, vm.risk_score, vm.confidence_score)]),
                 "inline": True,
             },
-            _decision_field(e.extra if isinstance(e.extra, dict) else {}, confidence_pct, vm.lifecycle, conviction, vm.confidence_score, vm.risk_score),
-            _operator_brief_field(
-                e,
-                lifecycle=vm.lifecycle,
-                attention_score=vm.attention_score,
-                risk_score=vm.risk_score,
-                confidence_score=vm.confidence_score,
-            ),
             _trigger_field(e),
             _links_field(token, metrics),
         ]
@@ -1131,36 +1128,18 @@ def format_discord(e: Event) -> dict:
         signal_type = _signal_type(e, vm.attention_score, vm.risk_score)
         fields = _finalize_fields(
             [
-                {
-                    "name": "Token Identity",
-                    "value": _section_lines(
-                        _build_overview_lines(
-                            symbol,
-                            name,
-                            full_addr,
-                        )
-                    ),
-                    "inline": False,
-                },
+                _identity_field(symbol, name, full_addr),
                 _market_header_field(metrics),
                 {
-                    "name": "Flow + Structure",
+                    "name": "Flow",
                     "value": _section_lines([_build_flow_section(metrics, vm.attention_score, vm.risk_score)]),
                     "inline": True,
                 },
                 {
-                    "name": "Quality",
+                    "name": "Risk / Confidence",
                     "value": _section_lines([_build_quality_section(e, metrics, vm.risk_score, vm.confidence_score)]),
                     "inline": True,
                 },
-                _decision_field(e.extra if isinstance(e.extra, dict) else {}, confidence_pct, vm.lifecycle, conviction, vm.confidence_score, vm.risk_score),
-                _operator_brief_field(
-                    e,
-                    lifecycle=vm.lifecycle,
-                    attention_score=vm.attention_score,
-                    risk_score=vm.risk_score,
-                    confidence_score=vm.confidence_score,
-                ),
                 _trigger_field(e),
                 {"name": "Why Promoted", "value": _section_lines([f"- {_pretty_reason(r)}" for r in reasons]), "inline": False} if reasons else None,
                 _links_field(token, metrics),
