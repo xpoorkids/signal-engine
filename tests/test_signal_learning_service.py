@@ -463,6 +463,129 @@ def test_record_signal_decision_creates_reusable_signal_shell(tmp_path, monkeypa
     assert updated_row[5] == 18000
 
 
+def test_record_signal_decision_persists_policy_trace_metadata(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    signal_id = sls.record_signal_decision(
+        token="token-trace",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_ready",
+        action_taken="emit",
+        reasons=["improved_attention"],
+        features={
+            "attention_score": 0.74,
+            "creator_score": 0.42,
+            "candidate_rate_limit_allowed": True,
+            "candidate_progression_ok": True,
+            "candidate_send_eligible": True,
+        },
+        attention_score=0.74,
+        risk_score=0.18,
+        confidence_score=0.67,
+        creator_score=0.42,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="policy-live-1",
+        ts_value=1_773_600_500,
+        source="test",
+    )
+
+    with sls._connect() as c:
+        row = c.execute(
+            """
+            SELECT signal_id, action_taken, policy_name, policy_version, features_json
+            FROM signal_decisions
+            WHERE signal_id=?
+            """,
+            (signal_id,),
+        ).fetchone()
+
+    assert row[0] == signal_id
+    assert row[1] == "emit"
+    assert row[2] == "deterministic_engine"
+    assert row[3] == "policy-live-1"
+    features = json.loads(row[4])
+    assert features["attention_score"] == 0.74
+    assert features["candidate_progression_ok"] is True
+
+
+def test_evaluate_shadow_policy_reports_action_changes(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    signal_id = sls.record_signal_decision(
+        token="token-shadow",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_ready",
+        action_taken="emit",
+        reasons=["improved_attention"],
+        features={
+            "attention_score": 0.74,
+            "creator_score": 0.42,
+            "candidate_rate_limit_allowed": True,
+            "candidate_progression_ok": True,
+            "candidate_send_eligible": True,
+        },
+        attention_score=0.74,
+        risk_score=0.18,
+        confidence_score=0.67,
+        creator_score=0.42,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="policy-live-1",
+        ts_value=1_773_600_500,
+        source="test",
+    )
+
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                60,
+                1_773_604_100,
+                "dex",
+                22000,
+                6400,
+                4500,
+                60.0,
+                28.0,
+                70.0,
+                48,
+                20,
+                85.0,
+                5.0,
+                30.0,
+                "worked",
+                json.dumps({"outcome_label": "worked"}),
+            ),
+        )
+
+    result = sls.evaluate_shadow_policy(
+        hours=10_000,
+        policy_name="shadow_policy",
+        policy_version="shadow-2",
+        overrides={"candidate_attention_min": 0.80},
+    )
+
+    assert result["changed_count"] == 1
+    assert result["changed_examples"][0]["current_action"] == "emit"
+    assert result["changed_examples"][0]["shadow_action"] == "hold"
+    assert result["impact"]["positive_outcomes"] == 1
+
+
 def test_diagnostics_summary_builds_reason_quality_scorecards(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

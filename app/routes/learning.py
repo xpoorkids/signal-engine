@@ -2,11 +2,13 @@ from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from app.services.signal_learning_service import (
+    evaluate_shadow_policy,
     get_engine_health_digest,
     get_diagnostics_summary,
     get_learning_digest,
     get_latest_learning_report,
     get_learning_report,
+    get_policy_trace_summary,
     render_engine_health_html,
     render_diagnostics_html,
     render_learning_digest_html,
@@ -119,6 +121,45 @@ def learning_report_digest_dashboard(report_date: str):
 @router.get("/learning/diagnostics/summary")
 def learning_diagnostics_summary(hours: int = 24):
     return get_diagnostics_summary(hours=max(1, hours))
+
+
+@router.get("/learning/policy/traces")
+def learning_policy_traces(hours: int = 24, limit: int = 50, stage: str | None = None, decision: str | None = None):
+    return get_policy_trace_summary(hours=max(1, hours), limit=max(1, limit), stage=stage, decision=decision)
+
+
+@router.get("/learning/policy/shadow")
+def learning_policy_shadow(
+    hours: int = 24,
+    limit: int = 200,
+    stage: str | None = None,
+    policy_name: str | None = None,
+    policy_version: str | None = None,
+    candidate_attention_min: float | None = None,
+    candidate_creator_min: float | None = None,
+    promoted_confidence_min: float | None = None,
+    promoted_attention_min: float | None = None,
+    promoted_risk_max: float | None = None,
+    promoted_liquidity_min: float | None = None,
+    promoted_buyers_15m_min: int | None = None,
+):
+    overrides = {
+        "candidate_attention_min": candidate_attention_min,
+        "candidate_creator_min": candidate_creator_min,
+        "promoted_confidence_min": promoted_confidence_min,
+        "promoted_attention_min": promoted_attention_min,
+        "promoted_risk_max": promoted_risk_max,
+        "promoted_liquidity_min": promoted_liquidity_min,
+        "promoted_buyers_15m_min": promoted_buyers_15m_min,
+    }
+    return evaluate_shadow_policy(
+        hours=max(1, hours),
+        limit=max(1, limit),
+        stage=stage,
+        policy_name=policy_name,
+        policy_version=policy_version,
+        overrides=overrides,
+    )
 
 
 @router.get("/learning/health")

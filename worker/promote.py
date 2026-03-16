@@ -2,6 +2,7 @@ from typing import Dict, Any
 import logging
 import time
 import asyncio
+import os
 from worker.events import Event
 from worker.state import EngineState, bump_token
 from worker.config import (
@@ -77,6 +78,12 @@ from app.services.wallet_service import wallet_risk_score
 
 logger = logging.getLogger(__name__)
 logger.info("[PROMOTE FILE LOADED]")
+POLICY_NAME = os.getenv("SIGNAL_ENGINE_POLICY_NAME", "").strip() or "deterministic_engine"
+POLICY_VERSION = (
+    os.getenv("SIGNAL_ENGINE_POLICY_VERSION", "").strip()
+    or os.getenv("RENDER_GIT_COMMIT", "").strip()
+    or "deterministic-v1"
+)
 
 
 def _candidate_send_eligible(attention_score: float | None, creator_score: float) -> bool:
@@ -90,6 +97,7 @@ def _record_decision(
     *,
     stage: str,
     decision: str,
+    action_taken: str | None = None,
     reasons: list[str] | None = None,
     attention_score: float | None = None,
     risk_score: float | None = None,
@@ -98,12 +106,47 @@ def _record_decision(
     lifecycle: str | None = None,
 ) -> None:
     try:
+        extra = e.extra if isinstance(e.extra, dict) else {}
+        dex_summary = extra.get("dex_summary") if isinstance(extra.get("dex_summary"), dict) else {}
+        attention_metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
+        features = {
+            "attention_score": attention_score,
+            "risk_score": risk_score,
+            "confidence_score": confidence_score,
+            "creator_score": creator_score,
+            "lifecycle": lifecycle,
+            "market_cap_usd": dex_summary.get("market_cap") or dex_summary.get("fdv"),
+            "liquidity_usd": dex_summary.get("liquidity_usd"),
+            "volume_m5_usd": dex_summary.get("volume_m5"),
+            "age_minutes": dex_summary.get("age_minutes"),
+            "price_change_m5": dex_summary.get("price_change_m5"),
+            "price_change_h1": dex_summary.get("price_change_h1"),
+            "txns_m5_buys": dex_summary.get("txns_m5_buys"),
+            "txns_m5_sells": dex_summary.get("txns_m5_sells"),
+            "unique_buyers_5m": attention_metrics.get("unique_buyers_5m"),
+            "unique_buyers_15m": attention_metrics.get("unique_buyers_15m"),
+            "burst_count_60s": attention_metrics.get("burst_count_60s"),
+            "tracked_wallet_hits": attention_metrics.get("tracked_wallet_hits"),
+            "kol_wallet_hits": attention_metrics.get("kol_wallet_hits"),
+            "candidate_send_eligible": extra.get("candidate_send"),
+            "candidate_edit": extra.get("candidate_edit"),
+            "candidate_improved": extra.get("candidate_improved"),
+            "candidate_rate_limit_allowed": extra.get("candidate_rate_limit_allowed"),
+            "candidate_progression_ok": extra.get("candidate_progression_ok"),
+            "has_dex_pool": bool(dex_summary),
+            "lp_drain": extra.get("lp_drain"),
+            "creator_sell": extra.get("creator_sold"),
+        }
         signal_id = record_signal_decision(
             token=e.token,
             event_type=e.type,
             stage=stage,
             decision=decision,
+            action_taken=action_taken,
             reasons=reasons,
+            features=features,
+            policy_name=POLICY_NAME,
+            policy_version=POLICY_VERSION,
             attention_score=attention_score,
             risk_score=risk_score,
             confidence_score=confidence_score,
@@ -654,6 +697,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 send_eligible = _candidate_send_eligible(attention_score, creator_score_value)
                 allow_rate = allow_candidate_rate_limit(EARLY_WATCH_RATE_LIMIT_PER_HOUR) if send_eligible else False
                 should_send = send_eligible and allow_rate
+                extra["candidate_rate_limit_allowed"] = allow_rate
                 if not allow_rate:
                     if send_eligible:
                         logger.info(
@@ -697,6 +741,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 alert_sent = bool(candidate_state.get("alert_sent"))
                 message_id = candidate_state.get("message_id") or ""
                 progression_ok = improved or not alert_sent
+                extra["candidate_progression_ok"] = progression_ok
                 should_send = should_send and progression_ok
                 extra["candidate_send"] = should_send
                 extra["candidate_edit"] = alert_sent and improved
@@ -707,6 +752,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     e,
                     stage="candidate",
                     decision="candidate_ready" if should_send else "candidate_buffered",
+                    action_taken="emit" if should_send else "hold",
                     reasons=improved_keys if improved_keys else [],
                     attention_score=attention_score,
                     risk_score=risk_score,
@@ -985,6 +1031,6 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     signature=e.signature,
                 )
             )
-            _record_decision(e, stage="promoted", decision="promoted_sent", reasons=["promotion_gate_passed"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
+            _record_decision(e, stage="promoted", decision="promoted_sent", action_taken="emit", reasons=["promotion_gate_passed"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
 
     return out

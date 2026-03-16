@@ -30,6 +30,8 @@ SNAPSHOT_HORIZONS_MINUTES = (5, 15, 60, 240)
 SNAPSHOT_POLL_SECONDS = 30
 REPORT_POLL_SECONDS = 600
 _SCHEMA_READY = False
+DEFAULT_POLICY_NAME = "deterministic_engine"
+DEFAULT_POLICY_VERSION = "deterministic-v1"
 
 
 def _connect() -> sqlite3.Connection:
@@ -181,7 +183,11 @@ def init() -> None:
                 event_type TEXT,
                 stage TEXT,
                 decision TEXT NOT NULL,
+                action_taken TEXT,
+                policy_name TEXT,
+                policy_version TEXT,
                 reasons_json TEXT,
+                features_json TEXT,
                 attention_score REAL,
                 risk_score REAL,
                 confidence_score REAL,
@@ -237,6 +243,14 @@ def init() -> None:
         decision_cols = {row[1] for row in c.execute("PRAGMA table_info(signal_decisions)").fetchall()}
         if "signal_id" not in decision_cols:
             c.execute("ALTER TABLE signal_decisions ADD COLUMN signal_id TEXT")
+        if "action_taken" not in decision_cols:
+            c.execute("ALTER TABLE signal_decisions ADD COLUMN action_taken TEXT")
+        if "policy_name" not in decision_cols:
+            c.execute("ALTER TABLE signal_decisions ADD COLUMN policy_name TEXT")
+        if "policy_version" not in decision_cols:
+            c.execute("ALTER TABLE signal_decisions ADD COLUMN policy_version TEXT")
+        if "features_json" not in decision_cols:
+            c.execute("ALTER TABLE signal_decisions ADD COLUMN features_json TEXT")
         c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_signal_id ON signal_decisions(signal_id)")
     _SCHEMA_READY = True
 
@@ -346,6 +360,124 @@ def _percent_change(current: float | None, baseline: float | None) -> float | No
     if current is None or baseline is None or baseline == 0:
         return None
     return round(((current - baseline) / baseline) * 100.0, 2)
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _policy_env_float(name: str, default: float) -> float:
+    try:
+        raw = os.getenv(name, "").strip()
+        return float(raw) if raw else float(default)
+    except Exception:
+        return float(default)
+
+
+def _policy_env_int(name: str, default: int) -> int:
+    try:
+        raw = os.getenv(name, "").strip()
+        return int(raw) if raw else int(default)
+    except Exception:
+        return int(default)
+
+
+def _default_policy_descriptor() -> dict[str, Any]:
+    version = (
+        os.getenv("SIGNAL_ENGINE_POLICY_VERSION", "").strip()
+        or os.getenv("RENDER_GIT_COMMIT", "").strip()
+        or DEFAULT_POLICY_VERSION
+    )
+    return {
+        "policy_name": os.getenv("SIGNAL_ENGINE_POLICY_NAME", "").strip() or DEFAULT_POLICY_NAME,
+        "policy_version": version,
+        "candidate_attention_min": _policy_env_float("ATTENTION_CANDIDATE_THRESHOLD", 0.70),
+        "candidate_creator_min": _policy_env_float("EARLY_CREATOR_MIN", 0.30),
+        "promoted_confidence_min": _policy_env_float("SIGNAL_ENGINE_PROMOTED_CONFIDENCE_MIN", 0.80),
+        "promoted_attention_min": _policy_env_float("PROMOTION_MIN_ATTENTION", 0.50),
+        "promoted_risk_max": _policy_env_float("PROMOTION_MAX_RISK", 0.60),
+        "promoted_liquidity_min": _policy_env_float("PROM_MIN_LIQ_USD", 15000.0),
+        "promoted_buyers_15m_min": _policy_env_int("SIGNAL_ENGINE_PROMOTED_BUYERS_15M_MIN", 30),
+    }
+
+
+def _normalize_policy_descriptor(
+    *,
+    policy_name: str | None = None,
+    policy_version: str | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    descriptor = _default_policy_descriptor()
+    if policy_name:
+        descriptor["policy_name"] = policy_name
+    if policy_version:
+        descriptor["policy_version"] = policy_version
+    for key, value in (overrides or {}).items():
+        if value is not None:
+            descriptor[key] = value
+    return descriptor
+
+
+def _normalize_feature_map(features: dict[str, Any] | None) -> dict[str, Any]:
+    data = dict(features or {})
+    normalized: dict[str, Any] = {}
+    for key, value in data.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            normalized[key] = value
+        elif isinstance(value, (list, dict)):
+            normalized[key] = value
+        else:
+            normalized[key] = str(value)
+    return normalized
+
+
+def _derive_shadow_action(stage: str, features: dict[str, Any], policy: dict[str, Any]) -> str:
+    if stage == "candidate":
+        attention_score = _to_float(features.get("attention_score"))
+        creator_score = _to_float(features.get("creator_score"))
+        rate_limit_allowed = bool(features.get("candidate_rate_limit_allowed", True))
+        progression_ok = bool(features.get("candidate_progression_ok", True))
+        send_eligible = bool(features.get("candidate_send_eligible", True))
+        if (
+            attention_score is not None
+            and creator_score is not None
+            and attention_score >= float(policy["candidate_attention_min"])
+            and creator_score >= float(policy["candidate_creator_min"])
+            and rate_limit_allowed
+            and progression_ok
+            and send_eligible
+        ):
+            return "emit"
+        return "hold"
+
+    if stage == "promoted":
+        confidence_score = _to_float(features.get("confidence_score"))
+        attention_score = _to_float(features.get("attention_score"))
+        risk_score = _to_float(features.get("risk_score"))
+        liquidity_usd = _to_float(features.get("liquidity_usd"))
+        buyers_15m = _to_int(features.get("unique_buyers_15m"))
+        has_dex_pool = bool(features.get("has_dex_pool", True))
+        lp_drain = bool(features.get("lp_drain", False))
+        creator_sell = bool(features.get("creator_sell", False))
+        if (
+            confidence_score is not None
+            and attention_score is not None
+            and risk_score is not None
+            and liquidity_usd is not None
+            and buyers_15m is not None
+            and has_dex_pool
+            and not lp_drain
+            and not creator_sell
+            and confidence_score >= float(policy["promoted_confidence_min"])
+            and attention_score >= float(policy["promoted_attention_min"])
+            and risk_score <= float(policy["promoted_risk_max"])
+            and liquidity_usd >= float(policy["promoted_liquidity_min"])
+            and buyers_15m >= int(policy["promoted_buyers_15m_min"])
+        ):
+            return "emit"
+        return "hold"
+
+    return "observe"
 
 
 def _outcome_label(snapshot: dict[str, Any], baseline: dict[str, Any]) -> str:
@@ -605,7 +737,11 @@ def record_signal_decision(
     event_type: str,
     stage: str,
     decision: str,
+    action_taken: str | None = None,
     reasons: list[str] | None = None,
+    features: dict[str, Any] | None = None,
+    policy_name: str | None = None,
+    policy_version: str | None = None,
     attention_score: float | None = None,
     risk_score: float | None = None,
     confidence_score: float | None = None,
@@ -619,6 +755,24 @@ def record_signal_decision(
     created_ts = int(ts_value or time.time())
     time_features = _classify_time_features(created_ts)
     decision_id = uuid.uuid4().hex
+    feature_map = _normalize_feature_map(features)
+    if attention_score is not None and "attention_score" not in feature_map:
+        feature_map["attention_score"] = attention_score
+    if risk_score is not None and "risk_score" not in feature_map:
+        feature_map["risk_score"] = risk_score
+    if confidence_score is not None and "confidence_score" not in feature_map:
+        feature_map["confidence_score"] = confidence_score
+    if creator_score is not None and "creator_score" not in feature_map:
+        feature_map["creator_score"] = creator_score
+    if lifecycle and "lifecycle" not in feature_map:
+        feature_map["lifecycle"] = lifecycle
+    if token and "token" not in feature_map:
+        feature_map["token"] = token
+    feature_map["stage"] = stage
+    resolved_policy = _normalize_policy_descriptor(
+        policy_name=policy_name,
+        policy_version=policy_version,
+    )
     resolved_signal_id = _ensure_signal_shell(
         token=token,
         event_type=event_type,
@@ -635,12 +789,13 @@ def record_signal_decision(
         c.execute(
             """
             INSERT INTO signal_decisions (
-                decision_id, signal_id, token, event_type, stage, decision, reasons_json,
+                decision_id, signal_id, token, event_type, stage, decision, action_taken,
+                policy_name, policy_version, reasons_json, features_json,
                 attention_score, risk_score, confidence_score, creator_score, lifecycle,
                 hour_utc, day_of_week_utc, is_weekend_utc, hour_local, day_of_week_local,
                 local_daypart, session_bucket, created_ts
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 decision_id,
@@ -649,7 +804,11 @@ def record_signal_decision(
                 event_type,
                 stage,
                 decision,
+                action_taken,
+                resolved_policy["policy_name"],
+                resolved_policy["policy_version"],
                 json.dumps(reasons or []),
+                _json_dumps(feature_map),
                 attention_score,
                 risk_score,
                 confidence_score,
@@ -666,6 +825,192 @@ def record_signal_decision(
             ),
         )
     return resolved_signal_id
+
+
+def get_policy_trace_summary(
+    *,
+    hours: int = 24,
+    limit: int = 50,
+    stage: str | None = None,
+    decision: str | None = None,
+) -> dict[str, Any]:
+    _ensure_schema()
+    cutoff = int(time.time()) - max(1, hours) * 3600
+    clauses = ["created_ts >= ?"]
+    params: list[Any] = [cutoff]
+    if stage:
+        clauses.append("stage = ?")
+        params.append(stage)
+    if decision:
+        clauses.append("decision = ?")
+        params.append(decision)
+    params.append(max(1, limit))
+
+    with _connect() as c:
+        rows = c.execute(
+            f"""
+            SELECT decision_id, signal_id, token, event_type, stage, decision, action_taken,
+                   policy_name, policy_version, reasons_json, features_json, attention_score,
+                   risk_score, confidence_score, creator_score, lifecycle, session_bucket, created_ts
+            FROM signal_decisions
+            WHERE {" AND ".join(clauses)}
+            ORDER BY created_ts DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+
+    traces: list[dict[str, Any]] = []
+    counts_by_stage: dict[str, int] = {}
+    counts_by_action: dict[str, int] = {}
+    policy_versions: dict[str, int] = {}
+    for row in rows:
+        reasons: list[str] = []
+        features: dict[str, Any] = {}
+        try:
+            parsed_reasons = json.loads(row[9] or "[]")
+            if isinstance(parsed_reasons, list):
+                reasons = [str(item) for item in parsed_reasons]
+        except Exception:
+            reasons = []
+        try:
+            parsed_features = json.loads(row[10] or "{}")
+            if isinstance(parsed_features, dict):
+                features = parsed_features
+        except Exception:
+            features = {}
+        trace = {
+            "decision_id": row[0],
+            "signal_id": row[1],
+            "token": row[2],
+            "event_type": row[3],
+            "stage": row[4],
+            "decision": row[5],
+            "action_taken": row[6],
+            "policy_name": row[7],
+            "policy_version": row[8],
+            "reasons": reasons,
+            "features": features,
+            "attention_score": row[11],
+            "risk_score": row[12],
+            "confidence_score": row[13],
+            "creator_score": row[14],
+            "lifecycle": row[15],
+            "session_bucket": row[16],
+            "created_ts": row[17],
+        }
+        traces.append(trace)
+        counts_by_stage[trace["stage"] or "unknown"] = counts_by_stage.get(trace["stage"] or "unknown", 0) + 1
+        counts_by_action[trace["action_taken"] or "unknown"] = counts_by_action.get(trace["action_taken"] or "unknown", 0) + 1
+        policy_key = f"{trace['policy_name']}@{trace['policy_version']}"
+        policy_versions[policy_key] = policy_versions.get(policy_key, 0) + 1
+
+    return {
+        "hours": max(1, hours),
+        "trace_count": len(traces),
+        "counts_by_stage": counts_by_stage,
+        "counts_by_action": counts_by_action,
+        "policy_versions": policy_versions,
+        "traces": traces,
+    }
+
+
+def evaluate_shadow_policy(
+    *,
+    hours: int = 24,
+    limit: int = 200,
+    stage: str | None = None,
+    policy_name: str | None = None,
+    policy_version: str | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    summary = get_policy_trace_summary(hours=hours, limit=limit, stage=stage)
+    shadow_policy = _normalize_policy_descriptor(
+        policy_name=policy_name or "shadow_policy",
+        policy_version=policy_version or "shadow-v1",
+        overrides=overrides,
+    )
+    cutoff = int(time.time()) - max(1, hours) * 3600
+    with _connect() as c:
+        outcome_rows = c.execute(
+            """
+            SELECT s.signal_id, ss.outcome_label, ss.market_cap_change_pct
+            FROM signals s
+            LEFT JOIN signal_snapshots ss
+              ON ss.signal_id = s.signal_id
+             AND ss.horizon_minutes = (
+                SELECT MAX(horizon_minutes)
+                FROM signal_snapshots ss2
+                WHERE ss2.signal_id = s.signal_id
+             )
+            WHERE s.alert_ts >= ?
+            """,
+            (cutoff,),
+        ).fetchall()
+    outcome_by_signal_id = {
+        str(row[0]): {
+            "outcome_label": row[1] or "pending",
+            "market_cap_change_pct": row[2],
+        }
+        for row in outcome_rows
+        if row[0]
+    }
+
+    changed_examples: list[dict[str, Any]] = []
+    changed_count = 0
+    stage_changes: dict[str, int] = {}
+    impact = {"positive_outcomes": 0, "negative_outcomes": 0, "pending_outcomes": 0}
+    for trace in summary["traces"]:
+        features = _normalize_feature_map(trace.get("features"))
+        shadow_action = _derive_shadow_action(str(trace.get("stage") or ""), features, shadow_policy)
+        current_action = str(trace.get("action_taken") or "unknown")
+        if shadow_action == current_action:
+            continue
+        changed_count += 1
+        stage_key = str(trace.get("stage") or "unknown")
+        stage_changes[stage_key] = stage_changes.get(stage_key, 0) + 1
+        outcome = outcome_by_signal_id.get(str(trace.get("signal_id") or ""))
+        outcome_label = str((outcome or {}).get("outcome_label") or "pending")
+        if outcome_label in {"worked", "strong_continuation"}:
+            impact["positive_outcomes"] += 1
+        elif outcome_label in {"failed", "faded"}:
+            impact["negative_outcomes"] += 1
+        else:
+            impact["pending_outcomes"] += 1
+        if len(changed_examples) < 25:
+            changed_examples.append(
+                {
+                    "decision_id": trace["decision_id"],
+                    "signal_id": trace["signal_id"],
+                    "token": trace["token"],
+                    "stage": trace["stage"],
+                    "decision": trace["decision"],
+                    "current_action": current_action,
+                    "shadow_action": shadow_action,
+                    "policy_version": trace["policy_version"],
+                    "shadow_policy_version": shadow_policy["policy_version"],
+                    "attention_score": trace["attention_score"],
+                    "risk_score": trace["risk_score"],
+                    "confidence_score": trace["confidence_score"],
+                    "creator_score": trace["creator_score"],
+                    "features": features,
+                    "outcome_label": outcome_label,
+                    "market_cap_change_pct": (outcome or {}).get("market_cap_change_pct"),
+                }
+            )
+
+    trace_count = int(summary["trace_count"] or 0)
+    return {
+        "hours": max(1, hours),
+        "trace_count": trace_count,
+        "changed_count": changed_count,
+        "change_rate": round((changed_count / trace_count) * 100.0, 1) if trace_count else 0.0,
+        "stage_changes": stage_changes,
+        "current_policy_versions": summary["policy_versions"],
+        "shadow_policy": shadow_policy,
+        "impact": impact,
+        "changed_examples": changed_examples,
+    }
 
 
 def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
