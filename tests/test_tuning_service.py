@@ -281,15 +281,18 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     assert "drift" in command_center
     assert "incident_state_counts" in command_center
     assert "rollout_verification_cards" in command_center
+    assert "rollout_verification_family_scorecards" in command_center
     assert "recommended_actions" in command_center
     assert all("changed_keys" in item for item in command_center["rollout_verification_cards"])
     assert all("changed_families" in item for item in command_center["rollout_verification_cards"])
+    assert any(item["family"] == "candidate_attention" for item in command_center["rollout_verification_family_scorecards"])
 
     command_center_html = render_operator_command_center_html(hours=24)
     assert "Operator Command Center" in command_center_html
     assert "Health Snapshot" in command_center_html
     assert "Incident Snapshot" in command_center_html
     assert "Rollout Verification" in command_center_html
+    assert "Verification Family Scorecards" in command_center_html
     assert "Families:" in command_center_html or "Keys:" in command_center_html
 
     digest = get_ops_digest(hours=24)
@@ -737,12 +740,15 @@ def test_rollout_verification_compares_pre_and_post_windows(tmp_path, monkeypatc
     assert "EARLY_ATTENTION_MIN" in verification["changed_config"]["changed_config_keys"]
     assert verification["attribution"]["summary"]
     assert verification["changed_config"]["changed_config_families"]
+    assert verification["family_scorecards"]
+    assert any(item["family"] == "candidate_attention" for item in verification["family_scorecards"])
 
     verification_html = render_rollout_verification_html(approval_id=approval["approval_id"], baseline_hours=1, post_hours=2)
     assert "Rollout Verification" in verification_html
     assert "Post-Rollout Deltas" in verification_html
     assert "Changed Config" in verification_html
     assert "EARLY_ATTENTION_MIN" in verification_html
+    assert "Historical Family Scorecards" in verification_html
 
     applied = apply_rollout_verification(approval_id=approval["approval_id"], baseline_hours=1, post_hours=2)
     assert applied["approval"]["approval_id"] == approval["approval_id"]

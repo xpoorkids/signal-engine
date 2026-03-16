@@ -1203,28 +1203,13 @@ def _verification_status(pre: dict[str, Any], post: dict[str, Any], post_outcome
     return "mixed", reasons or ["balanced_change"]
 
 
-def get_rollout_verification(
+def _build_rollout_verification_payload(
+    approval: dict[str, Any],
     *,
-    approval_id: str | None = None,
-    target_name: str | None = None,
-    deployment_service: str | None = None,
-    baseline_hours: int = 24,
-    post_hours: int = 24,
+    baseline_hours: int,
+    post_hours: int,
+    include_family_scorecards: bool,
 ) -> dict[str, Any]:
-    approval: dict[str, Any] | None = None
-    if approval_id:
-        for item in list_tuning_approvals(limit=200, rollout_status="rolled_out"):
-            if str(item.get("approval_id") or "") == str(approval_id):
-                approval = item
-                break
-    else:
-        approval = _latest_matching_rollout(
-            target_name=str(target_name or "").strip().lower() or None,
-            deployment_service=str(deployment_service or "").strip() or None,
-        )
-    if approval is None:
-        raise KeyError("rollout_not_found")
-
     rollout_ts = int(approval.get("rolled_out_ts") or approval.get("created_ts") or 0)
     baseline_start = rollout_ts - max(1, int(baseline_hours)) * 3600
     post_end = min(int(time.time()), rollout_ts + max(1, int(post_hours)) * 3600)
@@ -1247,7 +1232,7 @@ def get_rollout_verification(
         else None
     )
 
-    return {
+    payload = {
         "approval": approval,
         "baseline_hours": int(baseline_hours),
         "post_hours": int(post_hours),
@@ -1262,6 +1247,128 @@ def get_rollout_verification(
         "attribution": attribution,
         "drift": drift,
     }
+    if include_family_scorecards:
+        payload["family_scorecards"] = _rollout_family_scorecards(
+            baseline_hours=baseline_hours,
+            post_hours=post_hours,
+            focus_families=[
+                str(item.get("family") or "")
+                for item in (changed_config.get("changed_config_families") if isinstance(changed_config.get("changed_config_families"), list) else [])
+                if isinstance(item, dict)
+            ],
+        )
+    return payload
+
+
+def _rollout_family_scorecards(
+    *,
+    baseline_hours: int,
+    post_hours: int,
+    focus_families: list[str] | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    approvals = list_tuning_approvals(limit=max(1, limit), rollout_status="rolled_out")
+    aggregates: dict[str, dict[str, Any]] = {}
+    focus_set = {str(item).strip() for item in (focus_families or []) if str(item).strip()}
+
+    for approval in approvals:
+        verification = _build_rollout_verification_payload(
+            approval,
+            baseline_hours=baseline_hours,
+            post_hours=post_hours,
+            include_family_scorecards=False,
+        )
+        families = verification.get("changed_config", {}).get("changed_config_families") if isinstance(verification.get("changed_config"), dict) else []
+        for family_info in families if isinstance(families, list) else []:
+            if not isinstance(family_info, dict):
+                continue
+            family = str(family_info.get("family") or "").strip()
+            if not family:
+                continue
+            if focus_set and family not in focus_set:
+                continue
+            entry = aggregates.setdefault(
+                family,
+                {
+                    "family": family,
+                    "label": _family_label(family),
+                    "rollout_count": 0,
+                    "improved_count": 0,
+                    "mixed_count": 0,
+                    "degraded_count": 0,
+                    "insufficient_count": 0,
+                    "avg_send_rate_delta": 0.0,
+                    "avg_skip_pressure_delta": 0.0,
+                    "avg_block_pressure_delta": 0.0,
+                    "avg_post_win_rate": 0.0,
+                },
+            )
+            entry["rollout_count"] = int(entry["rollout_count"]) + 1
+            status = str(verification.get("verification_status") or "mixed")
+            if status == "improved":
+                entry["improved_count"] = int(entry["improved_count"]) + 1
+            elif status == "degraded":
+                entry["degraded_count"] = int(entry["degraded_count"]) + 1
+            elif status == "insufficient_data":
+                entry["insufficient_count"] = int(entry["insufficient_count"]) + 1
+            else:
+                entry["mixed_count"] = int(entry["mixed_count"]) + 1
+
+            entry["avg_send_rate_delta"] += float(verification.get("deltas", {}).get("send_rate_delta") or 0.0)
+            entry["avg_skip_pressure_delta"] += float(verification.get("deltas", {}).get("skip_pressure_delta") or 0.0)
+            entry["avg_block_pressure_delta"] += float(verification.get("deltas", {}).get("block_pressure_delta") or 0.0)
+            entry["avg_post_win_rate"] += float(verification.get("post_outcomes", {}).get("win_rate") or 0.0)
+
+    scorecards: list[dict[str, Any]] = []
+    for item in aggregates.values():
+        count = max(1, int(item["rollout_count"]))
+        scorecards.append(
+            {
+                **item,
+                "avg_send_rate_delta": round(float(item["avg_send_rate_delta"]) / count, 1),
+                "avg_skip_pressure_delta": round(float(item["avg_skip_pressure_delta"]) / count, 1),
+                "avg_block_pressure_delta": round(float(item["avg_block_pressure_delta"]) / count, 1),
+                "avg_post_win_rate": round(float(item["avg_post_win_rate"]) / count, 1),
+            }
+        )
+
+    return sorted(
+        scorecards,
+        key=lambda item: (
+            -int(item.get("rollout_count") or 0),
+            -int(item.get("improved_count") or 0),
+            str(item.get("family") or ""),
+        ),
+    )
+
+
+def get_rollout_verification(
+    *,
+    approval_id: str | None = None,
+    target_name: str | None = None,
+    deployment_service: str | None = None,
+    baseline_hours: int = 24,
+    post_hours: int = 24,
+) -> dict[str, Any]:
+    approval: dict[str, Any] | None = None
+    if approval_id:
+        for item in list_tuning_approvals(limit=200, rollout_status="rolled_out"):
+            if str(item.get("approval_id") or "") == str(approval_id):
+                approval = item
+                break
+    else:
+        approval = _latest_matching_rollout(
+            target_name=str(target_name or "").strip().lower() or None,
+            deployment_service=str(deployment_service or "").strip() or None,
+        )
+    if approval is None:
+        raise KeyError("rollout_not_found")
+    return _build_rollout_verification_payload(
+        approval,
+        baseline_hours=baseline_hours,
+        post_hours=post_hours,
+        include_family_scorecards=True,
+    )
 
 
 def render_rollout_verification_html(
@@ -1288,6 +1395,7 @@ def render_rollout_verification_html(
     changed_config = verification.get("changed_config") if isinstance(verification.get("changed_config"), dict) else {}
     attribution = verification.get("attribution") if isinstance(verification.get("attribution"), dict) else {}
     drift = verification.get("drift") if isinstance(verification.get("drift"), dict) else {}
+    family_scorecards = verification.get("family_scorecards") if isinstance(verification.get("family_scorecards"), list) else []
 
     changed_families = changed_config.get("changed_config_families") if isinstance(changed_config.get("changed_config_families"), list) else []
     changed_entries = changed_config.get("changed_config_entries") if isinstance(changed_config.get("changed_config_entries"), list) else []
@@ -1321,6 +1429,17 @@ def render_rollout_verification_html(
         f"<li>{html.escape(str(item))}</li>"
         for item in (attribution.get("notes") if isinstance(attribution.get("notes"), list) else [])
     ) or "<li>No attribution notes available.</li>"
+    family_scorecard_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('label') or item.get('family') or 'other'))}</td>"
+        f"<td>{int(item.get('rollout_count') or 0)}</td>"
+        f"<td>{int(item.get('improved_count') or 0)}</td>"
+        f"<td>{int(item.get('degraded_count') or 0)}</td>"
+        f"<td>{float(item.get('avg_send_rate_delta') or 0.0)}%</td>"
+        f"<td>{float(item.get('avg_post_win_rate') or 0.0)}%</td>"
+        "</tr>"
+        for item in family_scorecards[:6]
+    ) or "<tr><td colspan='6'>No family scorecards available yet.</td></tr>"
 
     return f"""<!doctype html>
 <html lang="en">
@@ -1394,6 +1513,13 @@ def render_rollout_verification_html(
     <section class="panel">
       <h2>Attribution Notes</h2>
       <ul>{attribution_rows}</ul>
+    </section>
+    <section class="panel">
+      <h2>Historical Family Scorecards</h2>
+      <table>
+        <thead><tr><th>Family</th><th>Rollouts</th><th>Improved</th><th>Degraded</th><th>Avg Send Δ</th><th>Avg Post Win Rate</th></tr></thead>
+        <tbody>{family_scorecard_rows}</tbody>
+      </table>
     </section>
     <section class="panel">
       <h2>Runtime Drift</h2>
@@ -1581,6 +1707,7 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
     latest_rollouts = rollout_summary.get("latest_by_service") if isinstance(rollout_summary.get("latest_by_service"), dict) else {}
     verification_notes = []
     verification_cards: list[dict[str, Any]] = []
+    verification_family_scorecards: list[dict[str, Any]] = []
     for service_name, item in latest_rollouts.items():
         verification_status = str(item.get("verification_status") or "")
         if verification_status:
@@ -1598,6 +1725,8 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
                 )
                 changed_config = verification.get("changed_config") if isinstance(verification.get("changed_config"), dict) else {}
                 attribution = verification.get("attribution") if isinstance(verification.get("attribution"), dict) else {}
+                if not verification_family_scorecards:
+                    verification_family_scorecards = verification.get("family_scorecards") if isinstance(verification.get("family_scorecards"), list) else []
                 changed_keys = [
                     str(key)
                     for key in (changed_config.get("changed_config_keys") if isinstance(changed_config.get("changed_config_keys"), list) else [])
@@ -1655,6 +1784,7 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         "notifications": incidents,
         "rollout_verification": verification_notes,
         "rollout_verification_cards": verification_cards,
+        "rollout_verification_family_scorecards": verification_family_scorecards[:6],
         "incident_state_counts": incident_state_counts,
         "recommended_actions": recommended_actions[:8],
     }
@@ -1668,6 +1798,7 @@ def render_operator_command_center_html(hours: int = 24) -> str:
     drift = center.get("drift") if isinstance(center.get("drift"), dict) else {}
     notifications = center.get("notifications") if isinstance(center.get("notifications"), list) else []
     verification_cards = center.get("rollout_verification_cards") if isinstance(center.get("rollout_verification_cards"), list) else []
+    verification_family_scorecards = center.get("rollout_verification_family_scorecards") if isinstance(center.get("rollout_verification_family_scorecards"), list) else []
     incident_state_counts = center.get("incident_state_counts") if isinstance(center.get("incident_state_counts"), dict) else {}
     recommended_actions = center.get("recommended_actions") if isinstance(center.get("recommended_actions"), list) else []
 
@@ -1739,6 +1870,17 @@ def render_operator_command_center_html(hours: int = 24) -> str:
         "</tr>"
         for item in verification_cards
     ) or "<tr><td colspan='5'>No rollout verification data yet.</td></tr>"
+    verification_family_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('label') or item.get('family') or 'other'))}</td>"
+        f"<td>{int(item.get('rollout_count') or 0)}</td>"
+        f"<td>{int(item.get('improved_count') or 0)}</td>"
+        f"<td>{int(item.get('degraded_count') or 0)}</td>"
+        f"<td>{float(item.get('avg_send_rate_delta') or 0.0)}%</td>"
+        f"<td>{float(item.get('avg_post_win_rate') or 0.0)}%</td>"
+        "</tr>"
+        for item in verification_family_scorecards[:6]
+    ) or "<tr><td colspan='6'>No family scorecard data yet.</td></tr>"
 
     return f"""<!doctype html>
 <html lang="en">
@@ -1840,6 +1982,13 @@ def render_operator_command_center_html(hours: int = 24) -> str:
       <table>
         <thead><tr><th>Service</th><th>Target</th><th>Verification</th><th>SHA</th><th>Summary</th></tr></thead>
         <tbody>{verification_rows}</tbody>
+      </table>
+    </section>
+    <section class="panel">
+      <h2>Verification Family Scorecards</h2>
+      <table>
+        <thead><tr><th>Family</th><th>Rollouts</th><th>Improved</th><th>Degraded</th><th>Avg Send Δ</th><th>Avg Post Win Rate</th></tr></thead>
+        <tbody>{verification_family_rows}</tbody>
       </table>
     </section>
   </div>

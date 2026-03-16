@@ -317,11 +317,13 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert verification_payload["approval"]["approval_id"] == approval_id
     assert "verification_status" in verification_payload
     assert "changed_config" in verification_payload
+    assert "family_scorecards" in verification_payload
 
     verification_dashboard_response = client.get("/learning/tuning/verification/dashboard?approval_id=" + approval_id)
     assert verification_dashboard_response.status_code == 200
     assert "Rollout Verification" in verification_dashboard_response.text
     assert "Changed Config" in verification_dashboard_response.text
+    assert "Historical Family Scorecards" in verification_dashboard_response.text
 
     verification_apply_response = client.post(
         "/learning/tuning/verification/apply",
@@ -422,6 +424,7 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "drift" in command_center_payload
     assert "incident_state_counts" in command_center_payload
     assert "rollout_verification_cards" in command_center_payload
+    assert "rollout_verification_family_scorecards" in command_center_payload
     assert all("changed_keys" in item for item in command_center_payload["rollout_verification_cards"])
 
     command_center_dashboard_response = client.get("/learning/command-center/dashboard?hours=24")
@@ -430,6 +433,7 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "Health Snapshot" in command_center_dashboard_response.text
     assert "Incident Snapshot" in command_center_dashboard_response.text
     assert "Rollout Verification" in command_center_dashboard_response.text
+    assert "Verification Family Scorecards" in command_center_dashboard_response.text
     assert "Families:" in command_center_dashboard_response.text or "Keys:" in command_center_dashboard_response.text
 
     ops_digest_response = client.get("/learning/ops/digest?hours=24")
