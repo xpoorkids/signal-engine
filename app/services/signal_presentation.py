@@ -257,45 +257,52 @@ def build_alert_explanation(
     risk = metric_intel(extra, "risk_score", "risk")
     confidence = metric_intel(extra, "confidence", "confidence")
     elite = metric_intel(extra, "elite_score", "elite")
+    generic_reasons = {
+        "balance_increase_detected",
+        "token_resolved",
+        "dex_pair_found",
+        "sniper_route",
+        "promotion_gate_passed",
+    }
 
     why_now: list[str] = []
     if attention_score is not None and attention_score >= 0.80:
-        why_now.append("attention is strong enough to justify immediate monitoring")
+        why_now.append("strong attention")
     elif attention_score is not None and attention_score >= 0.55:
-        why_now.append("attention is constructive but still early")
+        why_now.append("constructive attention")
     elif attn.freshness != "fresh":
-        why_now.append(f"attention is {attn.display.lower()}")
+        why_now.append(f"attention {attn.display.lower()}")
 
     if lifecycle == "dex":
-        why_now.append("dex liquidity is live")
+        why_now.append("dex live")
     if confidence_score is not None and confidence_score >= 0.65:
-        why_now.append("confidence is in an actionable range")
+        why_now.append("actionable confidence")
     elif confidence.freshness != "fresh":
-        why_now.append(f"confidence is {confidence.display.lower()}")
+        why_now.append(f"confidence {confidence.display.lower()}")
 
     why_not_promoted: list[str] = []
     if risk_score is not None and risk_score >= 0.70:
-        why_not_promoted.append("risk remains too high for an aggressive posture")
+        why_not_promoted.append("risk too high")
     elif risk_score is not None and risk_score >= 0.45:
-        why_not_promoted.append("risk is still elevated relative to conviction")
+        why_not_promoted.append("risk still elevated")
     elif risk.freshness != "fresh":
-        why_not_promoted.append(f"risk is {risk.display.lower()}")
+        why_not_promoted.append(f"risk {risk.display.lower()}")
     if confidence_score is not None and confidence_score < 0.65:
-        why_not_promoted.append("confidence has not cleared the stronger promotion band")
+        why_not_promoted.append("confidence below strong band")
     if elite.value is not None and to_optional_float(elite.value) is not None and float(elite.value) < 10:
-        why_not_promoted.append("elite score is not yet in the top tier")
+        why_not_promoted.append("elite below top tier")
 
     next_steps: list[str] = []
     if attention_score is not None and attention_score < 0.85:
-        next_steps.append("watch for stronger buyer breadth and repeated flow")
+        next_steps.append("stronger breadth + repeated flow")
     if risk_score is not None and risk_score >= 0.45:
-        next_steps.append("wait for risk compression before sizing up")
+        next_steps.append("risk compression")
     if lifecycle != "dex":
-        next_steps.append("wait for dex liquidity and pair discovery")
+        next_steps.append("dex liquidity + pair discovery")
     if confidence_score is not None and confidence_score < 0.65:
-        next_steps.append("look for confirmation that lifts confidence into the strong band")
+        next_steps.append("lift confidence into strong band")
     if not next_steps:
-        next_steps.append("monitor for continuation and maintain discipline on risk")
+        next_steps.append("monitor continuation")
 
     data_quality: list[str] = []
     for intel in (attn, risk, confidence, elite):
@@ -308,7 +315,10 @@ def build_alert_explanation(
 
     short_reasons: list[str] = []
     for reason in reasons or []:
-        text = str(reason or "").replace("_", " ").strip()
+        raw = str(reason or "").strip()
+        if not raw or raw in generic_reasons:
+            continue
+        text = raw.replace("_", " ").strip()
         if text and text not in short_reasons:
             short_reasons.append(text)
     if short_reasons and len(why_now) < 3:

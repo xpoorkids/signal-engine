@@ -103,6 +103,27 @@ def test_build_alert_explanation_surfaces_blockers_and_data_quality():
     assert any("elite" in item for item in explanation["data_quality"])
 
 
+def test_build_alert_explanation_ignores_generic_transport_reasons():
+    explanation = build_alert_explanation(
+        signal_kind="candidate",
+        lifecycle="dex",
+        attention_score=0.76,
+        risk_score=0.50,
+        confidence_score=0.55,
+        payload={
+            "metric_states": {
+                "attention_score": metric_state(0.76, status="computed"),
+                "risk_score": metric_state(0.50, status="computed"),
+                "confidence": metric_state(0.55, status="computed"),
+            }
+        },
+        reasons=["balance_increase_detected", "tracked_wallet_flow"],
+    )
+
+    assert "tracked wallet flow" in " ".join(explanation["why_now"])
+    assert "balance increase detected" not in " ".join(explanation["why_now"])
+
+
 def test_format_discord_missing_metrics_do_not_render_as_zero():
     event = Event(
         type="candidate",
