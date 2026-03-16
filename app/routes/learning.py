@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from app.services.signal_learning_service import (
@@ -15,8 +15,11 @@ from app.services.signal_learning_service import (
 from app.services.tuning_service import (
     build_tuning_profiles,
     build_tuning_proposals,
+    create_tuning_approval,
+    list_tuning_approvals,
     render_profile_apply_diff,
     render_profile_env_snippet,
+    render_tuning_approvals_html,
     render_tuning_apply_diff,
     render_tuning_env_snippet,
     render_tuning_profiles_html,
@@ -144,6 +147,32 @@ def learning_tuning_profile_env(profile_name: str, hours: int = 72):
 @router.get("/learning/tuning/profiles/{profile_name}/diff")
 def learning_tuning_profile_diff(profile_name: str, hours: int = 72):
     return PlainTextResponse(content=render_profile_apply_diff(profile_name, hours=max(1, hours)))
+
+
+@router.get("/learning/tuning/approvals")
+def learning_tuning_approvals(limit: int = 20):
+    return {"approvals": list_tuning_approvals(limit=max(1, limit))}
+
+
+@router.post("/learning/tuning/approvals")
+def learning_tuning_approvals_create(payload: dict[str, object] = Body(...)):
+    try:
+        approval = create_tuning_approval(
+            approval_kind=str(payload.get("approval_kind") or ""),
+            artifact_kind=str(payload.get("artifact_kind") or ""),
+            hours=int(payload.get("hours") or 72),
+            target_name=str(payload.get("target_name") or "") or None,
+            approved_by=str(payload.get("approved_by") or "") or None,
+            notes=str(payload.get("notes") or "") or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return approval
+
+
+@router.get("/learning/tuning/approvals/dashboard")
+def learning_tuning_approvals_dashboard(limit: int = 20):
+    return HTMLResponse(content=render_tuning_approvals_html(limit=max(1, limit)))
 
 
 @router.get("/learning/diagnostics/dashboard")

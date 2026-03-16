@@ -224,6 +224,31 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert aggressive_diff_response.status_code == 200
     assert "EARLY_ATTENTION_MIN:" in aggressive_diff_response.text
 
+    create_approval_response = client.post(
+        "/learning/tuning/approvals",
+        json={
+            "approval_kind": "profile",
+            "target_name": "strict",
+            "artifact_kind": "env",
+            "hours": 10000,
+            "approved_by": "ops",
+            "notes": "ready for manual rollout",
+        },
+    )
+    assert create_approval_response.status_code == 200
+    approval_payload = create_approval_response.json()
+    assert approval_payload["approval_kind"] == "profile"
+    assert approval_payload["target_name"] == "strict"
+
+    approvals_response = client.get("/learning/tuning/approvals?limit=10")
+    assert approvals_response.status_code == 200
+    approvals_payload = approvals_response.json()
+    assert approvals_payload["approvals"]
+
+    approvals_dashboard_response = client.get("/learning/tuning/approvals/dashboard?limit=10")
+    assert approvals_dashboard_response.status_code == 200
+    assert "Tuning Approvals" in approvals_dashboard_response.text
+
 
 def test_learning_diagnostics_dashboard_returns_html(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"

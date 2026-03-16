@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import html
+import json
+import time
+import uuid
 from typing import Any
 
-from app.services.signal_learning_service import get_diagnostics_summary
+from app.services import signal_learning_service as sls
 from worker import config as cfg
 
 PROFILE_CONFIG_KEYS: tuple[str, ...] = (
@@ -65,7 +68,7 @@ def _profile_baseline() -> dict[str, Any]:
 
 
 def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:
-    summary = get_diagnostics_summary(hours=max(1, hours))
+    summary = sls.get_diagnostics_summary(hours=max(1, hours))
     guidance = summary.get("threshold_guidance") if isinstance(summary.get("threshold_guidance"), list) else []
     proposals: list[dict[str, Any]] = []
     deferred: list[dict[str, Any]] = []
@@ -520,6 +523,175 @@ def render_tuning_profiles_html(hours: int = 72) -> str:
       <p>Complete env-ready profile bundles generated from the current baseline and proposal overrides from the last {int(payload.get("lookback_hours") or hours)} hours.</p>
     </section>
     {cards}
+  </div>
+</body>
+</html>"""
+
+
+def create_tuning_approval(
+    *,
+    approval_kind: str,
+    artifact_kind: str,
+    hours: int = 72,
+    target_name: str | None = None,
+    approved_by: str | None = None,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    lookback_hours = max(1, int(hours))
+    kind = str(approval_kind or "").strip().lower()
+    artifact = str(artifact_kind or "").strip().lower()
+    target = str(target_name or "").strip().lower() or None
+
+    if kind not in {"proposal", "profile"}:
+        raise ValueError("invalid_approval_kind")
+    if artifact not in {"env", "diff"}:
+        raise ValueError("invalid_artifact_kind")
+    if kind == "profile" and target not in {"strict", "balanced", "aggressive"}:
+        raise ValueError("invalid_profile_target")
+
+    if kind == "proposal":
+        artifact_text = render_tuning_env_snippet(lookback_hours) if artifact == "env" else render_tuning_apply_diff(lookback_hours)
+        payload = build_tuning_proposals(lookback_hours)
+    else:
+        artifact_text = (
+            render_profile_env_snippet(target or "balanced", lookback_hours)
+            if artifact == "env"
+            else render_profile_apply_diff(target or "balanced", lookback_hours)
+        )
+        payload = build_tuning_profiles(lookback_hours)
+
+    record = {
+        "approval_id": f"tune-{uuid.uuid4().hex[:12]}",
+        "created_ts": int(time.time()),
+        "approved_by": (approved_by or "unknown").strip() or "unknown",
+        "approval_kind": kind,
+        "target_name": target,
+        "artifact_kind": artifact,
+        "lookback_hours": lookback_hours,
+        "notes": (notes or "").strip(),
+        "artifact_text": artifact_text,
+        "payload": payload,
+    }
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO tuning_approvals (
+                approval_id, created_ts, approved_by, approval_kind, target_name,
+                artifact_kind, lookback_hours, notes, artifact_text, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record["approval_id"],
+                record["created_ts"],
+                record["approved_by"],
+                record["approval_kind"],
+                record["target_name"],
+                record["artifact_kind"],
+                record["lookback_hours"],
+                record["notes"],
+                record["artifact_text"],
+                json.dumps(record["payload"]),
+            ),
+        )
+    return record
+
+
+def list_tuning_approvals(limit: int = 20) -> list[dict[str, Any]]:
+    with sls._connect() as c:
+        rows = c.execute(
+            """
+            SELECT approval_id, created_ts, approved_by, approval_kind, target_name,
+                   artifact_kind, lookback_hours, notes, artifact_text, payload_json
+            FROM tuning_approvals
+            ORDER BY created_ts DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+    approvals: list[dict[str, Any]] = []
+    for row in rows:
+        approvals.append(
+            {
+                "approval_id": row["approval_id"],
+                "created_ts": row["created_ts"],
+                "approved_by": row["approved_by"],
+                "approval_kind": row["approval_kind"],
+                "target_name": row["target_name"],
+                "artifact_kind": row["artifact_kind"],
+                "lookback_hours": row["lookback_hours"],
+                "notes": row["notes"] or "",
+                "artifact_text": row["artifact_text"],
+                "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
+            }
+        )
+    return approvals
+
+
+def render_tuning_approvals_html(limit: int = 20) -> str:
+    approvals = list_tuning_approvals(limit=max(1, limit))
+    rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('approval_kind') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('target_name') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('artifact_kind') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('approved_by') or 'unknown'))}</td>"
+        f"<td>{int(item.get('lookback_hours') or 0)}</td>"
+        f"<td>{html.escape(str(item.get('notes') or ''))}</td>"
+        "</tr>"
+        for item in approvals
+    ) or "<tr><td colspan='6'>No tuning approvals recorded yet.</td></tr>"
+
+    artifacts = "".join(
+        '<section class="panel">'
+        f"<h2>{html.escape(str(item.get('approval_kind') or 'unknown').title())} / {html.escape(str(item.get('target_name') or 'default'))}</h2>"
+        f"<p><strong>Approved by:</strong> {html.escape(str(item.get('approved_by') or 'unknown'))} &nbsp; "
+        f"<strong>Artifact:</strong> {html.escape(str(item.get('artifact_kind') or 'unknown'))}</p>"
+        f"<pre>{html.escape(str(item.get('artifact_text') or ''))}</pre>"
+        "</section>"
+        for item in approvals[:5]
+    )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tuning Approvals</title>
+  <style>
+    :root {{
+      --bg: #081119;
+      --panel: rgba(11, 24, 38, 0.9);
+      --line: rgba(116, 153, 186, 0.16);
+      --text: #edf5fb;
+      --muted: #8ca4b8;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; color: var(--text); font-family: "Segoe UI", sans-serif; background: linear-gradient(180deg, #071018 0%, #09131c 100%); }}
+    .shell {{ max-width: 1320px; margin: 0 auto; padding: 24px 18px 36px; }}
+    .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 22px; padding: 20px; margin-top: 18px; }}
+    table {{ width:100%; border-collapse: collapse; }}
+    th, td {{ text-align:left; padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 14px; vertical-align: top; }}
+    th {{ color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .10em; }}
+    pre {{ margin: 0; padding: 16px; border-radius: 16px; border: 1px solid var(--line); background: rgba(6, 16, 24, 0.92); white-space: pre-wrap; word-break: break-word; }}
+    h1 {{ margin: 0 0 8px; font-size: 34px; }}
+    h2 {{ margin: 0 0 12px; font-size: 20px; }}
+    p {{ margin: 0 0 12px; color: var(--muted); line-height: 1.5; }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="panel">
+      <h1>Tuning Approvals</h1>
+      <p>Persisted review decisions for proposal and profile artifacts. These records make rollout history explicit.</p>
+    </section>
+    <section class="panel">
+      <h2>Approval Log</h2>
+      <table>
+        <thead><tr><th>Kind</th><th>Target</th><th>Artifact</th><th>Approved By</th><th>Hours</th><th>Notes</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </section>
+    {artifacts}
   </div>
 </body>
 </html>"""

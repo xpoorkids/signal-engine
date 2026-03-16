@@ -6,8 +6,11 @@ from app.services import signal_learning_service as sls
 from app.services.tuning_service import (
     build_tuning_profiles,
     build_tuning_proposals,
+    create_tuning_approval,
+    list_tuning_approvals,
     render_profile_apply_diff,
     render_profile_env_snippet,
+    render_tuning_approvals_html,
     render_tuning_apply_diff,
     render_tuning_env_snippet,
     render_tuning_profiles_html,
@@ -165,3 +168,23 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     assert "Tuning Profiles" in profiles_html
     assert "Balanced" in profiles_html
     assert "Aggressive" in profiles_html
+
+    approval = create_tuning_approval(
+        approval_kind="profile",
+        artifact_kind="env",
+        target_name="strict",
+        hours=10_000,
+        approved_by="ops",
+        notes="Promote stricter profile for review",
+    )
+    assert approval["approval_kind"] == "profile"
+    assert approval["artifact_kind"] == "env"
+    assert "PROM_MIN_LIQ_USD=" in approval["artifact_text"]
+
+    approvals = list_tuning_approvals(limit=10)
+    assert approvals
+    assert approvals[0]["approved_by"] == "ops"
+
+    approvals_html = render_tuning_approvals_html(limit=10)
+    assert "Tuning Approvals" in approvals_html
+    assert "Approval Log" in approvals_html

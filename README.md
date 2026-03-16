@@ -66,6 +66,9 @@ Features:
 - `GET /learning/tuning/proposals/diff`
 - `GET /learning/tuning/profiles`
 - `GET /learning/tuning/profiles/dashboard`
+- `POST /learning/tuning/approvals`
+- `GET /learning/tuning/approvals`
+- `GET /learning/tuning/approvals/dashboard`
 
 ## Running Locally
 
