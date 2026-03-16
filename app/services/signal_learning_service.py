@@ -141,6 +141,25 @@ def init() -> None:
         )
         c.execute(
             """
+            CREATE TABLE IF NOT EXISTS rollout_notifications (
+                notification_id TEXT PRIMARY KEY,
+                created_ts INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                level TEXT NOT NULL,
+                target_name TEXT,
+                approval_id TEXT,
+                deployment_service TEXT,
+                deployment_sha TEXT,
+                message TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                delivery_status TEXT NOT NULL DEFAULT 'pending',
+                delivered_ts INTEGER,
+                last_error TEXT
+            )
+            """
+        )
+        c.execute(
+            """
             CREATE TABLE IF NOT EXISTS signal_decisions (
                 decision_id TEXT PRIMARY KEY,
                 token TEXT,
@@ -168,6 +187,7 @@ def init() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_signal_jobs_due ON signal_snapshot_jobs(status, due_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_signal ON signal_snapshots(signal_id, horizon_minutes)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_tuning_approvals_ts ON tuning_approvals(created_ts DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_rollout_notifications_ts ON rollout_notifications(created_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_ts ON signal_decisions(created_ts, decision)")
         approval_cols = {row[1] for row in c.execute("PRAGMA table_info(tuning_approvals)").fetchall()}
         if "rollout_status" not in approval_cols:

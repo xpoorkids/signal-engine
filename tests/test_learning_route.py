@@ -311,6 +311,16 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "Tuning Rollout Summary" in rollout_dashboard_response.text
     assert "Recommended Actions" in rollout_dashboard_response.text
 
+    notifications_response = client.get("/learning/tuning/notifications?limit=20")
+    assert notifications_response.status_code == 200
+    notifications_payload = notifications_response.json()
+    assert notifications_payload["notifications"]
+    assert any(item["event_type"] == "drift_resolved" for item in notifications_payload["notifications"])
+
+    notifications_dashboard_response = client.get("/learning/tuning/notifications/dashboard?limit=20")
+    assert notifications_dashboard_response.status_code == 200
+    assert "Rollout Notifications" in notifications_dashboard_response.text
+
     approvals_dashboard_response = client.get("/learning/tuning/approvals/dashboard?limit=10&rollout_status=rolled_out&q=render")
     assert approvals_dashboard_response.status_code == 200
     assert "Tuning Approvals" in approvals_dashboard_response.text
@@ -343,6 +353,11 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     )
     assert blocked_rollout_response.status_code == 400
     assert blocked_rollout_response.json()["detail"] == "alignment_guardrail_blocked"
+
+    notifications_after_block = client.get("/learning/tuning/notifications?limit=30")
+    assert notifications_after_block.status_code == 200
+    blocked_payload = notifications_after_block.json()
+    assert any(item["event_type"] == "rollout_blocked" for item in blocked_payload["notifications"])
 
 
 def test_learning_diagnostics_dashboard_returns_html(tmp_path, monkeypatch):

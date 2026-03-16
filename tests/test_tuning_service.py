@@ -9,6 +9,7 @@ from app.services.tuning_service import (
     create_tuning_approval,
     get_config_drift_report,
     get_latest_tuning_approval,
+    list_rollout_notifications,
     get_tuning_rollout_summary,
     list_tuning_approvals,
     render_profile_apply_diff,
@@ -232,6 +233,11 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     assert filtered
     assert filtered[0]["approval_id"] == approval["approval_id"]
 
+    notifications = list_rollout_notifications(limit=20)
+    assert notifications
+    assert any(item["event_type"] == "drift_resolved" for item in notifications)
+    assert any(item["delivery_status"] == "disabled" for item in notifications)
+
     bundle = render_latest_tuning_bundle_artifact(artifact_kind="env", rollout_status="rolled_out")
     assert "[strict]" in bundle
     assert "PROM_MIN_LIQ_USD=" in bundle
@@ -276,3 +282,29 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
         assert False, "expected alignment_guardrail_blocked"
     except ValueError as exc:
         assert str(exc) == "alignment_guardrail_blocked"
+
+    blocked_notifications = list_rollout_notifications(limit=20)
+    assert any(item["event_type"] == "rollout_blocked" for item in blocked_notifications)
+
+    monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SHA", "auto123")
+    aligned_approval = create_tuning_approval(
+        approval_kind="profile",
+        artifact_kind="env",
+        target_name="strict",
+        hours=10_000,
+        approved_by="ops",
+        notes="engine aligned rollout",
+    )
+    update_tuning_approval_status(
+        aligned_approval["approval_id"],
+        rollout_status="approved",
+        notes="engine approved aligned",
+    )
+    final_rollout = update_tuning_approval_status(
+        aligned_approval["approval_id"],
+        rollout_status="rolled_out",
+        notes="engine aligned rollout",
+    )
+    assert final_rollout["rollout_status"] == "rolled_out"
+    aligned_notifications = list_rollout_notifications(limit=30)
+    assert any(item["event_type"] == "required_profile_aligned" for item in aligned_notifications)

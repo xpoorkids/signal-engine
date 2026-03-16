@@ -76,6 +76,8 @@ Features:
 - `GET /learning/tuning/drift`
 - `GET /learning/tuning/rollout/summary`
 - `GET /learning/tuning/rollout/dashboard`
+- `GET /learning/tuning/notifications`
+- `GET /learning/tuning/notifications/dashboard`
 
 ## Running Locally
 

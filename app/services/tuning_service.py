@@ -7,6 +7,8 @@ import time
 import uuid
 from typing import Any
 
+import requests
+
 from app.services import signal_learning_service as sls
 from worker import config as cfg
 
@@ -93,6 +95,13 @@ def _default_deployment_metadata() -> dict[str, str]:
             or os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
         ),
     }
+
+
+def _ops_webhook_url() -> str:
+    return (
+        os.getenv("SIGNAL_ENGINE_OPS_WEBHOOK_URL", "").strip()
+        or os.getenv("OPS_WEBHOOK_URL", "").strip()
+    )
 
 
 def _approval_matches(
@@ -225,6 +234,219 @@ def _rollout_recommendations(alignment: list[dict[str, Any]]) -> list[str]:
     if not recommendations:
         recommendations.append("No rollout action required. Current worker/engine profile state is aligned.")
     return recommendations
+
+
+def _record_rollout_notification(
+    *,
+    event_type: str,
+    level: str,
+    message: str,
+    target_name: str | None = None,
+    approval_id: str | None = None,
+    deployment_service: str | None = None,
+    deployment_sha: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    notification = {
+        "notification_id": f"roll-{uuid.uuid4().hex[:12]}",
+        "created_ts": int(time.time()),
+        "event_type": str(event_type or "unknown"),
+        "level": str(level or "info"),
+        "target_name": (target_name or "").strip() or None,
+        "approval_id": (approval_id or "").strip() or None,
+        "deployment_service": (deployment_service or "").strip() or None,
+        "deployment_sha": (deployment_sha or "").strip() or None,
+        "message": str(message or "").strip(),
+        "payload": payload or {},
+        "delivery_status": "pending",
+        "delivered_ts": None,
+        "last_error": "",
+    }
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO rollout_notifications (
+                notification_id, created_ts, event_type, level, target_name, approval_id,
+                deployment_service, deployment_sha, message, payload_json, delivery_status,
+                delivered_ts, last_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                notification["notification_id"],
+                notification["created_ts"],
+                notification["event_type"],
+                notification["level"],
+                notification["target_name"],
+                notification["approval_id"],
+                notification["deployment_service"],
+                notification["deployment_sha"],
+                notification["message"],
+                json.dumps(notification["payload"]),
+                notification["delivery_status"],
+                notification["delivered_ts"],
+                notification["last_error"],
+            ),
+        )
+    return notification
+
+
+def _deliver_rollout_notification(notification: dict[str, Any]) -> dict[str, Any]:
+    webhook_url = _ops_webhook_url()
+    if not webhook_url:
+        with sls._connect() as c:
+            c.execute(
+                "UPDATE rollout_notifications SET delivery_status=?, last_error=? WHERE notification_id=?",
+                ("disabled", "ops_webhook_not_configured", notification["notification_id"]),
+            )
+        notification["delivery_status"] = "disabled"
+        notification["last_error"] = "ops_webhook_not_configured"
+        return notification
+
+    try:
+        response = requests.post(
+            webhook_url,
+            json={
+                "event_type": notification["event_type"],
+                "level": notification["level"],
+                "target_name": notification["target_name"],
+                "approval_id": notification["approval_id"],
+                "deployment_service": notification["deployment_service"],
+                "deployment_sha": notification["deployment_sha"],
+                "message": notification["message"],
+                "payload": notification["payload"],
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        delivered_ts = int(time.time())
+        with sls._connect() as c:
+            c.execute(
+                "UPDATE rollout_notifications SET delivery_status=?, delivered_ts=?, last_error=? WHERE notification_id=?",
+                ("delivered", delivered_ts, "", notification["notification_id"]),
+            )
+        notification["delivery_status"] = "delivered"
+        notification["delivered_ts"] = delivered_ts
+        notification["last_error"] = ""
+        return notification
+    except Exception as exc:
+        error_text = str(exc)
+        with sls._connect() as c:
+            c.execute(
+                "UPDATE rollout_notifications SET delivery_status=?, last_error=? WHERE notification_id=?",
+                ("failed", error_text[:500], notification["notification_id"]),
+            )
+        notification["delivery_status"] = "failed"
+        notification["last_error"] = error_text[:500]
+        return notification
+
+
+def emit_rollout_notification(
+    *,
+    event_type: str,
+    level: str,
+    message: str,
+    target_name: str | None = None,
+    approval_id: str | None = None,
+    deployment_service: str | None = None,
+    deployment_sha: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    notification = _record_rollout_notification(
+        event_type=event_type,
+        level=level,
+        message=message,
+        target_name=target_name,
+        approval_id=approval_id,
+        deployment_service=deployment_service,
+        deployment_sha=deployment_sha,
+        payload=payload,
+    )
+    return _deliver_rollout_notification(notification)
+
+
+def list_rollout_notifications(limit: int = 20) -> list[dict[str, Any]]:
+    with sls._connect() as c:
+        rows = c.execute(
+            """
+            SELECT notification_id, created_ts, event_type, level, target_name, approval_id,
+                   deployment_service, deployment_sha, message, payload_json, delivery_status,
+                   delivered_ts, last_error
+            FROM rollout_notifications
+            ORDER BY created_ts DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+    return [
+        {
+            "notification_id": row["notification_id"],
+            "created_ts": row["created_ts"],
+            "event_type": row["event_type"],
+            "level": row["level"],
+            "target_name": row["target_name"],
+            "approval_id": row["approval_id"],
+            "deployment_service": row["deployment_service"] or "",
+            "deployment_sha": row["deployment_sha"] or "",
+            "message": row["message"],
+            "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
+            "delivery_status": row["delivery_status"] or "pending",
+            "delivered_ts": row["delivered_ts"],
+            "last_error": row["last_error"] or "",
+        }
+        for row in rows
+    ]
+
+
+def render_rollout_notifications_html(limit: int = 20) -> str:
+    notifications = list_rollout_notifications(limit=max(1, limit))
+    rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('event_type') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('level') or 'info'))}</td>"
+        f"<td>{html.escape(str(item.get('target_name') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('deployment_service') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('delivery_status') or 'pending'))}</td>"
+        f"<td>{html.escape(str(item.get('message') or ''))}</td>"
+        "</tr>"
+        for item in notifications
+    ) or "<tr><td colspan='6'>No rollout notifications recorded yet.</td></tr>"
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rollout Notifications</title>
+  <style>
+    :root {{
+      --bg: #081119;
+      --panel: rgba(11, 24, 38, 0.9);
+      --line: rgba(116, 153, 186, 0.16);
+      --text: #edf5fb;
+      --muted: #8ca4b8;
+    }}
+    body {{ margin: 0; color: var(--text); font-family: "Segoe UI", sans-serif; background: linear-gradient(180deg, #071018 0%, #09131c 100%); }}
+    .shell {{ max-width: 1320px; margin: 0 auto; padding: 24px 18px 36px; }}
+    .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 22px; padding: 20px; margin-top: 18px; }}
+    table {{ width:100%; border-collapse: collapse; }}
+    th, td {{ text-align:left; padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 14px; vertical-align: top; }}
+    th {{ color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .10em; }}
+    h1 {{ margin: 0 0 8px; font-size: 34px; }}
+    p {{ margin: 0 0 12px; color: var(--muted); }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="panel">
+      <h1>Rollout Notifications</h1>
+      <p>Policy and rollout events emitted from the tuning lifecycle.</p>
+      <table>
+        <thead><tr><th>Event</th><th>Level</th><th>Target</th><th>Service</th><th>Delivery</th><th>Message</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </section>
+  </div>
+</body>
+</html>"""
 
 
 def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:
@@ -870,6 +1092,20 @@ def update_tuning_approval_status(
                     "deployment_sha": effective_sha,
                 }
                 if not _approvals_aligned(counterpart, candidate_alignment):
+                    emit_rollout_notification(
+                        event_type="rollout_blocked",
+                        level="warning",
+                        message=f"Blocked {target_name} rollout on {effective_service}: required alignment with {counterpart_service} not satisfied.",
+                        target_name=target_name,
+                        approval_id=approval_id,
+                        deployment_service=effective_service,
+                        deployment_sha=effective_sha,
+                        payload={
+                            "counterpart_service": counterpart_service,
+                            "counterpart_approval_id": counterpart.get("approval_id"),
+                            "counterpart_sha": counterpart.get("deployment_sha"),
+                        },
+                    )
                     raise ValueError("alignment_guardrail_blocked")
         c.execute(
             """
@@ -887,10 +1123,46 @@ def update_tuning_approval_status(
                 approval_id,
             ),
         )
+    updated_item = None
     for item in list_tuning_approvals(limit=100):
         if item["approval_id"] == approval_id:
-            return item
-    raise KeyError("tuning_approval_not_found")
+            updated_item = item
+            break
+    if updated_item is None:
+        raise KeyError("tuning_approval_not_found")
+
+    if status == "rolled_out":
+        drift = get_config_drift_report(target_name=target_name, rollout_status="rolled_out") if target_name else None
+        if drift and drift.get("drift_count") == 0:
+            emit_rollout_notification(
+                event_type="drift_resolved",
+                level="info",
+                message=f"Runtime drift resolved for {target_name} on {effective_service}.",
+                target_name=target_name,
+                approval_id=approval_id,
+                deployment_service=effective_service,
+                deployment_sha=effective_sha,
+                payload={"rollout_status": status},
+            )
+        counterpart_service = "engine" if effective_service == "worker" else "worker"
+        counterpart = _latest_rolled_out_profile_for_service(target_name, counterpart_service) if target_name else None
+        if target_name and counterpart and _approvals_aligned(updated_item, counterpart):
+            emit_rollout_notification(
+                event_type="required_profile_aligned",
+                level="info",
+                message=f"{target_name} is now aligned across {effective_service} and {counterpart_service}.",
+                target_name=target_name,
+                approval_id=approval_id,
+                deployment_service=effective_service,
+                deployment_sha=effective_sha,
+                payload={
+                    "counterpart_service": counterpart_service,
+                    "counterpart_approval_id": counterpart.get("approval_id"),
+                    "counterpart_sha": counterpart.get("deployment_sha"),
+                },
+            )
+
+    return updated_item
 
 
 def get_latest_tuning_approval(

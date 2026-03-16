@@ -19,9 +19,11 @@ from app.services.tuning_service import (
     get_config_drift_report,
     get_latest_tuning_approval,
     get_tuning_rollout_summary,
+    list_rollout_notifications,
     list_tuning_approvals,
     render_profile_apply_diff,
     render_profile_env_snippet,
+    render_rollout_notifications_html,
     render_tuning_rollout_summary_html,
     render_tuning_approvals_html,
     render_tuning_apply_diff,
@@ -306,6 +308,16 @@ def learning_tuning_rollout_summary():
 @router.get("/learning/tuning/rollout/dashboard")
 def learning_tuning_rollout_dashboard():
     return HTMLResponse(content=render_tuning_rollout_summary_html())
+
+
+@router.get("/learning/tuning/notifications")
+def learning_tuning_notifications(limit: int = 20):
+    return {"notifications": list_rollout_notifications(limit=max(1, limit))}
+
+
+@router.get("/learning/tuning/notifications/dashboard")
+def learning_tuning_notifications_dashboard(limit: int = 20):
+    return HTMLResponse(content=render_rollout_notifications_html(limit=max(1, limit)))
 
 
 @router.get("/learning/diagnostics/dashboard")
