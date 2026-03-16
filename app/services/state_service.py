@@ -5,7 +5,6 @@ import time
 from app.services.db_service import connect_sqlite, resolve_engine_db_path
 
 DB_PATH = resolve_engine_db_path()
-DB_PATH.parent.mkdir(exist_ok=True)
 
 
 def _connect():

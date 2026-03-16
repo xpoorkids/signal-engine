@@ -42,8 +42,6 @@ def _current_db_path() -> Path:
 
 def init() -> None:
     global _SCHEMA_READY
-    db_path = _current_db_path()
-    db_path.parent.mkdir(exist_ok=True)
     with _connect() as c:
         c.execute(
             """
