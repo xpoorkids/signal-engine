@@ -21,6 +21,7 @@ from worker.discord import send_discord, send_candidate_discord
 from worker.helius_listener import start_helius_listeners
 import worker.scanner as scanner
 from app.services.state_service import record_wallet_signal, init as state_init
+from app.services.db_service import resolve_engine_db_path
 from app.services.signal_learning_service import (
     init as learning_init,
     record_signal_event,
@@ -123,6 +124,13 @@ async def heartbeat_loop() -> None:
 
 async def run_worker() -> None:
     print(f"[worker] deploy_sha={os.getenv('RENDER_GIT_COMMIT', 'unknown')}", flush=True)
+    db_path = resolve_engine_db_path()
+    shared_env_set = bool(os.getenv("SIGNAL_ENGINE_DB_PATH", "").strip() or os.getenv("STATE_ENGINE_DB_PATH", "").strip())
+    logger.warning("[startup] worker db_path=%s shared_env=%s", db_path, "set" if shared_env_set else "unset")
+    if not shared_env_set:
+        logger.warning(
+            "[startup] SIGNAL_ENGINE_DB_PATH is unset; worker may write to a local SQLite file that is not shared with engine."
+        )
     tasks = []
     q: asyncio.Queue = asyncio.Queue(maxsize=2000)
 
