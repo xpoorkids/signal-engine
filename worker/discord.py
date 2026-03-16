@@ -428,11 +428,6 @@ def _build_intelligence_section(e: Event) -> str:
     attention_metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
     risk_flags = extra.get("risk_flags") if isinstance(extra.get("risk_flags"), dict) else {}
 
-    lines: list[str] = []
-    reason_stack = _reason_stack(e)
-    if reason_stack and reason_stack != "- flow + structure":
-        lines.extend(line for line in reason_stack.splitlines() if line)
-
     unique_buyers_5m = attention_metrics.get("unique_buyers_5m")
     unique_buyers_15m = attention_metrics.get("unique_buyers_15m")
     burst_count_60s = attention_metrics.get("burst_count_60s")
@@ -443,16 +438,38 @@ def _build_intelligence_section(e: Event) -> str:
     x_authors = int(attention_metrics.get("x_unique_authors") or 0)
     narrative_hits = attention_metrics.get("narrative_hits") if isinstance(attention_metrics.get("narrative_hits"), list) else []
 
+    metric_reason_prefixes: list[str] = []
+    if unique_buyers_5m:
+        metric_reason_prefixes.append("5m buyer breadth:")
+    if unique_buyers_15m:
+        metric_reason_prefixes.append("15m buyer breadth:")
+    if burst_count_60s:
+        metric_reason_prefixes.append("1m burst strength:")
+    if boosts:
+        metric_reason_prefixes.append("dexscreener boost activity:")
+    if x_mentions or x_authors:
+        metric_reason_prefixes.append("x momentum:")
+
+    lines: list[str] = []
+    reason_stack = _reason_stack(e)
+    if reason_stack and reason_stack != "- flow + structure":
+        for line in reason_stack.splitlines():
+            raw = str(line).strip()
+            normalized = raw.removeprefix("-").strip().lower()
+            if any(normalized.startswith(prefix) for prefix in metric_reason_prefixes):
+                continue
+            lines.append(raw)
+
     if unique_buyers_5m:
         lines.append(f"- 5m buyer breadth: `{unique_buyers_5m}`")
-    if unique_buyers_15m:
-        lines.append(f"- 15m buyer breadth: `{unique_buyers_15m}`")
     if burst_count_60s:
         lines.append(f"- 1m burst strength: `{burst_count_60s}`")
+    if unique_buyers_15m:
+        lines.append(f"- 15m buyer breadth: `{unique_buyers_15m}`")
     if tracked_hits or kol_hits:
         lines.append(f"- Smart / KOL wallets: `{tracked_hits} / {kol_hits}`")
     if boosts:
-        lines.append(f"- DexScreener boosts: `{boosts}`")
+        lines.append(f"- DexScreener boost activity: `{boosts}`")
     if x_mentions or x_authors:
         lines.append(f"- X momentum: `{x_mentions} mentions / {x_authors} authors`")
     if narrative_hits:
@@ -460,8 +477,6 @@ def _build_intelligence_section(e: Event) -> str:
         if narrative:
             lines.append(f"- Narrative: `{narrative}`")
 
-    if risk_flags.get("holder_concentration"):
-        lines.append("- Holder concentration flagged")
     if risk_flags.get("wallet_cluster"):
         lines.append("- Wallet clustering detected")
     if risk_flags.get("bot_cadence"):
@@ -474,7 +489,7 @@ def _build_intelligence_section(e: Event) -> str:
     for line in lines:
         if line not in deduped:
             deduped.append(line)
-    return "\n".join(deduped[:7])
+    return "\n".join(deduped[:5])
 
 
 def _build_quality_section(e: Event, metrics: dict, risk_score: float | None, confidence_score: float | None) -> str:

@@ -326,6 +326,46 @@ def test_risk_alert_uses_colored_semantic_indicators():
     assert "🔴 Risk Score: `0.70 (High)`" in quality_field
 
 
+def test_signal_intelligence_deduplicates_metric_reasons():
+    event = Event(
+        type="heating_up",
+        source="test",
+        token="So11111111111111111111111111111111111111112",
+        confidence=0.61,
+        reasons=[
+            "5m buyer breadth: 7",
+            "15m buyer breadth: 11",
+            "1m burst strength: 8",
+            "DexScreener boost activity: 1",
+        ],
+        extra={
+            "symbol": "LOYAL",
+            "name": "Loyalty",
+            "lifecycle": "dex",
+            "risk_score": 0.50,
+            "attention_score": 0.89,
+            "metric_states": {
+                "risk_score": metric_state(0.50, status="computed"),
+                "attention_score": metric_state(0.89, status="computed"),
+            },
+            "attention_metrics": {
+                "unique_buyers_5m": 7,
+                "unique_buyers_15m": 11,
+                "burst_count_60s": 8,
+                "dexscreener_boosts_count": 1,
+            },
+        },
+    )
+
+    intelligence = _candidate_field(format_discord(event)["embeds"][0], "Signal Intelligence")
+    lines = [line.strip() for line in intelligence.splitlines() if line.strip()]
+
+    assert sum("5m buyer breadth:" in line and "15m" not in line for line in lines) == 1
+    assert sum("15m buyer breadth:" in line for line in lines) == 1
+    assert sum("1m burst strength:" in line for line in lines) == 1
+    assert sum("DexScreener boost activity:" in line for line in lines) == 1
+
+
 def test_embed_field_count_stays_within_limits():
     event = Event(
         type="promoted",
