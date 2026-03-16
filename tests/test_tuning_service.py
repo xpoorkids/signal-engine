@@ -13,11 +13,13 @@ from app.services.tuning_service import (
     get_latest_tuning_approval,
     get_ops_digest,
     get_operator_command_center,
+    list_notification_incidents,
     list_rollout_notifications,
     get_tuning_rollout_summary,
     list_tuning_approvals,
     render_ops_digest_html,
     render_ops_digest_text,
+    render_notification_incidents_html,
     render_operator_command_center_html,
     ops_digest_worker,
     render_profile_apply_diff,
@@ -462,3 +464,43 @@ def test_rollout_notification_ack_and_snooze_states(tmp_path, monkeypatch):
     )
     assert unsnoozed["snoozed_until_ts"] is None
     assert unsnoozed["active"] is True
+
+
+def test_notification_incidents_cluster_repeated_events(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    from app.services.tuning_service import emit_rollout_notification
+
+    emit_rollout_notification(
+        event_type="rollout_blocked",
+        level="warning",
+        message="Blocked rollout for strict profile",
+        target_name="strict",
+        deployment_service="worker",
+    )
+    emit_rollout_notification(
+        event_type="rollout_blocked",
+        level="warning",
+        message="Blocked rollout again for strict profile",
+        target_name="strict",
+        deployment_service="worker",
+    )
+    emit_rollout_notification(
+        event_type="drift_resolved",
+        level="info",
+        message="Drift resolved for balanced",
+        target_name="balanced",
+        deployment_service="engine",
+    )
+
+    incidents = list_notification_incidents(limit=10)
+    blocked_cluster = next(item for item in incidents if item["event_type"] == "rollout_blocked")
+    assert blocked_cluster["count"] == 2
+    assert blocked_cluster["target_name"] == "strict"
+    assert blocked_cluster["deployment_service"] == "worker"
+
+    incidents_html = render_notification_incidents_html(limit=10)
+    assert "Notification Incidents" in incidents_html
+    assert "Blocked rollout again for strict profile" in incidents_html

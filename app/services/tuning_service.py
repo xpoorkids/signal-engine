@@ -381,6 +381,66 @@ def _notification_active(row: dict[str, Any], now_ts: int | None = None) -> bool
     return (not acknowledged) and (snoozed_until <= current_ts)
 
 
+def _notification_cluster_key(row: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(row.get("event_type") or "unknown"),
+            str(row.get("target_name") or ""),
+            str(row.get("deployment_service") or ""),
+        ]
+    )
+
+
+def list_notification_incidents(limit: int = 20, *, active_only: bool = False) -> list[dict[str, Any]]:
+    notifications = list_rollout_notifications(limit=max(1, limit * 10), active_only=active_only)
+    clusters: dict[str, dict[str, Any]] = {}
+    for item in notifications:
+        key = _notification_cluster_key(item)
+        cluster = clusters.get(key)
+        if cluster is None:
+            cluster = {
+                "incident_key": key,
+                "event_type": item.get("event_type") or "unknown",
+                "target_name": item.get("target_name") or "",
+                "deployment_service": item.get("deployment_service") or "",
+                "level": item.get("level") or "info",
+                "count": 0,
+                "first_seen_ts": item.get("created_ts"),
+                "last_seen_ts": item.get("created_ts"),
+                "latest_message": item.get("message") or "",
+                "latest_notification_id": item.get("notification_id") or "",
+                "delivery_status": item.get("delivery_status") or "pending",
+                "active": False,
+                "acknowledged_count": 0,
+                "snoozed_count": 0,
+                "notifications": [],
+            }
+            clusters[key] = cluster
+
+        cluster["count"] = int(cluster["count"]) + 1
+        cluster["first_seen_ts"] = min(int(cluster["first_seen_ts"] or item.get("created_ts") or 0), int(item.get("created_ts") or 0))
+        cluster["last_seen_ts"] = max(int(cluster["last_seen_ts"] or item.get("created_ts") or 0), int(item.get("created_ts") or 0))
+        if int(item.get("created_ts") or 0) >= int(cluster.get("last_seen_ts") or 0):
+            cluster["latest_message"] = item.get("message") or ""
+            cluster["latest_notification_id"] = item.get("notification_id") or ""
+            cluster["delivery_status"] = item.get("delivery_status") or "pending"
+            cluster["level"] = item.get("level") or cluster["level"]
+        if bool(item.get("acknowledged_ts")):
+            cluster["acknowledged_count"] = int(cluster["acknowledged_count"]) + 1
+        if int(item.get("snoozed_until_ts") or 0) > int(time.time()):
+            cluster["snoozed_count"] = int(cluster["snoozed_count"]) + 1
+        if _notification_active(item):
+            cluster["active"] = True
+        cluster["notifications"].append(item)
+
+    incidents = sorted(
+        clusters.values(),
+        key=lambda item: (int(item.get("active") or 0), int(item.get("last_seen_ts") or 0)),
+        reverse=True,
+    )
+    return incidents[: max(1, limit)]
+
+
 def list_rollout_notifications(limit: int = 20, *, active_only: bool = False) -> list[dict[str, Any]]:
     with sls._connect() as c:
         rows = c.execute(
@@ -633,12 +693,66 @@ def render_rollout_notifications_html(limit: int = 20, *, active_only: bool = Fa
 </html>"""
 
 
+def render_notification_incidents_html(limit: int = 20, *, active_only: bool = False) -> str:
+    incidents = list_notification_incidents(limit=max(1, limit), active_only=active_only)
+    rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('event_type') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('target_name') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('deployment_service') or 'n/a'))}</td>"
+        f"<td>{int(item.get('count') or 0)}</td>"
+        f"<td>{'yes' if item.get('active') else 'no'}</td>"
+        f"<td>{html.escape(str(item.get('latest_message') or ''))}</td>"
+        "</tr>"
+        for item in incidents
+    ) or "<tr><td colspan='6'>No incident clusters recorded yet.</td></tr>"
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Notification Incidents</title>
+  <style>
+    :root {{
+      --bg: #081119;
+      --panel: rgba(11, 24, 38, 0.9);
+      --line: rgba(116, 153, 186, 0.16);
+      --text: #edf5fb;
+      --muted: #8ca4b8;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; color: var(--text); font-family: "Segoe UI", sans-serif; background: linear-gradient(180deg, #071018 0%, #09131c 100%); }}
+    .shell {{ max-width: 1280px; margin: 0 auto; padding: 24px 18px 36px; }}
+    .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 22px; padding: 20px; margin-top: 18px; }}
+    table {{ width:100%; border-collapse: collapse; }}
+    th, td {{ text-align:left; padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 14px; vertical-align: top; }}
+    th {{ color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .10em; }}
+    h1 {{ margin: 0 0 8px; font-size: 34px; }}
+    p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="panel">
+      <h1>Notification Incidents</h1>
+      <p>Clustered notification view by event, target, and service. Filtered to {"active only" if active_only else "recent history"}.</p>
+      <table>
+        <thead><tr><th>Event</th><th>Target</th><th>Service</th><th>Count</th><th>Active</th><th>Latest Message</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </section>
+  </div>
+</body>
+</html>"""
+
+
 def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
     lookback = max(1, int(hours))
     engine_health = sls.get_engine_health_digest(hours=lookback)
     diagnostics = sls.get_diagnostics_summary(hours=lookback)
     rollout_summary = get_tuning_rollout_summary()
-    notifications = list_rollout_notifications(limit=10, active_only=True)
+    incidents = list_notification_incidents(limit=10, active_only=True)
     drift = {
         profile: get_config_drift_report(target_name=profile, rollout_status="rolled_out")
         for profile in ("strict", "balanced", "aggressive")
@@ -670,7 +784,7 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         },
         "rollout_summary": rollout_summary,
         "drift": drift,
-        "notifications": notifications,
+        "notifications": incidents,
         "recommended_actions": recommended_actions[:8],
     }
 

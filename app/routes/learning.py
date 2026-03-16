@@ -22,8 +22,10 @@ from app.services.tuning_service import (
     get_ops_digest,
     get_operator_command_center,
     get_tuning_rollout_summary,
+    list_notification_incidents,
     list_rollout_notifications,
     list_tuning_approvals,
+    render_notification_incidents_html,
     render_ops_digest_html,
     render_ops_digest_text,
     render_operator_command_center_html,
@@ -322,9 +324,19 @@ def learning_tuning_notifications(limit: int = 20, active_only: bool = False):
     return {"notifications": list_rollout_notifications(limit=max(1, limit), active_only=active_only)}
 
 
+@router.get("/learning/tuning/incidents")
+def learning_tuning_incidents(limit: int = 20, active_only: bool = False):
+    return {"incidents": list_notification_incidents(limit=max(1, limit), active_only=active_only)}
+
+
 @router.get("/learning/tuning/notifications/dashboard")
 def learning_tuning_notifications_dashboard(limit: int = 20, active_only: bool = False):
     return HTMLResponse(content=render_rollout_notifications_html(limit=max(1, limit), active_only=active_only))
+
+
+@router.get("/learning/tuning/incidents/dashboard")
+def learning_tuning_incidents_dashboard(limit: int = 20, active_only: bool = False):
+    return HTMLResponse(content=render_notification_incidents_html(limit=max(1, limit), active_only=active_only))
 
 
 @router.post("/learning/tuning/notifications/{notification_id}/state")

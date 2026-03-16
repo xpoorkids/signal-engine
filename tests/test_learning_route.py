@@ -322,10 +322,19 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     active_notifications_payload = active_notifications_response.json()
     assert active_notifications_payload["notifications"]
 
+    incidents_response = client.get("/learning/tuning/incidents?limit=20")
+    assert incidents_response.status_code == 200
+    incidents_payload = incidents_response.json()
+    assert incidents_payload["incidents"]
+
     notifications_dashboard_response = client.get("/learning/tuning/notifications/dashboard?limit=20")
     assert notifications_dashboard_response.status_code == 200
     assert "Rollout Notifications" in notifications_dashboard_response.text
     assert "Active" in notifications_dashboard_response.text
+
+    incidents_dashboard_response = client.get("/learning/tuning/incidents/dashboard?limit=20")
+    assert incidents_dashboard_response.status_code == 200
+    assert "Notification Incidents" in incidents_dashboard_response.text
 
     first_notification_id = notifications_payload["notifications"][0]["notification_id"]
     ack_response = client.post(
