@@ -30,11 +30,16 @@ HELIUS_WS = (
 
 
 def _get_helius_rpc_url() -> str:
-    url = (os.getenv("HELIUS_HTTPS_RPC_URL") or os.getenv("HELIUS_RPC_URL") or "").strip()
-    api_key = (os.getenv("HELIUS_API_KEY") or "").strip()
+    url = (
+        os.getenv("HELIUS_HTTPS_RPC_URL")
+        or os.getenv("HELIUS_RPC_URL")
+        or HELIUS_RPC_URL
+        or ""
+    ).strip()
+    api_key = (os.getenv("HELIUS_API_KEY") or HELIUS_KEY or "").strip()
 
     if not url:
-        raise RuntimeError("Missing HELIUS_HTTPS_RPC_URL / HELIUS_RPC_URL env var")
+        return ""
 
     if "api-key=" in url or "apikey=" in url:
         return url
@@ -541,10 +546,14 @@ class LogSwapProcessor:
 
     def _find_buyer_signer(
         self,
-        signature: str,
-        tx: Dict[str, Any],
-        mint: Optional[str],
-    ) -> Tuple[Optional[str], Optional[int], float, str, int, List[str], int, int]:
+        signature: str | Dict[str, Any],
+        tx: Optional[Dict[str, Any]] = None,
+        mint: Optional[str] = None,
+    ) -> Tuple[Any, ...]:
+        legacy_call = tx is None and isinstance(signature, dict)
+        if legacy_call:
+            tx = signature
+            signature = ""
         try:
             meta = _tx_meta(tx)
             pre_balances = meta.get("preBalances") or []
@@ -557,7 +566,8 @@ class LogSwapProcessor:
                 f"[buy-size-miss] sig={signature} token={mint or ''} buyer=None signer_candidates=[] has_wsol_prepost=0 inner_transfer_sum=0",
                 flush=True,
             )
-            return None, None, 0.0, "fallback", 0, [], 0, 0
+            result = (None, None, 0.0, "fallback", 0, [], 0, 0)
+            return result[:5] if legacy_call else result
 
         best_owner = None
         best_index = None
@@ -575,6 +585,9 @@ class LogSwapProcessor:
             if not is_signer or not is_writable or owner is None:
                 continue
             signer_candidates.append(owner)
+            if best_owner is None:
+                best_owner = owner
+                best_index = idx
             try:
                 pre = int(pre_balances[idx])
                 post = int(post_balances[idx])
@@ -589,7 +602,8 @@ class LogSwapProcessor:
                 best_index = idx
 
         if best_spent > 0:
-            return best_owner, best_index, best_spent / 1_000_000_000, "sol", fee, signer_candidates, has_wsol_prepost, inner_transfer_sum
+            result = (best_owner, best_index, best_spent / 1_000_000_000, "sol", fee, signer_candidates, has_wsol_prepost, inner_transfer_sum)
+            return result[:5] if legacy_call else result
 
         # WSOL fallback for signer
         try:
@@ -610,7 +624,8 @@ class LogSwapProcessor:
                         break
                 if pre_wsol > post_wsol:
                     sol_spent = (pre_wsol - post_wsol) / 1_000_000_000
-                    return best_owner, best_index, sol_spent, "wsol", fee, signer_candidates, has_wsol_prepost, inner_transfer_sum
+                    result = (best_owner, best_index, sol_spent, "wsol", fee, signer_candidates, has_wsol_prepost, inner_transfer_sum)
+                    return result[:5] if legacy_call else result
         except Exception:
             pass
 
@@ -637,7 +652,8 @@ class LogSwapProcessor:
                             inner_transfer_sum += lamports
                 if inner_transfer_sum > 0:
                     sol_spent = inner_transfer_sum / 1_000_000_000
-                    return best_owner, best_index, sol_spent, "inner_sol_transfer", fee, signer_candidates, has_wsol_prepost, inner_transfer_sum
+                    result = (best_owner, best_index, sol_spent, "inner_sol_transfer", fee, signer_candidates, has_wsol_prepost, inner_transfer_sum)
+                    return result[:5] if legacy_call else result
         except Exception:
             pass
 
@@ -646,7 +662,8 @@ class LogSwapProcessor:
             f"buyer={best_owner} signer_candidates={signer_candidates} has_wsol_prepost={has_wsol_prepost} inner_transfer_sum={inner_transfer_sum}",
             flush=True,
         )
-        return best_owner, best_index, 0.0, "fallback", fee, signer_candidates, has_wsol_prepost, inner_transfer_sum
+        result = (best_owner, best_index, 0.0, "fallback", fee, signer_candidates, has_wsol_prepost, inner_transfer_sum)
+        return result[:5] if legacy_call else result
 
     async def _emit_trade_buy(
         self,
@@ -658,10 +675,11 @@ class LogSwapProcessor:
         sol_spent: float,
         method: str,
         fee_lamports: int,
-        signer_candidates: List[str],
-        has_wsol_prepost: int,
-        inner_transfer_sum: int,
+        signer_candidates: Optional[List[str]] = None,
+        has_wsol_prepost: int = 0,
+        inner_transfer_sum: int = 0,
     ) -> None:
+        signer_candidates = signer_candidates or []
         now = time.time()
         mint = buy.get("mint")
         buyer = buyer_signer or buy.get("buyer")
