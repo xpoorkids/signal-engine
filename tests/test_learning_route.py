@@ -418,11 +418,15 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "engine_health" in command_center_payload
     assert "rollout_summary" in command_center_payload
     assert "drift" in command_center_payload
+    assert "incident_state_counts" in command_center_payload
+    assert "rollout_verification_cards" in command_center_payload
 
     command_center_dashboard_response = client.get("/learning/command-center/dashboard?hours=24")
     assert command_center_dashboard_response.status_code == 200
     assert "Operator Command Center" in command_center_dashboard_response.text
     assert "Health Snapshot" in command_center_dashboard_response.text
+    assert "Incident Snapshot" in command_center_dashboard_response.text
+    assert "Rollout Verification" in command_center_dashboard_response.text
 
     ops_digest_response = client.get("/learning/ops/digest?hours=24")
     assert ops_digest_response.status_code == 200

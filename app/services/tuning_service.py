@@ -1355,10 +1355,25 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         recommended_actions.extend(str(item) for item in rollout_actions if item)
     latest_rollouts = rollout_summary.get("latest_by_service") if isinstance(rollout_summary.get("latest_by_service"), dict) else {}
     verification_notes = []
+    verification_cards: list[dict[str, Any]] = []
     for service_name, item in latest_rollouts.items():
         verification_status = str(item.get("verification_status") or "")
         if verification_status:
             verification_notes.append(f"{service_name}: {verification_status}")
+        verification_cards.append(
+            {
+                "service": service_name,
+                "target_name": str(item.get("target_name") or "n/a"),
+                "verification_status": verification_status or "unverified",
+                "verification_summary": str(item.get("verification_summary") or ""),
+                "deployment_sha": str(item.get("deployment_sha") or ""),
+            }
+        )
+
+    incident_state_counts: dict[str, int] = {"open": 0, "acknowledged": 0, "snoozed": 0, "resolved": 0}
+    for item in incidents:
+        state = str(item.get("state") or "open")
+        incident_state_counts[state] = incident_state_counts.get(state, 0) + 1
 
     status = str(engine_health.get("status") or "unknown")
     if status in {"cold", "quiet"}:
@@ -1385,6 +1400,8 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         "drift": drift,
         "notifications": incidents,
         "rollout_verification": verification_notes,
+        "rollout_verification_cards": verification_cards,
+        "incident_state_counts": incident_state_counts,
         "recommended_actions": recommended_actions[:8],
     }
 
@@ -1396,6 +1413,8 @@ def render_operator_command_center_html(hours: int = 24) -> str:
     rollout_summary = center.get("rollout_summary") if isinstance(center.get("rollout_summary"), dict) else {}
     drift = center.get("drift") if isinstance(center.get("drift"), dict) else {}
     notifications = center.get("notifications") if isinstance(center.get("notifications"), list) else []
+    verification_cards = center.get("rollout_verification_cards") if isinstance(center.get("rollout_verification_cards"), list) else []
+    incident_state_counts = center.get("incident_state_counts") if isinstance(center.get("incident_state_counts"), dict) else {}
     recommended_actions = center.get("recommended_actions") if isinstance(center.get("recommended_actions"), list) else []
 
     def metric_card(label: str, value: Any) -> str:
@@ -1443,6 +1462,25 @@ def render_operator_command_center_html(hours: int = 24) -> str:
         "</div>"
         for name, payload in drift.items()
     ) or '<div class="metric-card"><span>Drift</span><strong>0</strong></div>'
+
+    incident_cards = "".join(
+        '<div class="metric-card">'
+        f"<span>{html.escape(state.title())} Incidents</span>"
+        f"<strong>{int(count)}</strong>"
+        "</div>"
+        for state, count in incident_state_counts.items()
+    ) or '<div class="metric-card"><span>Incidents</span><strong>0</strong></div>'
+
+    verification_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('service') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('target_name') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('verification_status') or 'unverified'))}</td>"
+        f"<td>{html.escape(str(item.get('deployment_sha') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('verification_summary') or ''))}</td>"
+        "</tr>"
+        for item in verification_cards
+    ) or "<tr><td colspan='5'>No rollout verification data yet.</td></tr>"
 
     return f"""<!doctype html>
 <html lang="en">
@@ -1504,6 +1542,12 @@ def render_operator_command_center_html(hours: int = 24) -> str:
         {drift_cards}
       </div>
     </section>
+    <section class="panel">
+      <h2>Incident Snapshot</h2>
+      <div class="metric-grid">
+        {incident_cards}
+      </div>
+    </section>
     <section class="two-col">
       <section class="panel">
         <h2>Recommended Actions</h2>
@@ -1532,6 +1576,13 @@ def render_operator_command_center_html(hours: int = 24) -> str:
           <tbody>{alignment_rows}</tbody>
         </table>
       </section>
+    </section>
+    <section class="panel">
+      <h2>Rollout Verification</h2>
+      <table>
+        <thead><tr><th>Service</th><th>Target</th><th>Verification</th><th>SHA</th><th>Summary</th></tr></thead>
+        <tbody>{verification_rows}</tbody>
+      </table>
     </section>
   </div>
 </body>

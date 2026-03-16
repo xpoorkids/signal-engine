@@ -279,11 +279,15 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     assert command_center["engine_health"]["status"] in {"cold", "quiet", "processing", "gated", "blocked", "active"}
     assert "rollout_summary" in command_center
     assert "drift" in command_center
+    assert "incident_state_counts" in command_center
+    assert "rollout_verification_cards" in command_center
     assert "recommended_actions" in command_center
 
     command_center_html = render_operator_command_center_html(hours=24)
     assert "Operator Command Center" in command_center_html
     assert "Health Snapshot" in command_center_html
+    assert "Incident Snapshot" in command_center_html
+    assert "Rollout Verification" in command_center_html
 
     digest = get_ops_digest(hours=24)
     assert digest["severity"] in {"info", "warning", "error"}
