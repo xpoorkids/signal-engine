@@ -114,15 +114,29 @@ PROGRAM_IDS = [
     *sorted(RAYDIUM_PROGRAM_IDS),
 ]
 
+
+def _as_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _tx_transaction(tx: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    return _as_dict(_as_dict(tx).get("transaction"))
+
+
+def _tx_message(tx: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    return _as_dict(_tx_transaction(tx).get("message"))
+
+
+def _tx_meta(tx: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    return _as_dict(_as_dict(tx).get("meta"))
+
+
 def extract_mint_from_inner_instructions(tx: dict) -> str | None:
     """
     Extract Pump.fun mint by resolving account index from InitializeMint CPI.
     """
-    try:
-        message = tx.get("transaction", {}).get("message", {})
-        meta = tx.get("meta", {})
-    except Exception:
-        return None
+    message = _tx_message(tx)
+    meta = _tx_meta(tx)
 
     account_keys = message.get("accountKeys", [])
     inner_ixs = meta.get("innerInstructions", [])
@@ -165,14 +179,11 @@ def extract_new_mints_from_token_balances(tx: dict) -> list[str]:
     Detect newly created mints by comparing pre/post token balances.
     Pump.fun mints always appear here first.
     """
-    try:
-        meta = tx.get("meta")
-        if not meta:
-            return []
-        pre = meta.get("preTokenBalances") or []
-        post = meta.get("postTokenBalances") or []
-    except Exception:
+    meta = _tx_meta(tx)
+    if not meta:
         return []
+    pre = meta.get("preTokenBalances") or []
+    post = meta.get("postTokenBalances") or []
 
     pre_mints = set()
     for b in pre:
@@ -199,13 +210,10 @@ def extract_mints_from_token_balances(tx: dict) -> list[str]:
     """
     Extract all mints seen in postTokenBalances (used for trade detection).
     """
-    try:
-        meta = tx.get("meta")
-        if not meta:
-            return []
-        post = meta.get("postTokenBalances") or []
-    except Exception:
+    meta = _tx_meta(tx)
+    if not meta:
         return []
+    post = meta.get("postTokenBalances") or []
 
     out = []
     for b in post:
@@ -223,12 +231,9 @@ def extract_buyers_from_balance_deltas(tx: dict) -> list[tuple[str, str]]:
     Detect buyers by token balance increases for (owner, mint).
     Returns list of (mint, owner) where post > pre.
     """
-    try:
-        meta = tx.get("meta") or {}
-        pre = meta.get("preTokenBalances") or []
-        post = meta.get("postTokenBalances") or []
-    except Exception:
-        return []
+    meta = _tx_meta(tx)
+    pre = meta.get("preTokenBalances") or []
+    post = meta.get("postTokenBalances") or []
 
     pre_map: dict[tuple[str, str], float] = {}
     for b in pre:
@@ -265,11 +270,8 @@ def extract_buyers_from_balance_deltas(tx: dict) -> list[tuple[str, str]]:
 
 
 def _first_signer(tx: dict) -> str | None:
-    try:
-        message = tx.get("transaction", {}).get("message", {})
-        account_keys = message.get("accountKeys", []) or []
-    except Exception:
-        return None
+    message = _tx_message(tx)
+    account_keys = message.get("accountKeys", []) or []
     for k in account_keys:
         try:
             if isinstance(k, dict) and k.get("signer"):
@@ -544,11 +546,11 @@ class LogSwapProcessor:
         mint: Optional[str],
     ) -> Tuple[Optional[str], Optional[int], float, str, int, List[str], int, int]:
         try:
-            meta = tx.get("meta") or {}
+            meta = _tx_meta(tx)
             pre_balances = meta.get("preBalances") or []
             post_balances = meta.get("postBalances") or []
             fee = int(meta.get("fee") or 0)
-            message = (tx.get("transaction") or {}).get("message") or {}
+            message = _tx_message(tx)
             keys = message.get("accountKeys") or []
         except Exception:
             print(
@@ -962,7 +964,7 @@ async def listen(q: asyncio.Queue) -> None:
 
                     # Temporary visibility: program seen in account keys
                     try:
-                        raw_keys = tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
+                        raw_keys = _tx_message(tx).get("accountKeys", [])
                         accounts = set(
                             k.get("pubkey") if isinstance(k, dict) else k for k in (raw_keys or [])
                         )
@@ -981,7 +983,7 @@ async def listen(q: asyncio.Queue) -> None:
 
                     # Pump.fun detection signals (best-effort; never raise)
                     try:
-                        message = tx.get("transaction", {}).get("message", {})
+                        message = _tx_message(tx)
                         account_keys = message.get("accountKeys", []) or []
                         is_pump_program = False
                         for k in account_keys:
@@ -1021,7 +1023,7 @@ async def listen(q: asyncio.Queue) -> None:
                     buyer = _first_signer(tx)
 
                     try:
-                        logs = (tx.get("meta") or {}).get("logMessages") or []
+                        logs = _tx_meta(tx).get("logMessages") or []
                         if logs and _is_buy_log(logs):
                             positive_deltas = extract_buyers_from_balance_deltas(tx)
                             trade_mint = positive_deltas[0][0] if positive_deltas else mint
