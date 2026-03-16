@@ -208,6 +208,35 @@ def test_format_discord_fetches_metadata_when_identity_missing(monkeypatch):
     assert "**Token:** Real Token (`$REAL`)" in identity_field
 
 
+def test_format_discord_actions_include_ops_links_when_public_base_url_set(monkeypatch):
+    monkeypatch.setenv("SIGNAL_ENGINE_PUBLIC_BASE_URL", "https://engine.example.com")
+
+    event = Event(
+        type="candidate",
+        source="test",
+        token="So11111111111111111111111111111111111111112",
+        confidence=0.61,
+        extra={
+            "symbol": "REAL",
+            "name": "Real Token",
+            "lifecycle": "dex",
+            "risk_score": 0.21,
+            "attention_score": 0.62,
+            "metric_states": {
+                "risk_score": metric_state(0.21, status="computed"),
+                "attention_score": metric_state(0.62, status="computed"),
+            },
+        },
+    )
+
+    embed = format_discord(event)["embeds"][0]
+    actions_field = _candidate_field(embed, "Actions")
+
+    assert "/learning/command-center/dashboard" in actions_field
+    assert "/learning/tuning/verification/dashboard" in actions_field
+    assert "/learning/tuning/incidents/dashboard" in actions_field
+
+
 def test_format_discord_overview_uses_new_hierarchy():
     event = Event(
         type="candidate",

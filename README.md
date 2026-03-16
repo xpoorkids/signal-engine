@@ -106,6 +106,9 @@ Ops digest behavior:
 - `SIGNAL_ENGINE_OPS_DEGRADED_REMINDER_SEC` controls degraded-state reminder cadence.
 - `SIGNAL_ENGINE_OPS_DAILY_SUMMARY_INTERVAL_SEC` controls daily-summary send cadence.
 
+Discord ops links:
+- `SIGNAL_ENGINE_PUBLIC_BASE_URL` enables command-center, verification, and incidents links inside Discord alert actions.
+
 Scheduled digest tiers:
 - `incident_digest` for `incident` and `critical` states
 - `degraded_digest` for degraded conditions

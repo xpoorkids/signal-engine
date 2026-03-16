@@ -1,5 +1,6 @@
 ﻿import json
 import requests
+import os
 from app.services.signal_presentation import SignalViewModel
 from app.services.signal_metrics import (
     format_metric_number,
@@ -707,6 +708,19 @@ def _stats_lines(metrics: dict) -> str:
     return "\n".join(lines[:4]) if lines else "- early / pending"
 
 
+def _engine_public_base_url() -> str:
+    explicit = os.getenv("SIGNAL_ENGINE_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    if render_url:
+        return render_url
+    render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
+    if render_host:
+        return f"https://{render_host}".rstrip("/")
+    return ""
+
+
 def _links_lines(token: str, metrics: dict) -> str:
     lines = [
         f"[Dexscreener](https://dexscreener.com/solana/{token}) | [Birdeye](https://birdeye.so/token/{token}?chain=solana)"
@@ -723,6 +737,17 @@ def _links_lines(token: str, metrics: dict) -> str:
         socials.append(f"[TG]({telegram_url})")
     if socials:
         lines.append(" | ".join(socials))
+    engine_base = _engine_public_base_url()
+    if engine_base:
+        lines.append(
+            " | ".join(
+                [
+                    f"[Ops]({engine_base}/learning/command-center/dashboard)",
+                    f"[Verify]({engine_base}/learning/tuning/verification/dashboard)",
+                    f"[Incidents]({engine_base}/learning/tuning/incidents/dashboard)",
+                ]
+            )
+        )
     return _section_lines(lines)
 
 
