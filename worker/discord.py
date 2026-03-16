@@ -153,6 +153,11 @@ def _section_lines(lines: list[str], indent: int = 2) -> str:
     return "\n".join(f"{pad}{line}" for line in lines if line)
 
 
+def _boxed_lines(lines: list[str]) -> str:
+    body = "\n".join(line for line in lines if line)
+    return f"```text\n{body}\n```" if body else ""
+
+
 def _metric_display(extra: dict | None, key: str, *, decimals: int = 2) -> str:
     value = to_optional_float(get_metric_value(extra, key))
     if value is not None:
@@ -508,9 +513,22 @@ def _build_quality_section(e: Event, metrics: dict, risk_score: float | None, co
 
 
 def _market_header_field(metrics: dict) -> dict:
+    buys = metrics.get("txns_m5_buys")
+    sells = metrics.get("txns_m5_sells")
+    flow = f"B {buys if buys is not None else 'N/A'} / S {sells if sells is not None else 'N/A'}"
+    liq = format_currency_compact(metrics.get("liq"))
+    mc = format_currency_compact(metrics.get("market_cap"))
+    vol5 = format_currency_compact(metrics.get("volume_m5"))
+    age = _fmt_age_minutes(metrics.get("age"))
+    chg5 = _format_change_pct(metrics.get("price_change_m5")) or "N/A"
     return {
         "name": "Market Snapshot",
-        "value": _market_tape(metrics),
+        "value": _boxed_lines(
+            [
+                f"LIQ {liq} | MC {mc} | VOL5 {vol5}",
+                f"AGE {age} | M5 {chg5} | FLOW {flow}",
+            ]
+        ),
         "inline": False,
     }
 
@@ -599,13 +617,12 @@ def _signal_title(signal_type: str, symbol: str) -> str:
 def _decision_field(extra: dict | None, confidence_pct: str, lifecycle: str, conviction: str, confidence_score: float | None, risk_score: float | None) -> dict:
     return {
         "name": "Command View",
-        "value": _section_lines(
+        "value": _boxed_lines(
             [
-                _decision_strip(extra, confidence_pct, lifecycle),
-                f"**Conviction:** {conviction}",
-                f"**Read:** {_confidence_band(confidence_score)} confidence / {_risk_band(risk_score)} risk",
-            ],
-            indent=0,
+                _decision_strip(extra, confidence_pct, lifecycle).replace("`", ""),
+                f"Conviction: {conviction}",
+                f"Read: {_confidence_band(confidence_score)} confidence / {_risk_band(risk_score)} risk",
+            ]
         ),
         "inline": False,
     }
@@ -629,12 +646,12 @@ def _operator_brief_field(
         reasons=e.reasons if isinstance(e.reasons, list) else [],
     )
     lines = [
-        f"**Why Now:** {('; '.join(explanation.get('why_now') or []) or 'monitoring state established')}",
-        f"**Not Yet:** {('; '.join(explanation.get('why_not_promoted') or []) or 'no active blockers recorded')}",
-        f"**Next:** {('; '.join(explanation.get('next_steps') or []) or 'continue monitoring')}",
-        f"**Data:** {('; '.join(explanation.get('data_quality') or []) or 'fresh')}",
+        f"Why Now: {(' | '.join(explanation.get('why_now') or []) or 'monitoring state established')}",
+        f"Not Yet: {(' | '.join(explanation.get('why_not_promoted') or []) or 'no active blockers recorded')}",
+        f"Next: {(' | '.join(explanation.get('next_steps') or []) or 'continue monitoring')}",
+        f"Data: {(' | '.join(explanation.get('data_quality') or []) or 'fresh')}",
     ]
-    return {"name": "Operator Brief", "value": _section_lines(lines, indent=0), "inline": False}
+    return {"name": "Operator Brief", "value": _boxed_lines(lines), "inline": False}
 
 
 def _trigger_field(e: Event) -> dict | None:
@@ -970,7 +987,7 @@ def _build_overview_lines(
     return [
         f"**Asset:** {clean_name}",
         f"**Ticker:** `${clean_symbol}`",
-        f"**Contract:** `{shorten_address(full_addr, head=8, tail=8)}`",
+        f"**Contract:** `{full_addr}`",
     ]
 
 
@@ -1045,7 +1062,6 @@ def _format_candidate_like(e: Event, description: str) -> dict:
                 "inline": False,
             },
             _market_header_field(metrics),
-            *_market_tile_fields(metrics, liq_mc),
             {
                 "name": "Flow + Structure",
                 "value": _section_lines([_build_flow_section(metrics, vm.attention_score, vm.risk_score)]),
@@ -1130,7 +1146,6 @@ def format_discord(e: Event) -> dict:
                     "inline": False,
                 },
                 _market_header_field(metrics),
-                *_market_tile_fields(metrics, liq_mc),
                 {
                     "name": "Flow + Structure",
                     "value": _section_lines([_build_flow_section(metrics, vm.attention_score, vm.risk_score)]),

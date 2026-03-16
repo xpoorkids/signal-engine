@@ -150,7 +150,7 @@ def test_format_discord_missing_metrics_do_not_render_as_zero():
     assert "0.00" not in identity_field
     assert "Insufficient data" in quality_field
     assert "Not computed" in command_view
-    assert f"**Contract:** `{shorten_address(event.token, head=8, tail=8)}`" in identity_field
+    assert f"**Contract:** `{event.token}`" in identity_field
     assert "Data:" in operator_brief
     assert "risk: insufficient data" in operator_brief.lower() or "attention: not computed" in operator_brief.lower()
 
@@ -228,7 +228,7 @@ def test_format_discord_regression_sample_payload_keeps_real_risk():
     assert "**Ticker:** `$TEST`" in identity_field
     assert "🟡 Risk Score: `0.47" in quality_field
     assert "Flow Bias:" in flow_field
-    assert f"**Contract:** `{shorten_address(event.token, head=8, tail=8)}`" in identity_field
+    assert f"**Contract:** `{event.token}`" in identity_field
     assert "X momentum:" in intelligence_field
 
 
@@ -328,9 +328,9 @@ def test_format_discord_overview_uses_new_hierarchy():
     assert "**Asset:** Pumpers" in _candidate_field(embed, "Token Identity")
     assert "**Ticker:** `$PUMPERS`" in _candidate_field(embed, "Token Identity")
     assert "🟢 Buy Flow 5m:" in _candidate_field(embed, "Flow + Structure")
-    assert "`LIQ $25,482`" in _candidate_field(embed, "Market Snapshot")
-    assert "VOL5 | $141.4K" == _candidate_field_name_contains(embed, "VOL5")
-    assert "AGE | 3.2m" == _candidate_field_name_contains(embed, "AGE")
+    assert "```text" in _candidate_field(embed, "Market Snapshot")
+    assert "LIQ $25.5K | MC $21.7K | VOL5 $141.4K" in _candidate_field(embed, "Market Snapshot")
+    assert "AGE 3.2m | M5 +190.0%" in _candidate_field(embed, "Market Snapshot")
     assert "\n" not in embed["description"].strip()
     assert "Watch-only" in embed["description"] or "Constructive setup" in embed["description"]
 
@@ -369,7 +369,7 @@ def test_risk_alert_uses_colored_semantic_indicators():
     quality_field = _candidate_field(embed, "Quality")
 
     assert "defensive" in embed["description"].lower() or "risk is elevated" in embed["description"].lower()
-    assert "LIQ | Unavailable" == _candidate_field_name_contains(embed, "LIQ")
+    assert "LIQ N/A | MC $17.2K | VOL5 $29.3K" in _candidate_field(embed, "Market Snapshot")
     assert "🟢 Flow Bias: `Buy-side`" in flow_field
     assert "Mixed attention | High risk" in flow_field
     assert "🔴 Risk Score: `0.70 (High)`" in quality_field
