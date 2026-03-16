@@ -69,6 +69,9 @@ Features:
 - `POST /learning/tuning/approvals`
 - `GET /learning/tuning/approvals`
 - `GET /learning/tuning/approvals/dashboard`
+- `POST /learning/tuning/approvals/{approval_id}/status`
+- `GET /learning/tuning/approvals/latest`
+- `GET /learning/tuning/approvals/latest/artifact`
 
 ## Running Locally
 

@@ -28,6 +28,7 @@ PROFILE_LABELS: dict[str, str] = {
     "balanced": "Current live baseline with no proposal overrides applied.",
     "aggressive": "Relaxed early filters for faster candidate capture.",
 }
+APPROVAL_STATUSES: set[str] = {"pending", "approved", "rolled_out", "rejected"}
 
 
 def _proposal(
@@ -568,6 +569,8 @@ def create_tuning_approval(
         "target_name": target,
         "artifact_kind": artifact,
         "lookback_hours": lookback_hours,
+        "rollout_status": "approved",
+        "rolled_out_ts": None,
         "notes": (notes or "").strip(),
         "artifact_text": artifact_text,
         "payload": payload,
@@ -577,8 +580,9 @@ def create_tuning_approval(
             """
             INSERT INTO tuning_approvals (
                 approval_id, created_ts, approved_by, approval_kind, target_name,
-                artifact_kind, lookback_hours, notes, artifact_text, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                artifact_kind, lookback_hours, rollout_status, rolled_out_ts,
+                notes, artifact_text, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record["approval_id"],
@@ -588,6 +592,8 @@ def create_tuning_approval(
                 record["target_name"],
                 record["artifact_kind"],
                 record["lookback_hours"],
+                record["rollout_status"],
+                record["rolled_out_ts"],
                 record["notes"],
                 record["artifact_text"],
                 json.dumps(record["payload"]),
@@ -601,7 +607,8 @@ def list_tuning_approvals(limit: int = 20) -> list[dict[str, Any]]:
         rows = c.execute(
             """
             SELECT approval_id, created_ts, approved_by, approval_kind, target_name,
-                   artifact_kind, lookback_hours, notes, artifact_text, payload_json
+                   artifact_kind, lookback_hours, rollout_status, rolled_out_ts,
+                   notes, artifact_text, payload_json
             FROM tuning_approvals
             ORDER BY created_ts DESC
             LIMIT ?
@@ -619,12 +626,108 @@ def list_tuning_approvals(limit: int = 20) -> list[dict[str, Any]]:
                 "target_name": row["target_name"],
                 "artifact_kind": row["artifact_kind"],
                 "lookback_hours": row["lookback_hours"],
+                "rollout_status": row["rollout_status"] or "approved",
+                "rolled_out_ts": row["rolled_out_ts"],
                 "notes": row["notes"] or "",
                 "artifact_text": row["artifact_text"],
                 "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
             }
         )
     return approvals
+
+
+def update_tuning_approval_status(
+    approval_id: str,
+    *,
+    rollout_status: str,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    status = str(rollout_status or "").strip().lower()
+    if status not in APPROVAL_STATUSES:
+        raise ValueError("invalid_rollout_status")
+    now_ts = int(time.time())
+    note_text = (notes or "").strip()
+    with sls._connect() as c:
+        existing = c.execute(
+            """
+            SELECT approval_id, notes FROM tuning_approvals WHERE approval_id=?
+            """,
+            (approval_id,),
+        ).fetchone()
+        if not existing:
+            raise KeyError("tuning_approval_not_found")
+        merged_notes = existing["notes"] or ""
+        if note_text:
+            merged_notes = f"{merged_notes}\n{note_text}".strip() if merged_notes else note_text
+        c.execute(
+            """
+            UPDATE tuning_approvals
+            SET rollout_status=?, rolled_out_ts=?, notes=?
+            WHERE approval_id=?
+            """,
+            (
+                status,
+                now_ts if status == "rolled_out" else None,
+                merged_notes,
+                approval_id,
+            ),
+        )
+    for item in list_tuning_approvals(limit=100):
+        if item["approval_id"] == approval_id:
+            return item
+    raise KeyError("tuning_approval_not_found")
+
+
+def get_latest_tuning_approval(
+    *,
+    approval_kind: str,
+    artifact_kind: str,
+    target_name: str | None = None,
+    rollout_status: str = "approved",
+) -> dict[str, Any] | None:
+    kind = str(approval_kind or "").strip().lower()
+    artifact = str(artifact_kind or "").strip().lower()
+    target = str(target_name or "").strip().lower() or None
+    status = str(rollout_status or "approved").strip().lower()
+    if kind not in {"proposal", "profile"}:
+        raise ValueError("invalid_approval_kind")
+    if artifact not in {"env", "diff"}:
+        raise ValueError("invalid_artifact_kind")
+    if status not in APPROVAL_STATUSES:
+        raise ValueError("invalid_rollout_status")
+    if kind == "profile" and target not in {"strict", "balanced", "aggressive"}:
+        raise ValueError("invalid_profile_target")
+
+    with sls._connect() as c:
+        row = c.execute(
+            """
+            SELECT approval_id, created_ts, approved_by, approval_kind, target_name,
+                   artifact_kind, lookback_hours, rollout_status, rolled_out_ts,
+                   notes, artifact_text, payload_json
+            FROM tuning_approvals
+            WHERE approval_kind=? AND artifact_kind=? AND rollout_status=?
+              AND (? IS NULL OR target_name=?)
+            ORDER BY created_ts DESC
+            LIMIT 1
+            """,
+            (kind, artifact, status, target, target),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "approval_id": row["approval_id"],
+        "created_ts": row["created_ts"],
+        "approved_by": row["approved_by"],
+        "approval_kind": row["approval_kind"],
+        "target_name": row["target_name"],
+        "artifact_kind": row["artifact_kind"],
+        "lookback_hours": row["lookback_hours"],
+        "rollout_status": row["rollout_status"] or "approved",
+        "rolled_out_ts": row["rolled_out_ts"],
+        "notes": row["notes"] or "",
+        "artifact_text": row["artifact_text"],
+        "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
+    }
 
 
 def render_tuning_approvals_html(limit: int = 20) -> str:
@@ -634,18 +737,20 @@ def render_tuning_approvals_html(limit: int = 20) -> str:
         f"<td>{html.escape(str(item.get('approval_kind') or 'unknown'))}</td>"
         f"<td>{html.escape(str(item.get('target_name') or 'n/a'))}</td>"
         f"<td>{html.escape(str(item.get('artifact_kind') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('rollout_status') or 'approved'))}</td>"
         f"<td>{html.escape(str(item.get('approved_by') or 'unknown'))}</td>"
         f"<td>{int(item.get('lookback_hours') or 0)}</td>"
         f"<td>{html.escape(str(item.get('notes') or ''))}</td>"
         "</tr>"
         for item in approvals
-    ) or "<tr><td colspan='6'>No tuning approvals recorded yet.</td></tr>"
+    ) or "<tr><td colspan='7'>No tuning approvals recorded yet.</td></tr>"
 
     artifacts = "".join(
         '<section class="panel">'
         f"<h2>{html.escape(str(item.get('approval_kind') or 'unknown').title())} / {html.escape(str(item.get('target_name') or 'default'))}</h2>"
         f"<p><strong>Approved by:</strong> {html.escape(str(item.get('approved_by') or 'unknown'))} &nbsp; "
-        f"<strong>Artifact:</strong> {html.escape(str(item.get('artifact_kind') or 'unknown'))}</p>"
+        f"<strong>Artifact:</strong> {html.escape(str(item.get('artifact_kind') or 'unknown'))} &nbsp; "
+        f"<strong>Status:</strong> {html.escape(str(item.get('rollout_status') or 'approved'))}</p>"
         f"<pre>{html.escape(str(item.get('artifact_text') or ''))}</pre>"
         "</section>"
         for item in approvals[:5]
@@ -687,7 +792,7 @@ def render_tuning_approvals_html(limit: int = 20) -> str:
     <section class="panel">
       <h2>Approval Log</h2>
       <table>
-        <thead><tr><th>Kind</th><th>Target</th><th>Artifact</th><th>Approved By</th><th>Hours</th><th>Notes</th></tr></thead>
+        <thead><tr><th>Kind</th><th>Target</th><th>Artifact</th><th>Status</th><th>Approved By</th><th>Hours</th><th>Notes</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </section>

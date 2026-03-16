@@ -7,6 +7,7 @@ from app.services.tuning_service import (
     build_tuning_profiles,
     build_tuning_proposals,
     create_tuning_approval,
+    get_latest_tuning_approval,
     list_tuning_approvals,
     render_profile_apply_diff,
     render_profile_env_snippet,
@@ -15,6 +16,7 @@ from app.services.tuning_service import (
     render_tuning_env_snippet,
     render_tuning_profiles_html,
     render_tuning_proposals_html,
+    update_tuning_approval_status,
 )
 
 
@@ -184,7 +186,26 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     approvals = list_tuning_approvals(limit=10)
     assert approvals
     assert approvals[0]["approved_by"] == "ops"
+    assert approvals[0]["rollout_status"] == "approved"
+
+    rolled_out = update_tuning_approval_status(
+        approval["approval_id"],
+        rollout_status="rolled_out",
+        notes="Applied on Render",
+    )
+    assert rolled_out["rollout_status"] == "rolled_out"
+    assert "Applied on Render" in rolled_out["notes"]
+
+    latest = get_latest_tuning_approval(
+        approval_kind="profile",
+        target_name="strict",
+        artifact_kind="env",
+        rollout_status="rolled_out",
+    )
+    assert latest is not None
+    assert latest["approval_id"] == approval["approval_id"]
 
     approvals_html = render_tuning_approvals_html(limit=10)
     assert "Tuning Approvals" in approvals_html
     assert "Approval Log" in approvals_html
+    assert "rolled_out" in approvals_html

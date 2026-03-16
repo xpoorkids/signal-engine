@@ -245,6 +245,28 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     approvals_payload = approvals_response.json()
     assert approvals_payload["approvals"]
 
+    approval_id = approval_payload["approval_id"]
+    status_response = client.post(
+        f"/learning/tuning/approvals/{approval_id}/status",
+        json={"rollout_status": "rolled_out", "notes": "rolled to render"},
+    )
+    assert status_response.status_code == 200
+    status_payload = status_response.json()
+    assert status_payload["rollout_status"] == "rolled_out"
+
+    latest_response = client.get(
+        "/learning/tuning/approvals/latest?approval_kind=profile&target_name=strict&artifact_kind=env&rollout_status=rolled_out"
+    )
+    assert latest_response.status_code == 200
+    latest_payload = latest_response.json()
+    assert latest_payload["approval_id"] == approval_id
+
+    latest_artifact_response = client.get(
+        "/learning/tuning/approvals/latest/artifact?approval_kind=profile&target_name=strict&artifact_kind=env&rollout_status=rolled_out"
+    )
+    assert latest_artifact_response.status_code == 200
+    assert "PROM_MIN_LIQ_USD=" in latest_artifact_response.text
+
     approvals_dashboard_response = client.get("/learning/tuning/approvals/dashboard?limit=10")
     assert approvals_dashboard_response.status_code == 200
     assert "Tuning Approvals" in approvals_dashboard_response.text

@@ -16,6 +16,7 @@ from app.services.tuning_service import (
     build_tuning_profiles,
     build_tuning_proposals,
     create_tuning_approval,
+    get_latest_tuning_approval,
     list_tuning_approvals,
     render_profile_apply_diff,
     render_profile_env_snippet,
@@ -24,6 +25,7 @@ from app.services.tuning_service import (
     render_tuning_env_snippet,
     render_tuning_profiles_html,
     render_tuning_proposals_html,
+    update_tuning_approval_status,
 )
 
 
@@ -170,9 +172,66 @@ def learning_tuning_approvals_create(payload: dict[str, object] = Body(...)):
     return approval
 
 
+@router.post("/learning/tuning/approvals/{approval_id}/status")
+def learning_tuning_approvals_status(approval_id: str, payload: dict[str, object] = Body(...)):
+    try:
+        approval = update_tuning_approval_status(
+            approval_id,
+            rollout_status=str(payload.get("rollout_status") or ""),
+            notes=str(payload.get("notes") or "") or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="tuning_approval_not_found")
+    return approval
+
+
 @router.get("/learning/tuning/approvals/dashboard")
 def learning_tuning_approvals_dashboard(limit: int = 20):
     return HTMLResponse(content=render_tuning_approvals_html(limit=max(1, limit)))
+
+
+@router.get("/learning/tuning/approvals/latest")
+def learning_tuning_approvals_latest(
+    approval_kind: str,
+    artifact_kind: str,
+    target_name: str | None = None,
+    rollout_status: str = "approved",
+):
+    try:
+        approval = get_latest_tuning_approval(
+            approval_kind=approval_kind,
+            artifact_kind=artifact_kind,
+            target_name=target_name,
+            rollout_status=rollout_status,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if approval is None:
+        raise HTTPException(status_code=404, detail="tuning_approval_not_found")
+    return approval
+
+
+@router.get("/learning/tuning/approvals/latest/artifact")
+def learning_tuning_approvals_latest_artifact(
+    approval_kind: str,
+    artifact_kind: str,
+    target_name: str | None = None,
+    rollout_status: str = "approved",
+):
+    try:
+        approval = get_latest_tuning_approval(
+            approval_kind=approval_kind,
+            artifact_kind=artifact_kind,
+            target_name=target_name,
+            rollout_status=rollout_status,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if approval is None:
+        raise HTTPException(status_code=404, detail="tuning_approval_not_found")
+    return PlainTextResponse(content=str(approval.get("artifact_text") or ""))
 
 
 @router.get("/learning/diagnostics/dashboard")
