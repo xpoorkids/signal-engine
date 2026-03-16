@@ -204,12 +204,49 @@ def init() -> None:
             )
             """
         )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS policy_replay_runs (
+                run_id TEXT PRIMARY KEY,
+                created_ts INTEGER NOT NULL,
+                hours INTEGER NOT NULL,
+                trace_limit INTEGER NOT NULL,
+                stage TEXT,
+                baseline_policy_name TEXT,
+                baseline_policy_version TEXT,
+                shadow_policy_name TEXT NOT NULL,
+                shadow_policy_version TEXT NOT NULL,
+                overrides_json TEXT NOT NULL,
+                summary_json TEXT NOT NULL
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS policy_replay_results (
+                run_id TEXT NOT NULL,
+                decision_id TEXT NOT NULL,
+                signal_id TEXT,
+                token TEXT,
+                stage TEXT,
+                current_action TEXT,
+                shadow_action TEXT,
+                changed INTEGER NOT NULL DEFAULT 0,
+                outcome_label TEXT,
+                market_cap_change_pct REAL,
+                features_json TEXT,
+                PRIMARY KEY (run_id, decision_id)
+            )
+            """
+        )
         c.execute("CREATE INDEX IF NOT EXISTS idx_signals_alert_ts ON signals(alert_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_signal_jobs_due ON signal_snapshot_jobs(status, due_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_signal ON signal_snapshots(signal_id, horizon_minutes)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_tuning_approvals_ts ON tuning_approvals(created_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_rollout_notifications_ts ON rollout_notifications(created_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_ts ON signal_decisions(created_ts, decision)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_policy_replay_runs_ts ON policy_replay_runs(created_ts DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_policy_replay_results_run ON policy_replay_results(run_id, changed)")
         approval_cols = {row[1] for row in c.execute("PRAGMA table_info(tuning_approvals)").fetchall()}
         if "rollout_status" not in approval_cols:
             c.execute("ALTER TABLE tuning_approvals ADD COLUMN rollout_status TEXT NOT NULL DEFAULT 'pending'")
@@ -1011,6 +1048,194 @@ def evaluate_shadow_policy(
         "impact": impact,
         "changed_examples": changed_examples,
     }
+
+
+def run_policy_replay(
+    *,
+    hours: int = 24,
+    limit: int = 500,
+    stage: str | None = None,
+    policy_name: str | None = None,
+    policy_version: str | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    summary = get_policy_trace_summary(hours=hours, limit=limit, stage=stage)
+    shadow_summary = evaluate_shadow_policy(
+        hours=hours,
+        limit=limit,
+        stage=stage,
+        policy_name=policy_name,
+        policy_version=policy_version,
+        overrides=overrides,
+    )
+    shadow_policy = shadow_summary["shadow_policy"]
+    run_id = uuid.uuid4().hex
+    created_ts = int(time.time())
+
+    current_policy_versions = summary.get("policy_versions") if isinstance(summary.get("policy_versions"), dict) else {}
+    baseline_policy_name = None
+    baseline_policy_version = None
+    if current_policy_versions:
+        top_key = max(current_policy_versions.items(), key=lambda item: int(item[1] or 0))[0]
+        if "@" in top_key:
+            baseline_policy_name, baseline_policy_version = top_key.split("@", 1)
+
+    changed_examples_by_id = {
+        str(item.get("decision_id")): item
+        for item in shadow_summary.get("changed_examples", [])
+        if item.get("decision_id")
+    }
+    replay_results: list[tuple[Any, ...]] = []
+    for trace in summary["traces"]:
+        decision_id = str(trace.get("decision_id") or "")
+        changed_example = changed_examples_by_id.get(decision_id)
+        shadow_action = (
+            str(changed_example.get("shadow_action"))
+            if changed_example is not None
+            else _derive_shadow_action(
+                str(trace.get("stage") or ""),
+                _normalize_feature_map(trace.get("features")),
+                shadow_policy,
+            )
+        )
+        current_action = str(trace.get("action_taken") or "unknown")
+        changed = 1 if shadow_action != current_action else 0
+        replay_results.append(
+            (
+                run_id,
+                decision_id,
+                trace.get("signal_id"),
+                trace.get("token"),
+                trace.get("stage"),
+                current_action,
+                shadow_action,
+                changed,
+                changed_example.get("outcome_label") if changed_example else None,
+                changed_example.get("market_cap_change_pct") if changed_example else None,
+                _json_dumps(_normalize_feature_map(trace.get("features"))),
+            )
+        )
+
+    replay_summary = {
+        "run_id": run_id,
+        "created_ts": created_ts,
+        "hours": max(1, hours),
+        "trace_limit": max(1, limit),
+        "stage": stage,
+        "baseline_policy_name": baseline_policy_name,
+        "baseline_policy_version": baseline_policy_version,
+        "shadow_policy": shadow_policy,
+        "trace_count": shadow_summary["trace_count"],
+        "changed_count": shadow_summary["changed_count"],
+        "change_rate": shadow_summary["change_rate"],
+        "stage_changes": shadow_summary["stage_changes"],
+        "impact": shadow_summary["impact"],
+        "changed_examples": shadow_summary["changed_examples"],
+    }
+
+    with _connect() as c:
+        c.execute(
+            """
+            INSERT INTO policy_replay_runs (
+                run_id, created_ts, hours, trace_limit, stage,
+                baseline_policy_name, baseline_policy_version,
+                shadow_policy_name, shadow_policy_version,
+                overrides_json, summary_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                created_ts,
+                max(1, hours),
+                max(1, limit),
+                stage,
+                baseline_policy_name,
+                baseline_policy_version,
+                shadow_policy["policy_name"],
+                shadow_policy["policy_version"],
+                _json_dumps(overrides or {}),
+                _json_dumps(replay_summary),
+            ),
+        )
+        c.executemany(
+            """
+            INSERT INTO policy_replay_results (
+                run_id, decision_id, signal_id, token, stage, current_action,
+                shadow_action, changed, outcome_label, market_cap_change_pct, features_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            replay_results,
+        )
+
+    return replay_summary
+
+
+def get_policy_replay(run_id: str) -> dict[str, Any] | None:
+    _ensure_schema()
+    with _connect() as c:
+        run_row = c.execute(
+            """
+            SELECT summary_json
+            FROM policy_replay_runs
+            WHERE run_id=?
+            """,
+            (run_id,),
+        ).fetchone()
+        result_rows = c.execute(
+            """
+            SELECT decision_id, signal_id, token, stage, current_action, shadow_action,
+                   changed, outcome_label, market_cap_change_pct, features_json
+            FROM policy_replay_results
+            WHERE run_id=?
+            ORDER BY changed DESC, token ASC
+            """,
+            (run_id,),
+        ).fetchall()
+    if not run_row or not run_row[0]:
+        return None
+    summary = json.loads(run_row[0])
+    results: list[dict[str, Any]] = []
+    for row in result_rows:
+        try:
+            features = json.loads(row[9] or "{}")
+            if not isinstance(features, dict):
+                features = {}
+        except Exception:
+            features = {}
+        results.append(
+            {
+                "decision_id": row[0],
+                "signal_id": row[1],
+                "token": row[2],
+                "stage": row[3],
+                "current_action": row[4],
+                "shadow_action": row[5],
+                "changed": bool(row[6]),
+                "outcome_label": row[7],
+                "market_cap_change_pct": row[8],
+                "features": features,
+            }
+        )
+    summary["results"] = results
+    return summary
+
+
+def get_latest_policy_replay() -> dict[str, Any] | None:
+    _ensure_schema()
+    with _connect() as c:
+        row = c.execute(
+            """
+            SELECT run_id
+            FROM policy_replay_runs
+            ORDER BY created_ts DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if not row or not row[0]:
+        return None
+    return get_policy_replay(str(row[0]))
 
 
 def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:

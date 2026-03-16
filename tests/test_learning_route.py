@@ -206,6 +206,93 @@ def test_learning_policy_routes_return_traces_and_shadow_eval(tmp_path, monkeypa
     assert shadow_payload["impact"]["positive_outcomes"] == 1
 
 
+def test_learning_policy_replay_routes_run_and_fetch_results(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+    signal_id = sls.record_signal_decision(
+        token="token-replay-route",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_ready",
+        action_taken="emit",
+        reasons=["improved_attention"],
+        features={
+            "attention_score": 0.74,
+            "creator_score": 0.42,
+            "candidate_rate_limit_allowed": True,
+            "candidate_progression_ok": True,
+            "candidate_send_eligible": True,
+        },
+        attention_score=0.74,
+        risk_score=0.18,
+        confidence_score=0.67,
+        creator_score=0.42,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="policy-live-1",
+        ts_value=1_773_600_500,
+        source="test",
+    )
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                60,
+                1_773_604_100,
+                "dex",
+                22000,
+                6400,
+                4500,
+                60.0,
+                28.0,
+                70.0,
+                48,
+                20,
+                85.0,
+                5.0,
+                30.0,
+                "worked",
+                '{"outcome_label":"worked"}',
+            ),
+        )
+
+    client = TestClient(main.app)
+    run_response = client.post(
+        "/learning/policy/replay/run",
+        json={
+            "hours": 10000,
+            "stage": "candidate",
+            "policy_name": "shadow_policy",
+            "policy_version": "shadow-3",
+            "candidate_attention_min": 0.80,
+        },
+    )
+    assert run_response.status_code == 200
+    run_payload = run_response.json()
+    assert run_payload["changed_count"] == 1
+
+    latest_response = client.get("/learning/policy/replay/latest")
+    assert latest_response.status_code == 200
+    latest_payload = latest_response.json()
+    assert latest_payload["run_id"] == run_payload["run_id"]
+    assert latest_payload["results"][0]["changed"] is True
+
+    by_id_response = client.get(f"/learning/policy/replay/{run_payload['run_id']}")
+    assert by_id_response.status_code == 200
+    by_id_payload = by_id_response.json()
+    assert by_id_payload["run_id"] == run_payload["run_id"]
+    assert by_id_payload["results"][0]["shadow_action"] == "hold"
+
+
 def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

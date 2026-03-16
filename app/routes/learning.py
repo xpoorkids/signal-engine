@@ -7,8 +7,11 @@ from app.services.signal_learning_service import (
     get_diagnostics_summary,
     get_learning_digest,
     get_latest_learning_report,
+    get_latest_policy_replay,
     get_learning_report,
     get_policy_trace_summary,
+    get_policy_replay,
+    run_policy_replay,
     render_engine_health_html,
     render_diagnostics_html,
     render_learning_digest_html,
@@ -160,6 +163,43 @@ def learning_policy_shadow(
         policy_version=policy_version,
         overrides=overrides,
     )
+
+
+@router.post("/learning/policy/replay/run")
+def learning_policy_replay_run(payload: dict[str, object] = Body(default={})):
+    overrides = {
+        "candidate_attention_min": payload.get("candidate_attention_min"),
+        "candidate_creator_min": payload.get("candidate_creator_min"),
+        "promoted_confidence_min": payload.get("promoted_confidence_min"),
+        "promoted_attention_min": payload.get("promoted_attention_min"),
+        "promoted_risk_max": payload.get("promoted_risk_max"),
+        "promoted_liquidity_min": payload.get("promoted_liquidity_min"),
+        "promoted_buyers_15m_min": payload.get("promoted_buyers_15m_min"),
+    }
+    return run_policy_replay(
+        hours=max(1, int(payload.get("hours") or 24)),
+        limit=max(1, int(payload.get("limit") or 500)),
+        stage=str(payload.get("stage") or "") or None,
+        policy_name=str(payload.get("policy_name") or "") or None,
+        policy_version=str(payload.get("policy_version") or "") or None,
+        overrides=overrides,
+    )
+
+
+@router.get("/learning/policy/replay/latest")
+def learning_policy_replay_latest():
+    replay = get_latest_policy_replay()
+    if replay is None:
+        raise HTTPException(status_code=404, detail="policy_replay_not_found")
+    return replay
+
+
+@router.get("/learning/policy/replay/{run_id}")
+def learning_policy_replay_by_id(run_id: str):
+    replay = get_policy_replay(run_id)
+    if replay is None:
+        raise HTTPException(status_code=404, detail="policy_replay_not_found")
+    return replay
 
 
 @router.get("/learning/health")

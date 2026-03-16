@@ -586,6 +586,85 @@ def test_evaluate_shadow_policy_reports_action_changes(tmp_path, monkeypatch):
     assert result["impact"]["positive_outcomes"] == 1
 
 
+def test_run_policy_replay_persists_run_and_results(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    signal_id = sls.record_signal_decision(
+        token="token-replay",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_ready",
+        action_taken="emit",
+        reasons=["improved_attention"],
+        features={
+            "attention_score": 0.74,
+            "creator_score": 0.42,
+            "candidate_rate_limit_allowed": True,
+            "candidate_progression_ok": True,
+            "candidate_send_eligible": True,
+        },
+        attention_score=0.74,
+        risk_score=0.18,
+        confidence_score=0.67,
+        creator_score=0.42,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="policy-live-1",
+        ts_value=1_773_600_500,
+        source="test",
+    )
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                60,
+                1_773_604_100,
+                "dex",
+                22000,
+                6400,
+                4500,
+                60.0,
+                28.0,
+                70.0,
+                48,
+                20,
+                85.0,
+                5.0,
+                30.0,
+                "worked",
+                json.dumps({"outcome_label": "worked"}),
+            ),
+        )
+
+    replay = sls.run_policy_replay(
+        hours=10_000,
+        stage="candidate",
+        policy_name="shadow_policy",
+        policy_version="shadow-3",
+        overrides={"candidate_attention_min": 0.80},
+    )
+
+    stored = sls.get_policy_replay(replay["run_id"])
+    latest = sls.get_latest_policy_replay()
+
+    assert replay["changed_count"] == 1
+    assert stored is not None
+    assert stored["run_id"] == replay["run_id"]
+    assert stored["results"][0]["changed"] is True
+    assert latest is not None
+    assert latest["run_id"] == replay["run_id"]
+
+
 def test_diagnostics_summary_builds_reason_quality_scorecards(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
