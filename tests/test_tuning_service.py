@@ -9,11 +9,13 @@ from app.services.tuning_service import (
     create_tuning_approval,
     get_config_drift_report,
     get_latest_tuning_approval,
+    get_tuning_rollout_summary,
     list_tuning_approvals,
     render_profile_apply_diff,
     render_profile_env_snippet,
     render_latest_tuning_bundle_artifact,
     render_tuning_approvals_html,
+    render_tuning_rollout_summary_html,
     render_tuning_apply_diff,
     render_tuning_env_snippet,
     render_tuning_profiles_html,
@@ -25,6 +27,9 @@ from app.services.tuning_service import (
 def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SERVICE", "worker")
+    monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SHA", "auto123")
+    monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_ENV", "production")
     sls.init()
 
     base_ts = 1_773_620_000
@@ -202,14 +207,11 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
         approval["approval_id"],
         rollout_status="rolled_out",
         notes="Applied on Render",
-        deployment_service="worker",
-        deployment_sha="abc1234",
-        deployment_env="production",
     )
     assert rolled_out["rollout_status"] == "rolled_out"
     assert "Applied on Render" in rolled_out["notes"]
     assert rolled_out["deployment_service"] == "worker"
-    assert rolled_out["deployment_sha"] == "abc1234"
+    assert rolled_out["deployment_sha"] == "auto123"
 
     latest = get_latest_tuning_approval(
         approval_kind="profile",
@@ -236,3 +238,11 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     drift = get_config_drift_report(target_name="strict", rollout_status="rolled_out")
     assert drift["approval"] is not None
     assert isinstance(drift["drift"], list)
+
+    summary = get_tuning_rollout_summary()
+    assert summary["latest_by_service"]["worker"]["approval_id"] == approval["approval_id"]
+    assert summary["defaults"]["deployment_sha"] == "auto123"
+
+    summary_html = render_tuning_rollout_summary_html()
+    assert "Tuning Rollout Summary" in summary_html
+    assert "Worker / Engine Alignment" in summary_html

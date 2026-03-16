@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import time
 import uuid
 from typing import Any
@@ -66,6 +67,26 @@ def _format_diff_value(value: Any) -> str:
 
 def _profile_baseline() -> dict[str, Any]:
     return {key: getattr(cfg, key) for key in PROFILE_CONFIG_KEYS}
+
+
+def _default_deployment_metadata() -> dict[str, str]:
+    return {
+        "deployment_service": (
+            os.getenv("SIGNAL_ENGINE_DEPLOY_SERVICE", "").strip()
+            or os.getenv("RENDER_SERVICE_NAME", "").strip()
+            or os.getenv("RENDER_SERVICE_ID", "").strip()
+        ),
+        "deployment_sha": (
+            os.getenv("SIGNAL_ENGINE_DEPLOY_SHA", "").strip()
+            or os.getenv("RENDER_GIT_COMMIT", "").strip()
+            or os.getenv("RENDER_GIT_BRANCH", "").strip()
+        ),
+        "deployment_env": (
+            os.getenv("SIGNAL_ENGINE_DEPLOY_ENV", "").strip()
+            or os.getenv("RENDER_ENVIRONMENT", "").strip()
+            or os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
+        ),
+    }
 
 
 def _approval_matches(
@@ -713,9 +734,10 @@ def update_tuning_approval_status(
         raise ValueError("invalid_rollout_status")
     now_ts = int(time.time())
     note_text = (notes or "").strip()
-    service_value = (deployment_service or "").strip()
-    sha_value = (deployment_sha or "").strip()
-    env_value = (deployment_env or "").strip()
+    defaults = _default_deployment_metadata()
+    service_value = (deployment_service or "").strip() or defaults["deployment_service"]
+    sha_value = (deployment_sha or "").strip() or defaults["deployment_sha"]
+    env_value = (deployment_env or "").strip() or defaults["deployment_env"]
     with sls._connect() as c:
         existing = c.execute(
             """
@@ -819,6 +841,124 @@ def get_latest_tuning_approval(
         "artifact_text": row["artifact_text"],
         "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
     }
+
+
+def get_tuning_rollout_summary() -> dict[str, Any]:
+    approvals = list_tuning_approvals(limit=200, rollout_status="rolled_out")
+    latest_by_service: dict[str, dict[str, Any]] = {}
+    latest_profiles_by_service: dict[str, dict[str, dict[str, Any]]] = {}
+    for approval in approvals:
+        service = str(approval.get("deployment_service") or "unknown")
+        latest_by_service.setdefault(service, approval)
+        if approval.get("approval_kind") == "profile" and approval.get("target_name"):
+            latest_profiles_by_service.setdefault(service, {})
+            latest_profiles_by_service[service].setdefault(str(approval["target_name"]), approval)
+
+    worker_profiles = latest_profiles_by_service.get("worker", {})
+    engine_profiles = latest_profiles_by_service.get("engine", {})
+    compared_targets = sorted(set(worker_profiles.keys()) | set(engine_profiles.keys()))
+    alignment = []
+    for target in compared_targets:
+        worker_item = worker_profiles.get(target)
+        engine_item = engine_profiles.get(target)
+        alignment.append(
+            {
+                "target_name": target,
+                "worker_approval_id": worker_item.get("approval_id") if worker_item else None,
+                "engine_approval_id": engine_item.get("approval_id") if engine_item else None,
+                "worker_sha": worker_item.get("deployment_sha") if worker_item else None,
+                "engine_sha": engine_item.get("deployment_sha") if engine_item else None,
+                "aligned": bool(
+                    worker_item
+                    and engine_item
+                    and worker_item.get("approval_id") == engine_item.get("approval_id")
+                    and worker_item.get("deployment_sha") == engine_item.get("deployment_sha")
+                ),
+            }
+        )
+
+    return {
+        "defaults": _default_deployment_metadata(),
+        "service_count": len(latest_by_service),
+        "latest_by_service": latest_by_service,
+        "latest_profiles_by_service": latest_profiles_by_service,
+        "worker_engine_alignment": alignment,
+    }
+
+
+def render_tuning_rollout_summary_html() -> str:
+    summary = get_tuning_rollout_summary()
+    latest_by_service = summary.get("latest_by_service") if isinstance(summary.get("latest_by_service"), dict) else {}
+    alignment = summary.get("worker_engine_alignment") if isinstance(summary.get("worker_engine_alignment"), list) else []
+
+    service_cards = "".join(
+        '<section class="panel">'
+        f"<h2>{html.escape(service)}</h2>"
+        f"<p><strong>Kind:</strong> {html.escape(str(item.get('approval_kind') or 'unknown'))} &nbsp; "
+        f"<strong>Target:</strong> {html.escape(str(item.get('target_name') or 'n/a'))}</p>"
+        f"<p><strong>SHA:</strong> {html.escape(str(item.get('deployment_sha') or 'n/a'))} &nbsp; "
+        f"<strong>Env:</strong> {html.escape(str(item.get('deployment_env') or 'n/a'))}</p>"
+        f"<p><strong>Approval:</strong> {html.escape(str(item.get('approval_id') or 'n/a'))}</p>"
+        "</section>"
+        for service, item in sorted(latest_by_service.items())
+    ) or '<section class="panel"><h2>No Rollouts</h2><p>No rolled-out approvals recorded yet.</p></section>'
+
+    alignment_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('target_name') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('worker_approval_id') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('engine_approval_id') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('worker_sha') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('engine_sha') or 'n/a'))}</td>"
+        f"<td>{'yes' if item.get('aligned') else 'no'}</td>"
+        "</tr>"
+        for item in alignment
+    ) or "<tr><td colspan='6'>No worker/engine comparison data yet.</td></tr>"
+
+    defaults = summary.get("defaults") if isinstance(summary.get("defaults"), dict) else {}
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tuning Rollout Summary</title>
+  <style>
+    :root {{
+      --bg: #081119;
+      --panel: rgba(11, 24, 38, 0.9);
+      --line: rgba(116, 153, 186, 0.16);
+      --text: #edf5fb;
+      --muted: #8ca4b8;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; color: var(--text); font-family: "Segoe UI", sans-serif; background: linear-gradient(180deg, #071018 0%, #09131c 100%); }}
+    .shell {{ max-width: 1320px; margin: 0 auto; padding: 24px 18px 36px; }}
+    .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 22px; padding: 20px; margin-top: 18px; }}
+    table {{ width:100%; border-collapse: collapse; }}
+    th, td {{ text-align:left; padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 14px; vertical-align: top; }}
+    th {{ color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .10em; }}
+    h1 {{ margin: 0 0 8px; font-size: 34px; }}
+    h2 {{ margin: 0 0 12px; font-size: 20px; }}
+    p {{ margin: 0 0 12px; color: var(--muted); line-height: 1.5; }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="panel">
+      <h1>Tuning Rollout Summary</h1>
+      <p><strong>Default Deployment Metadata:</strong> service={html.escape(defaults.get('deployment_service') or 'n/a')} sha={html.escape(defaults.get('deployment_sha') or 'n/a')} env={html.escape(defaults.get('deployment_env') or 'n/a')}</p>
+    </section>
+    {service_cards}
+    <section class="panel">
+      <h2>Worker / Engine Alignment</h2>
+      <table>
+        <thead><tr><th>Target</th><th>Worker Approval</th><th>Engine Approval</th><th>Worker SHA</th><th>Engine SHA</th><th>Aligned</th></tr></thead>
+        <tbody>{alignment_rows}</tbody>
+      </table>
+    </section>
+  </div>
+</body>
+</html>"""
 
 
 def render_latest_tuning_bundle_artifact(

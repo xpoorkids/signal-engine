@@ -74,6 +74,8 @@ Features:
 - `GET /learning/tuning/approvals/latest/artifact`
 - `GET /learning/tuning/approvals/latest/bundle`
 - `GET /learning/tuning/drift`
+- `GET /learning/tuning/rollout/summary`
+- `GET /learning/tuning/rollout/dashboard`
 
 ## Running Locally
 
@@ -85,6 +87,7 @@ Features:
    - `deployment_service`
    - `deployment_sha`
    - `deployment_env`
+   If omitted and available, these can default from environment variables such as `SIGNAL_ENGINE_DEPLOY_*` or Render metadata.
 
 ### Requirements
 

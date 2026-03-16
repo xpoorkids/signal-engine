@@ -129,6 +129,9 @@ def test_learning_engine_health_routes_return_status(tmp_path, monkeypatch):
 def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SERVICE", "worker")
+    monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SHA", "auto123")
+    monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_ENV", "production")
     sls.init()
 
     base_ts = 1_773_620_000
@@ -259,15 +262,13 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
         json={
             "rollout_status": "rolled_out",
             "notes": "rolled to render",
-            "deployment_service": "worker",
-            "deployment_sha": "abc1234",
-            "deployment_env": "production",
         },
     )
     assert status_response.status_code == 200
     status_payload = status_response.json()
     assert status_payload["rollout_status"] == "rolled_out"
     assert status_payload["deployment_service"] == "worker"
+    assert status_payload["deployment_sha"] == "auto123"
 
     latest_response = client.get(
         "/learning/tuning/approvals/latest?approval_kind=profile&target_name=strict&artifact_kind=env&rollout_status=rolled_out"
@@ -296,6 +297,15 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     drift_payload = drift_response.json()
     assert drift_payload["target_name"] == "strict"
     assert "drift_count" in drift_payload
+
+    rollout_summary_response = client.get("/learning/tuning/rollout/summary")
+    assert rollout_summary_response.status_code == 200
+    rollout_summary_payload = rollout_summary_response.json()
+    assert rollout_summary_payload["latest_by_service"]["worker"]["approval_id"] == approval_id
+
+    rollout_dashboard_response = client.get("/learning/tuning/rollout/dashboard")
+    assert rollout_dashboard_response.status_code == 200
+    assert "Tuning Rollout Summary" in rollout_dashboard_response.text
 
     approvals_dashboard_response = client.get("/learning/tuning/approvals/dashboard?limit=10&rollout_status=rolled_out&q=render")
     assert approvals_dashboard_response.status_code == 200

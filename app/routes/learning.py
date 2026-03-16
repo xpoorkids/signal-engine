@@ -18,9 +18,11 @@ from app.services.tuning_service import (
     create_tuning_approval,
     get_config_drift_report,
     get_latest_tuning_approval,
+    get_tuning_rollout_summary,
     list_tuning_approvals,
     render_profile_apply_diff,
     render_profile_env_snippet,
+    render_tuning_rollout_summary_html,
     render_tuning_approvals_html,
     render_tuning_apply_diff,
     render_tuning_env_snippet,
@@ -293,6 +295,16 @@ def learning_tuning_drift(target_name: str, rollout_status: str = "rolled_out"):
         return get_config_drift_report(target_name=target_name, rollout_status=rollout_status)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/learning/tuning/rollout/summary")
+def learning_tuning_rollout_summary():
+    return get_tuning_rollout_summary()
+
+
+@router.get("/learning/tuning/rollout/dashboard")
+def learning_tuning_rollout_dashboard():
+    return HTMLResponse(content=render_tuning_rollout_summary_html())
 
 
 @router.get("/learning/diagnostics/dashboard")
