@@ -28,6 +28,7 @@ DB_PATH = Path("state/engine.db")
 SNAPSHOT_HORIZONS_MINUTES = (5, 15, 60, 240)
 SNAPSHOT_POLL_SECONDS = 30
 REPORT_POLL_SECONDS = 600
+_SCHEMA_READY = False
 
 
 def _connect() -> sqlite3.Connection:
@@ -35,6 +36,7 @@ def _connect() -> sqlite3.Connection:
 
 
 def init() -> None:
+    global _SCHEMA_READY
     DB_PATH.parent.mkdir(exist_ok=True)
     with _connect() as c:
         c.execute(
@@ -232,6 +234,14 @@ def init() -> None:
         if "signal_id" not in decision_cols:
             c.execute("ALTER TABLE signal_decisions ADD COLUMN signal_id TEXT")
         c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_signal_id ON signal_decisions(signal_id)")
+    _SCHEMA_READY = True
+
+
+def _ensure_schema() -> None:
+    global _SCHEMA_READY
+    if _SCHEMA_READY:
+        return
+    init()
 
 
 def _to_float(value: Any) -> float | None:
@@ -632,6 +642,7 @@ def record_signal_decision(
 
 
 def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
+    _ensure_schema()
     cutoff = int(time.time()) - max(1, hours) * 3600
     with _connect() as c:
         decision_rows = c.execute(
@@ -1083,6 +1094,7 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
 
 
 def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
+    _ensure_schema()
     summary = get_diagnostics_summary(hours=max(1, hours))
     cutoff = int(time.time()) - max(1, hours) * 3600
     with _connect() as c:

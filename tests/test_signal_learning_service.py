@@ -231,6 +231,19 @@ def test_diagnostics_summary_aggregates_decisions(tmp_path, monkeypatch):
     assert reasons["buyers_low"] == 1
 
 
+def test_diagnostics_and_health_bootstrap_schema_on_fresh_db(tmp_path, monkeypatch):
+    db_path = tmp_path / "fresh-engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setattr(sls, "_SCHEMA_READY", False)
+
+    summary = sls.get_diagnostics_summary(hours=24)
+    assert summary["counts_by_decision"] == {}
+    assert summary["top_skip_reasons"] == []
+
+    health = sls.get_engine_health_digest(hours=24)
+    assert health["status"] in {"cold", "quiet", "processing", "gated", "blocked", "active"}
+
+
 def test_diagnostics_summary_includes_outcome_analysis(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
