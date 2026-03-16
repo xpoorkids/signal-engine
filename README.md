@@ -89,6 +89,11 @@ Ops digest behavior:
 - `SIGNAL_ENGINE_OPS_DIGEST_COOLDOWN_SEC` controls duplicate digest suppression for unchanged alert states.
 - `SIGNAL_ENGINE_OPS_DIGEST_POLL_SEC` controls how often the worker evaluates and emits the ops digest.
 - `SIGNAL_ENGINE_OPS_DIGEST_HOURS` controls the digest lookback window used by the background worker.
+- `SIGNAL_ENGINE_OPS_DEGRADED_SKIP_PRESSURE` and `SIGNAL_ENGINE_OPS_INCIDENT_SKIP_PRESSURE` tune skip-pressure escalation.
+- `SIGNAL_ENGINE_OPS_DEGRADED_BLOCK_PRESSURE` and `SIGNAL_ENGINE_OPS_INCIDENT_BLOCK_PRESSURE` tune promotion-block escalation.
+- `SIGNAL_ENGINE_OPS_INCIDENT_NOTIFICATION_COUNT` tunes rollout-notification escalation.
+- `SIGNAL_ENGINE_OPS_CRITICAL_DRIFT_PROFILES` tunes multi-profile drift escalation.
+- `SIGNAL_ENGINE_OPS_INCIDENT_ZERO_SEND_MIN_SKIPS` tunes the zero-send-with-pressure incident trigger.
 
 ## Running Locally
 

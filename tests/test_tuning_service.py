@@ -278,11 +278,13 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
 
     digest = get_ops_digest(hours=24)
     assert digest["severity"] in {"info", "warning", "error"}
+    assert digest["incident_level"] in {"normal", "caution", "degraded", "incident", "critical"}
     assert "summary" in digest
     assert "highlights" in digest
 
     digest_text = render_ops_digest_text(hours=24)
     assert "Signal Engine Ops Digest" in digest_text
+    assert "Incident Level:" in digest_text
     assert "Summary:" in digest_text
 
     digest_html = render_ops_digest_html(hours=24)
@@ -379,3 +381,32 @@ def test_ops_digest_worker_runs_single_iteration(monkeypatch):
         assert str(exc) == "stop-loop"
 
     assert calls == [(12, False)]
+
+
+def test_ops_digest_escalates_to_incident_on_heavy_gate_pressure(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    base_ts = 1_773_620_000
+    for offset in range(12):
+        sls.record_signal_decision(
+            token=f"token-{offset}",
+            event_type="candidate",
+            stage="candidate",
+            decision="candidate_gate_skip",
+            reasons=["attention<0.20"],
+            attention_score=0.08,
+            risk_score=0.35,
+            confidence_score=0.18,
+            lifecycle="dex",
+            ts_value=base_ts + offset,
+            source="test",
+        )
+
+    monkeypatch.setenv("SIGNAL_ENGINE_OPS_INCIDENT_ZERO_SEND_MIN_SKIPS", "10")
+    digest = get_ops_digest(hours=10000)
+
+    assert digest["incident_level"] == "incident"
+    assert "zero_sends_with_gate_pressure" in digest["incident_reasons"]
+    assert digest["severity"] in {"warning", "error"}

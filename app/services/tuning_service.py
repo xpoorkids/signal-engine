@@ -461,6 +461,34 @@ def _ops_digest_default_hours() -> int:
     return max(1, value)
 
 
+def _ops_threshold_float(env_key: str, default: float) -> float:
+    raw = os.getenv(env_key, "").strip()
+    try:
+        return float(raw) if raw else float(default)
+    except ValueError:
+        return float(default)
+
+
+def _ops_threshold_int(env_key: str, default: int) -> int:
+    raw = os.getenv(env_key, "").strip()
+    try:
+        return int(raw) if raw else int(default)
+    except ValueError:
+        return int(default)
+
+
+def _ops_digest_policy() -> dict[str, float | int]:
+    return {
+        "degraded_skip_pressure": _ops_threshold_float("SIGNAL_ENGINE_OPS_DEGRADED_SKIP_PRESSURE", 70.0),
+        "incident_skip_pressure": _ops_threshold_float("SIGNAL_ENGINE_OPS_INCIDENT_SKIP_PRESSURE", 85.0),
+        "degraded_block_pressure": _ops_threshold_float("SIGNAL_ENGINE_OPS_DEGRADED_BLOCK_PRESSURE", 35.0),
+        "incident_block_pressure": _ops_threshold_float("SIGNAL_ENGINE_OPS_INCIDENT_BLOCK_PRESSURE", 50.0),
+        "incident_notification_count": _ops_threshold_int("SIGNAL_ENGINE_OPS_INCIDENT_NOTIFICATION_COUNT", 2),
+        "critical_drift_profiles": _ops_threshold_int("SIGNAL_ENGINE_OPS_CRITICAL_DRIFT_PROFILES", 2),
+        "incident_zero_send_min_skips": _ops_threshold_int("SIGNAL_ENGINE_OPS_INCIDENT_ZERO_SEND_MIN_SKIPS", 10),
+    }
+
+
 def _ops_digest_signature(digest: dict[str, Any]) -> str:
     payload = {
         "severity": digest.get("severity"),
@@ -730,6 +758,8 @@ def get_ops_digest(hours: int = 24) -> dict[str, Any]:
     sent_count = int(counts.get("sent") or 0)
     skip_count = int(counts.get("candidate_gate_skip") or 0)
     block_count = int(counts.get("promotion_block") or 0)
+    skip_pressure = float(engine_health.get("skip_pressure") or 0.0)
+    block_pressure = float(engine_health.get("block_pressure") or 0.0)
 
     drift_profiles = sorted(name for name, payload in drift.items() if int(payload.get("drift_count") or 0) > 0)
     blocking_notifications = [
@@ -756,6 +786,9 @@ def get_ops_digest(hours: int = 24) -> dict[str, Any]:
 
     severity = "info"
     attention_reasons: list[str] = []
+    policy = _ops_digest_policy()
+    incident_level = "normal"
+    incident_reasons: list[str] = []
     if health_status in {"cold", "quiet", "blocked"}:
         severity = "warning"
         attention_reasons.append(f"engine_{health_status}")
@@ -773,6 +806,47 @@ def get_ops_digest(hours: int = 24) -> dict[str, Any]:
         severity = "error"
         attention_reasons.append("possible_stall")
 
+    if health_status == "cold" and sent_count == 0 and skip_count == 0 and block_count == 0:
+        incident_level = "critical"
+        incident_reasons.append("possible_stall")
+    elif len(drift_profiles) >= int(policy["critical_drift_profiles"]):
+        incident_level = "incident"
+        incident_reasons.append("multi_profile_drift")
+    elif len(blocking_notifications) >= int(policy["incident_notification_count"]):
+        incident_level = "incident"
+        incident_reasons.append("ops_notifications_spike")
+    elif sent_count == 0 and skip_count >= int(policy["incident_zero_send_min_skips"]):
+        incident_level = "incident"
+        incident_reasons.append("zero_sends_with_gate_pressure")
+    elif skip_pressure >= float(policy["incident_skip_pressure"]):
+        incident_level = "incident"
+        incident_reasons.append("extreme_skip_pressure")
+    elif block_pressure >= float(policy["incident_block_pressure"]):
+        incident_level = "incident"
+        incident_reasons.append("extreme_block_pressure")
+    elif health_status in {"blocked", "cold"}:
+        incident_level = "degraded"
+        incident_reasons.append(f"engine_{health_status}")
+    elif skip_pressure >= float(policy["degraded_skip_pressure"]):
+        incident_level = "degraded"
+        incident_reasons.append("high_skip_pressure")
+    elif block_pressure >= float(policy["degraded_block_pressure"]):
+        incident_level = "degraded"
+        incident_reasons.append("high_block_pressure")
+    elif health_status in {"quiet", "gated"} or drift_profiles or blocking_notifications:
+        incident_level = "caution"
+        if health_status in {"quiet", "gated"}:
+            incident_reasons.append(f"engine_{health_status}")
+        if drift_profiles:
+            incident_reasons.append("config_drift")
+        if blocking_notifications:
+            incident_reasons.append("rollout_notifications")
+
+    if incident_level in {"degraded", "incident"} and severity == "info":
+        severity = "warning"
+    if incident_level == "critical":
+        severity = "error"
+
     summary_line = (
         f"{health_status.title()} engine over the last {int(center.get('lookback_hours') or hours)}h. "
         f"Sent {sent_count}, skipped {skip_count}, blocked {block_count}."
@@ -781,10 +855,15 @@ def get_ops_digest(hours: int = 24) -> dict[str, Any]:
         summary_line += f" Drift on {', '.join(drift_profiles)}."
     elif top_skip_reason:
         summary_line += f" Primary gate pressure: {top_skip_reason}."
+    if incident_level != "normal":
+        summary_line += f" Escalation: {incident_level}."
 
     return {
         "lookback_hours": int(center.get("lookback_hours") or hours),
         "severity": severity,
+        "incident_level": incident_level,
+        "incident_reasons": incident_reasons,
+        "policy": policy,
         "needs_attention": bool(attention_reasons),
         "attention_reasons": attention_reasons,
         "summary": summary_line,
@@ -808,6 +887,7 @@ def render_ops_digest_text(hours: int = 24) -> str:
     lines = [
         "# Signal Engine Ops Digest",
         f"Severity: {digest['severity']}",
+        f"Incident Level: {digest.get('incident_level', 'normal')}",
         f"Window: {digest['lookback_hours']}h",
         f"Summary: {digest['summary']}",
         "",
@@ -872,7 +952,7 @@ def render_ops_digest_html(hours: int = 24) -> str:
   <div class="shell">
     <section class="panel">
       <h1>Ops Digest</h1>
-      <p><strong>Severity:</strong> {html.escape(str(digest.get('severity') or 'info'))} &nbsp; <strong>Window:</strong> {int(digest.get('lookback_hours') or hours)}h</p>
+      <p><strong>Severity:</strong> {html.escape(str(digest.get('severity') or 'info'))} &nbsp; <strong>Incident:</strong> {html.escape(str(digest.get('incident_level') or 'normal'))} &nbsp; <strong>Window:</strong> {int(digest.get('lookback_hours') or hours)}h</p>
       <p>{html.escape(str(digest.get('summary') or ''))}</p>
     </section>
     <section class="panel">
