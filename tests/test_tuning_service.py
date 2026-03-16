@@ -184,19 +184,32 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     assert approval["approval_kind"] == "profile"
     assert approval["artifact_kind"] == "env"
     assert "PROM_MIN_LIQ_USD=" in approval["artifact_text"]
+    assert approval["rollout_status"] == "pending"
 
     approvals = list_tuning_approvals(limit=10)
     assert approvals
     assert approvals[0]["approved_by"] == "ops"
-    assert approvals[0]["rollout_status"] == "approved"
+    assert approvals[0]["rollout_status"] == "pending"
+
+    approved = update_tuning_approval_status(
+        approval["approval_id"],
+        rollout_status="approved",
+        notes="Reviewed and approved",
+    )
+    assert approved["rollout_status"] == "approved"
 
     rolled_out = update_tuning_approval_status(
         approval["approval_id"],
         rollout_status="rolled_out",
         notes="Applied on Render",
+        deployment_service="worker",
+        deployment_sha="abc1234",
+        deployment_env="production",
     )
     assert rolled_out["rollout_status"] == "rolled_out"
     assert "Applied on Render" in rolled_out["notes"]
+    assert rolled_out["deployment_service"] == "worker"
+    assert rolled_out["deployment_sha"] == "abc1234"
 
     latest = get_latest_tuning_approval(
         approval_kind="profile",

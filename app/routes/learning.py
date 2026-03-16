@@ -197,6 +197,9 @@ def learning_tuning_approvals_status(approval_id: str, payload: dict[str, object
             approval_id,
             rollout_status=str(payload.get("rollout_status") or ""),
             notes=str(payload.get("notes") or "") or None,
+            deployment_service=str(payload.get("deployment_service") or "") or None,
+            deployment_sha=str(payload.get("deployment_sha") or "") or None,
+            deployment_env=str(payload.get("deployment_env") or "") or None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

@@ -239,6 +239,7 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     approval_payload = create_approval_response.json()
     assert approval_payload["approval_kind"] == "profile"
     assert approval_payload["target_name"] == "strict"
+    assert approval_payload["rollout_status"] == "pending"
 
     approvals_response = client.get("/learning/tuning/approvals?limit=10")
     assert approvals_response.status_code == 200
@@ -246,13 +247,27 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert approvals_payload["approvals"]
 
     approval_id = approval_payload["approval_id"]
+    approve_response = client.post(
+        f"/learning/tuning/approvals/{approval_id}/status",
+        json={"rollout_status": "approved", "notes": "approved for deploy"},
+    )
+    assert approve_response.status_code == 200
+    assert approve_response.json()["rollout_status"] == "approved"
+
     status_response = client.post(
         f"/learning/tuning/approvals/{approval_id}/status",
-        json={"rollout_status": "rolled_out", "notes": "rolled to render"},
+        json={
+            "rollout_status": "rolled_out",
+            "notes": "rolled to render",
+            "deployment_service": "worker",
+            "deployment_sha": "abc1234",
+            "deployment_env": "production",
+        },
     )
     assert status_response.status_code == 200
     status_payload = status_response.json()
     assert status_payload["rollout_status"] == "rolled_out"
+    assert status_payload["deployment_service"] == "worker"
 
     latest_response = client.get(
         "/learning/tuning/approvals/latest?approval_kind=profile&target_name=strict&artifact_kind=env&rollout_status=rolled_out"
@@ -286,6 +301,7 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert approvals_dashboard_response.status_code == 200
     assert "Tuning Approvals" in approvals_dashboard_response.text
     assert "Config Drift / Strict" in approvals_dashboard_response.text
+    assert "worker" in approvals_dashboard_response.text
 
 
 def test_learning_diagnostics_dashboard_returns_html(tmp_path, monkeypatch):

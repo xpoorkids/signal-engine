@@ -128,8 +128,11 @@ def init() -> None:
                 target_name TEXT,
                 artifact_kind TEXT NOT NULL,
                 lookback_hours INTEGER NOT NULL,
-                rollout_status TEXT NOT NULL DEFAULT 'approved',
+                rollout_status TEXT NOT NULL DEFAULT 'pending',
                 rolled_out_ts INTEGER,
+                deployment_service TEXT,
+                deployment_sha TEXT,
+                deployment_env TEXT,
                 notes TEXT,
                 artifact_text TEXT NOT NULL,
                 payload_json TEXT NOT NULL
@@ -168,9 +171,15 @@ def init() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_ts ON signal_decisions(created_ts, decision)")
         approval_cols = {row[1] for row in c.execute("PRAGMA table_info(tuning_approvals)").fetchall()}
         if "rollout_status" not in approval_cols:
-            c.execute("ALTER TABLE tuning_approvals ADD COLUMN rollout_status TEXT NOT NULL DEFAULT 'approved'")
+            c.execute("ALTER TABLE tuning_approvals ADD COLUMN rollout_status TEXT NOT NULL DEFAULT 'pending'")
         if "rolled_out_ts" not in approval_cols:
             c.execute("ALTER TABLE tuning_approvals ADD COLUMN rolled_out_ts INTEGER")
+        if "deployment_service" not in approval_cols:
+            c.execute("ALTER TABLE tuning_approvals ADD COLUMN deployment_service TEXT")
+        if "deployment_sha" not in approval_cols:
+            c.execute("ALTER TABLE tuning_approvals ADD COLUMN deployment_sha TEXT")
+        if "deployment_env" not in approval_cols:
+            c.execute("ALTER TABLE tuning_approvals ADD COLUMN deployment_env TEXT")
         decision_cols = {row[1] for row in c.execute("PRAGMA table_info(signal_decisions)").fetchall()}
         if "signal_id" not in decision_cols:
             c.execute("ALTER TABLE signal_decisions ADD COLUMN signal_id TEXT")

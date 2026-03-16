@@ -77,6 +77,15 @@ Features:
 
 ## Running Locally
 
+## Tuning Rollout Flow
+
+1. Create a tuning approval. New approvals start in `pending`.
+2. Promote to `approved` after review.
+3. Mark as `rolled_out` with deployment metadata:
+   - `deployment_service`
+   - `deployment_sha`
+   - `deployment_env`
+
 ### Requirements
 
 - Python 3.11 preferred

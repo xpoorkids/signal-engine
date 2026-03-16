@@ -604,8 +604,11 @@ def create_tuning_approval(
         "target_name": target,
         "artifact_kind": artifact,
         "lookback_hours": lookback_hours,
-        "rollout_status": "approved",
+        "rollout_status": "pending",
         "rolled_out_ts": None,
+        "deployment_service": "",
+        "deployment_sha": "",
+        "deployment_env": "",
         "notes": (notes or "").strip(),
         "artifact_text": artifact_text,
         "payload": payload,
@@ -616,8 +619,9 @@ def create_tuning_approval(
             INSERT INTO tuning_approvals (
                 approval_id, created_ts, approved_by, approval_kind, target_name,
                 artifact_kind, lookback_hours, rollout_status, rolled_out_ts,
+                deployment_service, deployment_sha, deployment_env,
                 notes, artifact_text, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record["approval_id"],
@@ -629,6 +633,9 @@ def create_tuning_approval(
                 record["lookback_hours"],
                 record["rollout_status"],
                 record["rolled_out_ts"],
+                record["deployment_service"],
+                record["deployment_sha"],
+                record["deployment_env"],
                 record["notes"],
                 record["artifact_text"],
                 json.dumps(record["payload"]),
@@ -651,6 +658,7 @@ def list_tuning_approvals(
             """
             SELECT approval_id, created_ts, approved_by, approval_kind, target_name,
                    artifact_kind, lookback_hours, rollout_status, rolled_out_ts,
+                   deployment_service, deployment_sha, deployment_env,
                    notes, artifact_text, payload_json
             FROM tuning_approvals
             ORDER BY created_ts DESC
@@ -668,8 +676,11 @@ def list_tuning_approvals(
             "target_name": row["target_name"],
             "artifact_kind": row["artifact_kind"],
             "lookback_hours": row["lookback_hours"],
-            "rollout_status": row["rollout_status"] or "approved",
+            "rollout_status": row["rollout_status"] or "pending",
             "rolled_out_ts": row["rolled_out_ts"],
+            "deployment_service": row["deployment_service"] or "",
+            "deployment_sha": row["deployment_sha"] or "",
+            "deployment_env": row["deployment_env"] or "",
             "notes": row["notes"] or "",
             "artifact_text": row["artifact_text"],
             "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
@@ -693,33 +704,57 @@ def update_tuning_approval_status(
     *,
     rollout_status: str,
     notes: str | None = None,
+    deployment_service: str | None = None,
+    deployment_sha: str | None = None,
+    deployment_env: str | None = None,
 ) -> dict[str, Any]:
     status = str(rollout_status or "").strip().lower()
     if status not in APPROVAL_STATUSES:
         raise ValueError("invalid_rollout_status")
     now_ts = int(time.time())
     note_text = (notes or "").strip()
+    service_value = (deployment_service or "").strip()
+    sha_value = (deployment_sha or "").strip()
+    env_value = (deployment_env or "").strip()
     with sls._connect() as c:
         existing = c.execute(
             """
-            SELECT approval_id, notes FROM tuning_approvals WHERE approval_id=?
+            SELECT approval_id, notes, rollout_status, deployment_service, deployment_sha, deployment_env
+            FROM tuning_approvals WHERE approval_id=?
             """,
             (approval_id,),
         ).fetchone()
         if not existing:
             raise KeyError("tuning_approval_not_found")
+        current_status = str(existing["rollout_status"] or "pending")
+        allowed_transitions = {
+            "pending": {"approved", "rejected"},
+            "approved": {"rolled_out", "rejected"},
+            "rolled_out": set(),
+            "rejected": set(),
+        }
+        if status != current_status and status not in allowed_transitions.get(current_status, set()):
+            raise ValueError("invalid_rollout_transition")
         merged_notes = existing["notes"] or ""
         if note_text:
             merged_notes = f"{merged_notes}\n{note_text}".strip() if merged_notes else note_text
+        effective_service = service_value or str(existing["deployment_service"] or "")
+        effective_sha = sha_value or str(existing["deployment_sha"] or "")
+        effective_env = env_value or str(existing["deployment_env"] or "")
+        if status == "rolled_out" and (not effective_service or not effective_sha):
+            raise ValueError("missing_deployment_metadata")
         c.execute(
             """
             UPDATE tuning_approvals
-            SET rollout_status=?, rolled_out_ts=?, notes=?
+            SET rollout_status=?, rolled_out_ts=?, deployment_service=?, deployment_sha=?, deployment_env=?, notes=?
             WHERE approval_id=?
             """,
             (
                 status,
                 now_ts if status == "rolled_out" else None,
+                effective_service if status == "rolled_out" else "",
+                effective_sha if status == "rolled_out" else "",
+                effective_env if status == "rolled_out" else "",
                 merged_notes,
                 approval_id,
             ),
@@ -755,6 +790,7 @@ def get_latest_tuning_approval(
             """
             SELECT approval_id, created_ts, approved_by, approval_kind, target_name,
                    artifact_kind, lookback_hours, rollout_status, rolled_out_ts,
+                   deployment_service, deployment_sha, deployment_env,
                    notes, artifact_text, payload_json
             FROM tuning_approvals
             WHERE approval_kind=? AND artifact_kind=? AND rollout_status=?
@@ -774,8 +810,11 @@ def get_latest_tuning_approval(
         "target_name": row["target_name"],
         "artifact_kind": row["artifact_kind"],
         "lookback_hours": row["lookback_hours"],
-        "rollout_status": row["rollout_status"] or "approved",
+        "rollout_status": row["rollout_status"] or "pending",
         "rolled_out_ts": row["rolled_out_ts"],
+        "deployment_service": row["deployment_service"] or "",
+        "deployment_sha": row["deployment_sha"] or "",
+        "deployment_env": row["deployment_env"] or "",
         "notes": row["notes"] or "",
         "artifact_text": row["artifact_text"],
         "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
@@ -921,18 +960,21 @@ def render_tuning_approvals_html(
         f"<td>{html.escape(str(item.get('artifact_kind') or 'unknown'))}</td>"
         f"<td>{html.escape(str(item.get('rollout_status') or 'approved'))}</td>"
         f"<td>{html.escape(str(item.get('approved_by') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('deployment_service') or ''))}</td>"
+        f"<td>{html.escape(str(item.get('deployment_sha') or ''))}</td>"
         f"<td>{int(item.get('lookback_hours') or 0)}</td>"
         f"<td>{html.escape(str(item.get('notes') or ''))}</td>"
         "</tr>"
         for item in approvals
-    ) or "<tr><td colspan='7'>No tuning approvals recorded yet.</td></tr>"
+    ) or "<tr><td colspan='9'>No tuning approvals recorded yet.</td></tr>"
 
     artifacts = "".join(
         '<section class="panel">'
         f"<h2>{html.escape(str(item.get('approval_kind') or 'unknown').title())} / {html.escape(str(item.get('target_name') or 'default'))}</h2>"
         f"<p><strong>Approved by:</strong> {html.escape(str(item.get('approved_by') or 'unknown'))} &nbsp; "
         f"<strong>Artifact:</strong> {html.escape(str(item.get('artifact_kind') or 'unknown'))} &nbsp; "
-        f"<strong>Status:</strong> {html.escape(str(item.get('rollout_status') or 'approved'))}</p>"
+        f"<strong>Status:</strong> {html.escape(str(item.get('rollout_status') or 'pending'))}</p>"
+        f"<p><strong>Deploy:</strong> {html.escape(str(item.get('deployment_service') or 'n/a'))} / {html.escape(str(item.get('deployment_env') or 'n/a'))} / {html.escape(str(item.get('deployment_sha') or 'n/a'))}</p>"
         f"<pre>{html.escape(str(item.get('artifact_text') or ''))}</pre>"
         "</section>"
         for item in approvals[:5]
@@ -975,7 +1017,7 @@ def render_tuning_approvals_html(
     <section class="panel">
       <h2>Approval Log</h2>
       <table>
-        <thead><tr><th>Kind</th><th>Target</th><th>Artifact</th><th>Status</th><th>Approved By</th><th>Hours</th><th>Notes</th></tr></thead>
+        <thead><tr><th>Kind</th><th>Target</th><th>Artifact</th><th>Status</th><th>Approved By</th><th>Service</th><th>SHA</th><th>Hours</th><th>Notes</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </section>
