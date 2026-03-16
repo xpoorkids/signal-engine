@@ -16,6 +16,7 @@ from app.services.tuning_service import (
     build_tuning_profiles,
     build_tuning_proposals,
     create_tuning_approval,
+    get_config_drift_report,
     get_latest_tuning_approval,
     list_tuning_approvals,
     render_profile_apply_diff,
@@ -23,6 +24,7 @@ from app.services.tuning_service import (
     render_tuning_approvals_html,
     render_tuning_apply_diff,
     render_tuning_env_snippet,
+    render_latest_tuning_bundle_artifact,
     render_tuning_profiles_html,
     render_tuning_proposals_html,
     update_tuning_approval_status,
@@ -152,8 +154,24 @@ def learning_tuning_profile_diff(profile_name: str, hours: int = 72):
 
 
 @router.get("/learning/tuning/approvals")
-def learning_tuning_approvals(limit: int = 20):
-    return {"approvals": list_tuning_approvals(limit=max(1, limit))}
+def learning_tuning_approvals(
+    limit: int = 20,
+    approval_kind: str | None = None,
+    artifact_kind: str | None = None,
+    target_name: str | None = None,
+    rollout_status: str | None = None,
+    q: str | None = None,
+):
+    return {
+        "approvals": list_tuning_approvals(
+            limit=max(1, limit),
+            approval_kind=approval_kind,
+            artifact_kind=artifact_kind,
+            target_name=target_name,
+            rollout_status=rollout_status,
+            query=q,
+        )
+    }
 
 
 @router.post("/learning/tuning/approvals")
@@ -188,8 +206,24 @@ def learning_tuning_approvals_status(approval_id: str, payload: dict[str, object
 
 
 @router.get("/learning/tuning/approvals/dashboard")
-def learning_tuning_approvals_dashboard(limit: int = 20):
-    return HTMLResponse(content=render_tuning_approvals_html(limit=max(1, limit)))
+def learning_tuning_approvals_dashboard(
+    limit: int = 20,
+    approval_kind: str | None = None,
+    artifact_kind: str | None = None,
+    target_name: str | None = None,
+    rollout_status: str | None = None,
+    q: str | None = None,
+):
+    return HTMLResponse(
+        content=render_tuning_approvals_html(
+            limit=max(1, limit),
+            approval_kind=approval_kind,
+            artifact_kind=artifact_kind,
+            target_name=target_name,
+            rollout_status=rollout_status,
+            query=q,
+        )
+    )
 
 
 @router.get("/learning/tuning/approvals/latest")
@@ -232,6 +266,30 @@ def learning_tuning_approvals_latest_artifact(
     if approval is None:
         raise HTTPException(status_code=404, detail="tuning_approval_not_found")
     return PlainTextResponse(content=str(approval.get("artifact_text") or ""))
+
+
+@router.get("/learning/tuning/approvals/latest/bundle")
+def learning_tuning_approvals_latest_bundle(
+    artifact_kind: str = "env",
+    rollout_status: str = "rolled_out",
+):
+    try:
+        return PlainTextResponse(
+            content=render_latest_tuning_bundle_artifact(
+                artifact_kind=artifact_kind,
+                rollout_status=rollout_status,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/learning/tuning/drift")
+def learning_tuning_drift(target_name: str, rollout_status: str = "rolled_out"):
+    try:
+        return get_config_drift_report(target_name=target_name, rollout_status=rollout_status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/learning/diagnostics/dashboard")

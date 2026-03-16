@@ -68,6 +68,41 @@ def _profile_baseline() -> dict[str, Any]:
     return {key: getattr(cfg, key) for key in PROFILE_CONFIG_KEYS}
 
 
+def _approval_matches(
+    approval: dict[str, Any],
+    *,
+    approval_kind: str | None = None,
+    artifact_kind: str | None = None,
+    target_name: str | None = None,
+    rollout_status: str | None = None,
+    query: str | None = None,
+) -> bool:
+    if approval_kind and str(approval.get("approval_kind") or "").lower() != approval_kind.lower():
+        return False
+    if artifact_kind and str(approval.get("artifact_kind") or "").lower() != artifact_kind.lower():
+        return False
+    if target_name and str(approval.get("target_name") or "").lower() != target_name.lower():
+        return False
+    if rollout_status and str(approval.get("rollout_status") or "").lower() != rollout_status.lower():
+        return False
+    if query:
+        needle = query.lower()
+        haystack = " ".join(
+            [
+                str(approval.get("approval_id") or ""),
+                str(approval.get("approved_by") or ""),
+                str(approval.get("approval_kind") or ""),
+                str(approval.get("target_name") or ""),
+                str(approval.get("artifact_kind") or ""),
+                str(approval.get("notes") or ""),
+                str(approval.get("artifact_text") or ""),
+            ]
+        ).lower()
+        if needle not in haystack:
+            return False
+    return True
+
+
 def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:
     summary = sls.get_diagnostics_summary(hours=max(1, hours))
     guidance = summary.get("threshold_guidance") if isinstance(summary.get("threshold_guidance"), list) else []
@@ -602,7 +637,15 @@ def create_tuning_approval(
     return record
 
 
-def list_tuning_approvals(limit: int = 20) -> list[dict[str, Any]]:
+def list_tuning_approvals(
+    limit: int = 20,
+    *,
+    approval_kind: str | None = None,
+    artifact_kind: str | None = None,
+    target_name: str | None = None,
+    rollout_status: str | None = None,
+    query: str | None = None,
+) -> list[dict[str, Any]]:
     with sls._connect() as c:
         rows = c.execute(
             """
@@ -617,22 +660,31 @@ def list_tuning_approvals(limit: int = 20) -> list[dict[str, Any]]:
         ).fetchall()
     approvals: list[dict[str, Any]] = []
     for row in rows:
-        approvals.append(
-            {
-                "approval_id": row["approval_id"],
-                "created_ts": row["created_ts"],
-                "approved_by": row["approved_by"],
-                "approval_kind": row["approval_kind"],
-                "target_name": row["target_name"],
-                "artifact_kind": row["artifact_kind"],
-                "lookback_hours": row["lookback_hours"],
-                "rollout_status": row["rollout_status"] or "approved",
-                "rolled_out_ts": row["rolled_out_ts"],
-                "notes": row["notes"] or "",
-                "artifact_text": row["artifact_text"],
-                "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
-            }
-        )
+        approval = {
+            "approval_id": row["approval_id"],
+            "created_ts": row["created_ts"],
+            "approved_by": row["approved_by"],
+            "approval_kind": row["approval_kind"],
+            "target_name": row["target_name"],
+            "artifact_kind": row["artifact_kind"],
+            "lookback_hours": row["lookback_hours"],
+            "rollout_status": row["rollout_status"] or "approved",
+            "rolled_out_ts": row["rolled_out_ts"],
+            "notes": row["notes"] or "",
+            "artifact_text": row["artifact_text"],
+            "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
+        }
+        if _approval_matches(
+            approval,
+            approval_kind=approval_kind,
+            artifact_kind=artifact_kind,
+            target_name=target_name,
+            rollout_status=rollout_status,
+            query=query,
+        ):
+            approvals.append(approval)
+        if len(approvals) >= max(1, int(limit)):
+            break
     return approvals
 
 
@@ -730,8 +782,138 @@ def get_latest_tuning_approval(
     }
 
 
-def render_tuning_approvals_html(limit: int = 20) -> str:
-    approvals = list_tuning_approvals(limit=max(1, limit))
+def render_latest_tuning_bundle_artifact(
+    *,
+    artifact_kind: str = "env",
+    rollout_status: str = "rolled_out",
+) -> str:
+    artifact = str(artifact_kind or "env").strip().lower()
+    status = str(rollout_status or "rolled_out").strip().lower()
+    if artifact not in {"env", "diff"}:
+        raise ValueError("invalid_artifact_kind")
+    if status not in APPROVAL_STATUSES:
+        raise ValueError("invalid_rollout_status")
+
+    sections = [
+        "# Signal Engine latest approved bundle",
+        f"# rollout_status={status}",
+        f"# artifact_kind={artifact}",
+    ]
+
+    latest_items: list[tuple[str, dict[str, Any] | None]] = [
+        ("proposal", get_latest_tuning_approval(approval_kind="proposal", artifact_kind=artifact, rollout_status=status)),
+        ("strict", get_latest_tuning_approval(approval_kind="profile", target_name="strict", artifact_kind=artifact, rollout_status=status)),
+        ("balanced", get_latest_tuning_approval(approval_kind="profile", target_name="balanced", artifact_kind=artifact, rollout_status=status)),
+        ("aggressive", get_latest_tuning_approval(approval_kind="profile", target_name="aggressive", artifact_kind=artifact, rollout_status=status)),
+    ]
+
+    included = 0
+    for name, approval in latest_items:
+        if not approval:
+            continue
+        included += 1
+        sections.append("")
+        sections.append(f"# [{name}] approval_id={approval['approval_id']}")
+        sections.append(str(approval.get("artifact_text") or "").strip())
+
+    if included == 0:
+        sections.append("# No matching approved artifacts found.")
+    return "\n".join(sections).strip()
+
+
+def get_config_drift_report(
+    *,
+    target_name: str,
+    rollout_status: str = "rolled_out",
+) -> dict[str, Any]:
+    target = str(target_name or "").strip().lower()
+    status = str(rollout_status or "rolled_out").strip().lower()
+    if target not in {"strict", "balanced", "aggressive"}:
+        raise ValueError("invalid_profile_target")
+    if status not in APPROVAL_STATUSES:
+        raise ValueError("invalid_rollout_status")
+
+    latest = get_latest_tuning_approval(
+        approval_kind="profile",
+        target_name=target,
+        artifact_kind="env",
+        rollout_status=status,
+    )
+    runtime = _profile_baseline()
+    if latest is None:
+        return {
+            "target_name": target,
+            "rollout_status": status,
+            "approval": None,
+            "runtime": runtime,
+            "drift": [],
+            "drift_count": 0,
+        }
+
+    payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
+    profiles = payload.get("profiles") if isinstance(payload.get("profiles"), dict) else {}
+    expected = profiles.get(target) if isinstance(profiles.get(target), dict) else {}
+    drift = []
+    for key in PROFILE_CONFIG_KEYS:
+        expected_value = expected.get(key)
+        runtime_value = runtime.get(key)
+        if expected_value != runtime_value:
+            drift.append(
+                {
+                    "config_key": key,
+                    "expected_value": expected_value,
+                    "runtime_value": runtime_value,
+                }
+            )
+    return {
+        "target_name": target,
+        "rollout_status": status,
+        "approval": latest,
+        "runtime": runtime,
+        "drift": drift,
+        "drift_count": len(drift),
+    }
+
+
+def render_tuning_approvals_html(
+    limit: int = 20,
+    *,
+    approval_kind: str | None = None,
+    artifact_kind: str | None = None,
+    target_name: str | None = None,
+    rollout_status: str | None = None,
+    query: str | None = None,
+) -> str:
+    approvals = list_tuning_approvals(
+        limit=max(1, limit),
+        approval_kind=approval_kind,
+        artifact_kind=artifact_kind,
+        target_name=target_name,
+        rollout_status=rollout_status,
+        query=query,
+    )
+    drift_sections = "".join(
+        '<section class="panel">'
+        f"<h2>Config Drift / {html.escape(profile_name.title())}</h2>"
+        + (
+            "<p>No drift against the latest rolled-out profile.</p>"
+            if drift_payload["drift_count"] == 0
+            else "<pre>"
+            + html.escape(
+                "\n".join(
+                    f"{item['config_key']}: expected {_format_diff_value(item['expected_value'])} | runtime {_format_diff_value(item['runtime_value'])}"
+                    for item in drift_payload["drift"]
+                )
+            )
+            + "</pre>"
+        )
+        + "</section>"
+        for profile_name, drift_payload in (
+            ("strict", get_config_drift_report(target_name="strict", rollout_status="rolled_out")),
+            ("balanced", get_config_drift_report(target_name="balanced", rollout_status="rolled_out")),
+            ("aggressive", get_config_drift_report(target_name="aggressive", rollout_status="rolled_out")),
+        )
+    )
     rows = "".join(
         "<tr>"
         f"<td>{html.escape(str(item.get('approval_kind') or 'unknown'))}</td>"
@@ -788,6 +970,7 @@ def render_tuning_approvals_html(limit: int = 20) -> str:
     <section class="panel">
       <h1>Tuning Approvals</h1>
       <p>Persisted review decisions for proposal and profile artifacts. These records make rollout history explicit.</p>
+      <p><strong>Filters:</strong> kind={html.escape(str(approval_kind or 'all'))}, artifact={html.escape(str(artifact_kind or 'all'))}, target={html.escape(str(target_name or 'all'))}, status={html.escape(str(rollout_status or 'all'))}, query={html.escape(str(query or 'none'))}</p>
     </section>
     <section class="panel">
       <h2>Approval Log</h2>
@@ -796,6 +979,7 @@ def render_tuning_approvals_html(limit: int = 20) -> str:
         <tbody>{rows}</tbody>
       </table>
     </section>
+    {drift_sections}
     {artifacts}
   </div>
 </body>

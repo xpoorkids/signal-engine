@@ -72,6 +72,8 @@ Features:
 - `POST /learning/tuning/approvals/{approval_id}/status`
 - `GET /learning/tuning/approvals/latest`
 - `GET /learning/tuning/approvals/latest/artifact`
+- `GET /learning/tuning/approvals/latest/bundle`
+- `GET /learning/tuning/drift`
 
 ## Running Locally
 

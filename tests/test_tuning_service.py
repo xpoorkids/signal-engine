@@ -7,10 +7,12 @@ from app.services.tuning_service import (
     build_tuning_profiles,
     build_tuning_proposals,
     create_tuning_approval,
+    get_config_drift_report,
     get_latest_tuning_approval,
     list_tuning_approvals,
     render_profile_apply_diff,
     render_profile_env_snippet,
+    render_latest_tuning_bundle_artifact,
     render_tuning_approvals_html,
     render_tuning_apply_diff,
     render_tuning_env_snippet,
@@ -209,3 +211,15 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     assert "Tuning Approvals" in approvals_html
     assert "Approval Log" in approvals_html
     assert "rolled_out" in approvals_html
+
+    filtered = list_tuning_approvals(limit=10, rollout_status="rolled_out", query="Render")
+    assert filtered
+    assert filtered[0]["approval_id"] == approval["approval_id"]
+
+    bundle = render_latest_tuning_bundle_artifact(artifact_kind="env", rollout_status="rolled_out")
+    assert "[strict]" in bundle
+    assert "PROM_MIN_LIQ_USD=" in bundle
+
+    drift = get_config_drift_report(target_name="strict", rollout_status="rolled_out")
+    assert drift["approval"] is not None
+    assert isinstance(drift["drift"], list)

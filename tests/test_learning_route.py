@@ -267,9 +267,25 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert latest_artifact_response.status_code == 200
     assert "PROM_MIN_LIQ_USD=" in latest_artifact_response.text
 
-    approvals_dashboard_response = client.get("/learning/tuning/approvals/dashboard?limit=10")
+    filtered_approvals_response = client.get("/learning/tuning/approvals?limit=10&rollout_status=rolled_out&q=render")
+    assert filtered_approvals_response.status_code == 200
+    filtered_payload = filtered_approvals_response.json()
+    assert filtered_payload["approvals"]
+
+    latest_bundle_response = client.get("/learning/tuning/approvals/latest/bundle?artifact_kind=env&rollout_status=rolled_out")
+    assert latest_bundle_response.status_code == 200
+    assert "[strict]" in latest_bundle_response.text
+
+    drift_response = client.get("/learning/tuning/drift?target_name=strict&rollout_status=rolled_out")
+    assert drift_response.status_code == 200
+    drift_payload = drift_response.json()
+    assert drift_payload["target_name"] == "strict"
+    assert "drift_count" in drift_payload
+
+    approvals_dashboard_response = client.get("/learning/tuning/approvals/dashboard?limit=10&rollout_status=rolled_out&q=render")
     assert approvals_dashboard_response.status_code == 200
     assert "Tuning Approvals" in approvals_dashboard_response.text
+    assert "Config Drift / Strict" in approvals_dashboard_response.text
 
 
 def test_learning_diagnostics_dashboard_returns_html(tmp_path, monkeypatch):
