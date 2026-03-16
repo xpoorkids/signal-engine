@@ -353,6 +353,8 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     assert final_rollout["rollout_status"] == "rolled_out"
     aligned_notifications = list_rollout_notifications(limit=30)
     assert any(item["event_type"] == "required_profile_aligned" for item in aligned_notifications)
+    active_notifications = list_rollout_notifications(limit=30, active_only=True)
+    assert active_notifications
 
 
 def test_ops_digest_worker_runs_single_iteration(monkeypatch):
@@ -410,3 +412,53 @@ def test_ops_digest_escalates_to_incident_on_heavy_gate_pressure(tmp_path, monke
     assert digest["incident_level"] == "incident"
     assert "zero_sends_with_gate_pressure" in digest["incident_reasons"]
     assert digest["severity"] in {"warning", "error"}
+
+
+def test_rollout_notification_ack_and_snooze_states(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    from app.services.tuning_service import emit_rollout_notification, update_rollout_notification_state
+
+    notification = emit_rollout_notification(
+        event_type="rollout_blocked",
+        level="warning",
+        message="Blocked rollout for strict profile",
+        target_name="strict",
+    )
+
+    active_before = list_rollout_notifications(limit=10, active_only=True)
+    assert any(item["notification_id"] == notification["notification_id"] for item in active_before)
+
+    acked = update_rollout_notification_state(
+        notification["notification_id"],
+        acknowledged=True,
+        acknowledged_by="ops-user",
+    )
+    assert acked["acknowledged_by"] == "ops-user"
+    assert acked["active"] is False
+
+    active_after_ack = list_rollout_notifications(limit=10, active_only=True)
+    assert all(item["notification_id"] != notification["notification_id"] for item in active_after_ack)
+
+    unacked = update_rollout_notification_state(
+        notification["notification_id"],
+        acknowledged=False,
+    )
+    assert unacked["acknowledged_ts"] is None
+    assert unacked["active"] is True
+
+    snoozed = update_rollout_notification_state(
+        notification["notification_id"],
+        snooze_minutes=30,
+    )
+    assert snoozed["snoozed_until_ts"] is not None
+    assert snoozed["active"] is False
+
+    unsnoozed = update_rollout_notification_state(
+        notification["notification_id"],
+        unsnooze=True,
+    )
+    assert unsnoozed["snoozed_until_ts"] is None
+    assert unsnoozed["active"] is True

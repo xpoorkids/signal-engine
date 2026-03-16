@@ -37,6 +37,7 @@ from app.services.tuning_service import (
     render_latest_tuning_bundle_artifact,
     render_tuning_profiles_html,
     render_tuning_proposals_html,
+    update_rollout_notification_state,
     update_tuning_approval_status,
 )
 
@@ -317,13 +318,30 @@ def learning_tuning_rollout_dashboard():
 
 
 @router.get("/learning/tuning/notifications")
-def learning_tuning_notifications(limit: int = 20):
-    return {"notifications": list_rollout_notifications(limit=max(1, limit))}
+def learning_tuning_notifications(limit: int = 20, active_only: bool = False):
+    return {"notifications": list_rollout_notifications(limit=max(1, limit), active_only=active_only)}
 
 
 @router.get("/learning/tuning/notifications/dashboard")
-def learning_tuning_notifications_dashboard(limit: int = 20):
-    return HTMLResponse(content=render_rollout_notifications_html(limit=max(1, limit)))
+def learning_tuning_notifications_dashboard(limit: int = 20, active_only: bool = False):
+    return HTMLResponse(content=render_rollout_notifications_html(limit=max(1, limit), active_only=active_only))
+
+
+@router.post("/learning/tuning/notifications/{notification_id}/state")
+def learning_tuning_notification_state(notification_id: str, payload: dict[str, object] = Body(...)):
+    try:
+        notification = update_rollout_notification_state(
+            notification_id,
+            acknowledged=payload.get("acknowledged") if "acknowledged" in payload else None,
+            acknowledged_by=str(payload.get("acknowledged_by") or "") or None,
+            snooze_minutes=int(payload.get("snooze_minutes")) if payload.get("snooze_minutes") is not None else None,
+            unsnooze=bool(payload.get("unsnooze") or False),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="rollout_notification_not_found")
+    return notification
 
 
 @router.get("/learning/command-center")

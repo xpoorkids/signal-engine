@@ -317,9 +317,35 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert notifications_payload["notifications"]
     assert any(item["event_type"] == "drift_resolved" for item in notifications_payload["notifications"])
 
+    active_notifications_response = client.get("/learning/tuning/notifications?limit=20&active_only=true")
+    assert active_notifications_response.status_code == 200
+    active_notifications_payload = active_notifications_response.json()
+    assert active_notifications_payload["notifications"]
+
     notifications_dashboard_response = client.get("/learning/tuning/notifications/dashboard?limit=20")
     assert notifications_dashboard_response.status_code == 200
     assert "Rollout Notifications" in notifications_dashboard_response.text
+    assert "Active" in notifications_dashboard_response.text
+
+    first_notification_id = notifications_payload["notifications"][0]["notification_id"]
+    ack_response = client.post(
+        f"/learning/tuning/notifications/{first_notification_id}/state",
+        json={"acknowledged": True, "acknowledged_by": "ops-user"},
+    )
+    assert ack_response.status_code == 200
+    ack_payload = ack_response.json()
+    assert ack_payload["acknowledged_by"] == "ops-user"
+
+    active_after_ack = client.get("/learning/tuning/notifications?limit=20&active_only=true")
+    assert active_after_ack.status_code == 200
+    assert all(item["notification_id"] != first_notification_id for item in active_after_ack.json()["notifications"])
+
+    unsnooze_response = client.post(
+        f"/learning/tuning/notifications/{first_notification_id}/state",
+        json={"acknowledged": False, "snooze_minutes": 15},
+    )
+    assert unsnooze_response.status_code == 200
+    assert unsnooze_response.json()["snoozed_until_ts"] is not None
 
     command_center_response = client.get("/learning/command-center?hours=24")
     assert command_center_response.status_code == 200

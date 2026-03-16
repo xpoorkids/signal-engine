@@ -154,7 +154,10 @@ def init() -> None:
                 payload_json TEXT NOT NULL,
                 delivery_status TEXT NOT NULL DEFAULT 'pending',
                 delivered_ts INTEGER,
-                last_error TEXT
+                last_error TEXT,
+                acknowledged_ts INTEGER,
+                acknowledged_by TEXT,
+                snoozed_until_ts INTEGER
             )
             """
         )
@@ -200,6 +203,13 @@ def init() -> None:
             c.execute("ALTER TABLE tuning_approvals ADD COLUMN deployment_sha TEXT")
         if "deployment_env" not in approval_cols:
             c.execute("ALTER TABLE tuning_approvals ADD COLUMN deployment_env TEXT")
+        notification_cols = {row[1] for row in c.execute("PRAGMA table_info(rollout_notifications)").fetchall()}
+        if "acknowledged_ts" not in notification_cols:
+            c.execute("ALTER TABLE rollout_notifications ADD COLUMN acknowledged_ts INTEGER")
+        if "acknowledged_by" not in notification_cols:
+            c.execute("ALTER TABLE rollout_notifications ADD COLUMN acknowledged_by TEXT")
+        if "snoozed_until_ts" not in notification_cols:
+            c.execute("ALTER TABLE rollout_notifications ADD COLUMN snoozed_until_ts INTEGER")
         decision_cols = {row[1] for row in c.execute("PRAGMA table_info(signal_decisions)").fetchall()}
         if "signal_id" not in decision_cols:
             c.execute("ALTER TABLE signal_decisions ADD COLUMN signal_id TEXT")

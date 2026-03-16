@@ -78,6 +78,7 @@ Features:
 - `GET /learning/tuning/rollout/dashboard`
 - `GET /learning/tuning/notifications`
 - `GET /learning/tuning/notifications/dashboard`
+- `POST /learning/tuning/notifications/{notification_id}/state`
 - `GET /learning/command-center`
 - `GET /learning/command-center/dashboard`
 - `GET /learning/ops/digest`
@@ -94,6 +95,10 @@ Ops digest behavior:
 - `SIGNAL_ENGINE_OPS_INCIDENT_NOTIFICATION_COUNT` tunes rollout-notification escalation.
 - `SIGNAL_ENGINE_OPS_CRITICAL_DRIFT_PROFILES` tunes multi-profile drift escalation.
 - `SIGNAL_ENGINE_OPS_INCIDENT_ZERO_SEND_MIN_SKIPS` tunes the zero-send-with-pressure incident trigger.
+
+Notification controls:
+- `GET /learning/tuning/notifications?active_only=true` returns only unacknowledged and unsnoozed notifications.
+- `POST /learning/tuning/notifications/{notification_id}/state` supports acknowledgment and snoozing for operator triage.
 
 ## Running Locally
 

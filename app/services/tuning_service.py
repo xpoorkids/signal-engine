@@ -265,6 +265,9 @@ def _record_rollout_notification(
         "delivery_status": "pending",
         "delivered_ts": None,
         "last_error": "",
+        "acknowledged_ts": None,
+        "acknowledged_by": "",
+        "snoozed_until_ts": None,
     }
     with sls._connect() as c:
         c.execute(
@@ -272,8 +275,8 @@ def _record_rollout_notification(
             INSERT INTO rollout_notifications (
                 notification_id, created_ts, event_type, level, target_name, approval_id,
                 deployment_service, deployment_sha, message, payload_json, delivery_status,
-                delivered_ts, last_error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                delivered_ts, last_error, acknowledged_ts, acknowledged_by, snoozed_until_ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 notification["notification_id"],
@@ -289,6 +292,9 @@ def _record_rollout_notification(
                 notification["delivery_status"],
                 notification["delivered_ts"],
                 notification["last_error"],
+                notification["acknowledged_ts"],
+                notification["acknowledged_by"],
+                notification["snoozed_until_ts"],
             ),
         )
     return notification
@@ -368,20 +374,27 @@ def emit_rollout_notification(
     return _deliver_rollout_notification(notification)
 
 
-def list_rollout_notifications(limit: int = 20) -> list[dict[str, Any]]:
+def _notification_active(row: dict[str, Any], now_ts: int | None = None) -> bool:
+    current_ts = int(now_ts or time.time())
+    acknowledged = bool(row.get("acknowledged_ts"))
+    snoozed_until = int(row.get("snoozed_until_ts") or 0)
+    return (not acknowledged) and (snoozed_until <= current_ts)
+
+
+def list_rollout_notifications(limit: int = 20, *, active_only: bool = False) -> list[dict[str, Any]]:
     with sls._connect() as c:
         rows = c.execute(
             """
             SELECT notification_id, created_ts, event_type, level, target_name, approval_id,
                    deployment_service, deployment_sha, message, payload_json, delivery_status,
-                   delivered_ts, last_error
+                   delivered_ts, last_error, acknowledged_ts, acknowledged_by, snoozed_until_ts
             FROM rollout_notifications
             ORDER BY created_ts DESC
             LIMIT ?
             """,
             (max(1, int(limit)),),
         ).fetchall()
-    return [
+    notifications = [
         {
             "notification_id": row["notification_id"],
             "created_ts": row["created_ts"],
@@ -396,9 +409,16 @@ def list_rollout_notifications(limit: int = 20) -> list[dict[str, Any]]:
             "delivery_status": row["delivery_status"] or "pending",
             "delivered_ts": row["delivered_ts"],
             "last_error": row["last_error"] or "",
+            "acknowledged_ts": row["acknowledged_ts"],
+            "acknowledged_by": row["acknowledged_by"] or "",
+            "snoozed_until_ts": row["snoozed_until_ts"],
         }
         for row in rows
     ]
+    if active_only:
+        current_ts = int(time.time())
+        notifications = [item for item in notifications if _notification_active(item, current_ts)]
+    return notifications
 
 
 def _latest_rollout_notification(event_type: str) -> dict[str, Any] | None:
@@ -407,7 +427,7 @@ def _latest_rollout_notification(event_type: str) -> dict[str, Any] | None:
             """
             SELECT notification_id, created_ts, event_type, level, target_name, approval_id,
                    deployment_service, deployment_sha, message, payload_json, delivery_status,
-                   delivered_ts, last_error
+                   delivered_ts, last_error, acknowledged_ts, acknowledged_by, snoozed_until_ts
             FROM rollout_notifications
             WHERE event_type=?
             ORDER BY created_ts DESC
@@ -431,7 +451,65 @@ def _latest_rollout_notification(event_type: str) -> dict[str, Any] | None:
         "delivery_status": row["delivery_status"] or "pending",
         "delivered_ts": row["delivered_ts"],
         "last_error": row["last_error"] or "",
+        "acknowledged_ts": row["acknowledged_ts"],
+        "acknowledged_by": row["acknowledged_by"] or "",
+        "snoozed_until_ts": row["snoozed_until_ts"],
     }
+
+
+def update_rollout_notification_state(
+    notification_id: str,
+    *,
+    acknowledged: bool | None = None,
+    acknowledged_by: str | None = None,
+    snooze_minutes: int | None = None,
+    unsnooze: bool = False,
+) -> dict[str, Any]:
+    target_id = str(notification_id or "").strip()
+    if not target_id:
+        raise ValueError("notification_id_required")
+
+    with sls._connect() as c:
+        row = c.execute(
+            """
+            SELECT notification_id FROM rollout_notifications WHERE notification_id=?
+            """,
+            (target_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(target_id)
+
+        updates: list[str] = []
+        params: list[Any] = []
+
+        if acknowledged is not None:
+            updates.append("acknowledged_ts=?")
+            params.append(int(time.time()) if acknowledged else None)
+            updates.append("acknowledged_by=?")
+            params.append(str(acknowledged_by or "").strip() if acknowledged else "")
+
+        if snooze_minutes is not None:
+            updates.append("snoozed_until_ts=?")
+            params.append(int(time.time()) + max(1, int(snooze_minutes)) * 60)
+        elif unsnooze:
+            updates.append("snoozed_until_ts=?")
+            params.append(None)
+
+        if not updates:
+            raise ValueError("no_notification_state_change")
+
+        params.append(target_id)
+        c.execute(
+            f"UPDATE rollout_notifications SET {', '.join(updates)} WHERE notification_id=?",
+            tuple(params),
+        )
+
+    updated = list_rollout_notifications(limit=200)
+    for item in updated:
+        if item["notification_id"] == target_id:
+            item["active"] = _notification_active(item)
+            return item
+    raise KeyError(target_id)
 
 
 def _ops_digest_cooldown_seconds() -> int:
@@ -502,8 +580,8 @@ def _ops_digest_signature(digest: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
-def render_rollout_notifications_html(limit: int = 20) -> str:
-    notifications = list_rollout_notifications(limit=max(1, limit))
+def render_rollout_notifications_html(limit: int = 20, *, active_only: bool = False) -> str:
+    notifications = list_rollout_notifications(limit=max(1, limit), active_only=active_only)
     rows = "".join(
         "<tr>"
         f"<td>{html.escape(str(item.get('event_type') or 'unknown'))}</td>"
@@ -511,10 +589,11 @@ def render_rollout_notifications_html(limit: int = 20) -> str:
         f"<td>{html.escape(str(item.get('target_name') or 'n/a'))}</td>"
         f"<td>{html.escape(str(item.get('deployment_service') or 'n/a'))}</td>"
         f"<td>{html.escape(str(item.get('delivery_status') or 'pending'))}</td>"
+        f"<td>{'yes' if _notification_active(item) else 'no'}</td>"
         f"<td>{html.escape(str(item.get('message') or ''))}</td>"
         "</tr>"
         for item in notifications
-    ) or "<tr><td colspan='6'>No rollout notifications recorded yet.</td></tr>"
+    ) or "<tr><td colspan='7'>No rollout notifications recorded yet.</td></tr>"
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -543,9 +622,9 @@ def render_rollout_notifications_html(limit: int = 20) -> str:
   <div class="shell">
     <section class="panel">
       <h1>Rollout Notifications</h1>
-      <p>Policy and rollout events emitted from the tuning lifecycle.</p>
+      <p>Policy and rollout events emitted from the tuning lifecycle. Filtered to {"active only" if active_only else "recent history"}.</p>
       <table>
-        <thead><tr><th>Event</th><th>Level</th><th>Target</th><th>Service</th><th>Delivery</th><th>Message</th></tr></thead>
+        <thead><tr><th>Event</th><th>Level</th><th>Target</th><th>Service</th><th>Delivery</th><th>Active</th><th>Message</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </section>
@@ -559,7 +638,7 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
     engine_health = sls.get_engine_health_digest(hours=lookback)
     diagnostics = sls.get_diagnostics_summary(hours=lookback)
     rollout_summary = get_tuning_rollout_summary()
-    notifications = list_rollout_notifications(limit=10)
+    notifications = list_rollout_notifications(limit=10, active_only=True)
     drift = {
         profile: get_config_drift_report(target_name=profile, rollout_status="rolled_out")
         for profile in ("strict", "balanced", "aggressive")
