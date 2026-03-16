@@ -80,6 +80,10 @@ Features:
 - `GET /learning/tuning/notifications/dashboard`
 - `GET /learning/command-center`
 - `GET /learning/command-center/dashboard`
+- `GET /learning/ops/digest`
+- `GET /learning/ops/digest/dashboard`
+- `GET /learning/ops/digest/text`
+- `POST /learning/ops/digest/send`
 
 ## Running Locally
 

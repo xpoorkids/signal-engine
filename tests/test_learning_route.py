@@ -333,6 +333,26 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "Operator Command Center" in command_center_dashboard_response.text
     assert "Health Snapshot" in command_center_dashboard_response.text
 
+    ops_digest_response = client.get("/learning/ops/digest?hours=24")
+    assert ops_digest_response.status_code == 200
+    ops_digest_payload = ops_digest_response.json()
+    assert "severity" in ops_digest_payload
+    assert "summary" in ops_digest_payload
+
+    ops_digest_dashboard_response = client.get("/learning/ops/digest/dashboard?hours=24")
+    assert ops_digest_dashboard_response.status_code == 200
+    assert "Ops Digest" in ops_digest_dashboard_response.text
+
+    ops_digest_text_response = client.get("/learning/ops/digest/text?hours=24")
+    assert ops_digest_text_response.status_code == 200
+    assert "Signal Engine Ops Digest" in ops_digest_text_response.text
+
+    ops_digest_send_response = client.post("/learning/ops/digest/send", json={"hours": 24, "force": True})
+    assert ops_digest_send_response.status_code == 200
+    ops_digest_send_payload = ops_digest_send_response.json()
+    assert ops_digest_send_payload["dispatched"] is True
+    assert ops_digest_send_payload["notification"]["event_type"] == "ops_digest"
+
     approvals_dashboard_response = client.get("/learning/tuning/approvals/dashboard?limit=10&rollout_status=rolled_out&q=render")
     assert approvals_dashboard_response.status_code == 200
     assert "Tuning Approvals" in approvals_dashboard_response.text

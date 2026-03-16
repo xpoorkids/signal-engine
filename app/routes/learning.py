@@ -16,12 +16,16 @@ from app.services.tuning_service import (
     build_tuning_profiles,
     build_tuning_proposals,
     create_tuning_approval,
+    dispatch_ops_digest,
     get_config_drift_report,
     get_latest_tuning_approval,
+    get_ops_digest,
     get_operator_command_center,
     get_tuning_rollout_summary,
     list_rollout_notifications,
     list_tuning_approvals,
+    render_ops_digest_html,
+    render_ops_digest_text,
     render_operator_command_center_html,
     render_profile_apply_diff,
     render_profile_env_snippet,
@@ -330,6 +334,28 @@ def learning_command_center(hours: int = 24):
 @router.get("/learning/command-center/dashboard")
 def learning_command_center_dashboard(hours: int = 24):
     return HTMLResponse(content=render_operator_command_center_html(hours=max(1, hours)))
+
+
+@router.get("/learning/ops/digest")
+def learning_ops_digest(hours: int = 24):
+    return get_ops_digest(hours=max(1, hours))
+
+
+@router.get("/learning/ops/digest/dashboard")
+def learning_ops_digest_dashboard(hours: int = 24):
+    return HTMLResponse(content=render_ops_digest_html(hours=max(1, hours)))
+
+
+@router.get("/learning/ops/digest/text")
+def learning_ops_digest_text(hours: int = 24):
+    return PlainTextResponse(content=render_ops_digest_text(hours=max(1, hours)))
+
+
+@router.post("/learning/ops/digest/send")
+def learning_ops_digest_send(payload: dict[str, object] = Body(default={})):
+    hours = max(1, int(payload.get("hours") or 24))
+    force = bool(payload.get("force") or False)
+    return dispatch_ops_digest(hours=hours, force=force)
 
 
 @router.get("/learning/diagnostics/dashboard")

@@ -640,6 +640,213 @@ def render_operator_command_center_html(hours: int = 24) -> str:
 </html>"""
 
 
+def get_ops_digest(hours: int = 24) -> dict[str, Any]:
+    center = get_operator_command_center(hours=max(1, hours))
+    engine_health = center.get("engine_health") if isinstance(center.get("engine_health"), dict) else {}
+    diagnostics = center.get("diagnostics") if isinstance(center.get("diagnostics"), dict) else {}
+    rollout_summary = center.get("rollout_summary") if isinstance(center.get("rollout_summary"), dict) else {}
+    drift = center.get("drift") if isinstance(center.get("drift"), dict) else {}
+    notifications = center.get("notifications") if isinstance(center.get("notifications"), list) else []
+
+    health_status = str(engine_health.get("status") or "unknown")
+    counts = diagnostics.get("counts_by_decision") if isinstance(diagnostics.get("counts_by_decision"), dict) else {}
+    sent_count = int(counts.get("sent") or 0)
+    skip_count = int(counts.get("candidate_gate_skip") or 0)
+    block_count = int(counts.get("promotion_block") or 0)
+
+    drift_profiles = sorted(name for name, payload in drift.items() if int(payload.get("drift_count") or 0) > 0)
+    blocking_notifications = [
+        item for item in notifications
+        if str(item.get("level") or "").lower() in {"warning", "error"}
+    ]
+    top_skip_reason = ""
+    top_skip_reasons = diagnostics.get("top_skip_reasons")
+    if isinstance(top_skip_reasons, list) and top_skip_reasons:
+        top_skip_reason = str(top_skip_reasons[0].get("reason") or "")
+
+    recommended_actions = center.get("recommended_actions") if isinstance(center.get("recommended_actions"), list) else []
+    highlights: list[str] = [
+        f"Engine status: {health_status}",
+        f"Sent {sent_count} alerts over the last {int(center.get('lookback_hours') or hours)}h",
+        f"Skipped {skip_count} candidates and blocked {block_count} promotions",
+    ]
+    if top_skip_reason:
+        highlights.append(f"Top skip reason: {top_skip_reason}")
+    if drift_profiles:
+        highlights.append(f"Runtime drift detected for: {', '.join(drift_profiles)}")
+    if blocking_notifications:
+        highlights.append(f"Open rollout notifications: {len(blocking_notifications)}")
+
+    severity = "info"
+    attention_reasons: list[str] = []
+    if health_status in {"cold", "quiet", "blocked"}:
+        severity = "warning"
+        attention_reasons.append(f"engine_{health_status}")
+    if drift_profiles:
+        severity = "warning"
+        attention_reasons.append("config_drift")
+    if blocking_notifications:
+        severity = "warning"
+        attention_reasons.append("rollout_notifications")
+    if sent_count == 0 and (skip_count > 0 or block_count > 0):
+        severity = "warning"
+        attention_reasons.append("no_sends_with_pressure")
+
+    if health_status == "cold" and sent_count == 0 and skip_count == 0 and block_count == 0:
+        severity = "error"
+        attention_reasons.append("possible_stall")
+
+    summary_line = (
+        f"{health_status.title()} engine over the last {int(center.get('lookback_hours') or hours)}h. "
+        f"Sent {sent_count}, skipped {skip_count}, blocked {block_count}."
+    )
+    if drift_profiles:
+        summary_line += f" Drift on {', '.join(drift_profiles)}."
+    elif top_skip_reason:
+        summary_line += f" Primary gate pressure: {top_skip_reason}."
+
+    return {
+        "lookback_hours": int(center.get("lookback_hours") or hours),
+        "severity": severity,
+        "needs_attention": bool(attention_reasons),
+        "attention_reasons": attention_reasons,
+        "summary": summary_line,
+        "highlights": highlights[:6],
+        "recommended_actions": recommended_actions[:5],
+        "counts": {
+            "sent": sent_count,
+            "candidate_gate_skip": skip_count,
+            "promotion_block": block_count,
+        },
+        "top_skip_reason": top_skip_reason or None,
+        "drift_profiles": drift_profiles,
+        "notification_count": len(blocking_notifications),
+        "command_center": center,
+        "rollout_alignment": rollout_summary.get("worker_engine_alignment") or [],
+    }
+
+
+def render_ops_digest_text(hours: int = 24) -> str:
+    digest = get_ops_digest(hours=max(1, hours))
+    lines = [
+        "# Signal Engine Ops Digest",
+        f"Severity: {digest['severity']}",
+        f"Window: {digest['lookback_hours']}h",
+        f"Summary: {digest['summary']}",
+        "",
+        "Highlights:",
+    ]
+    lines.extend(f"- {item}" for item in digest.get("highlights") or ["No highlights."])
+    lines.append("")
+    lines.append("Recommended Actions:")
+    actions = digest.get("recommended_actions") or []
+    lines.extend(f"- {item}" for item in actions if item)
+    if not actions:
+        lines.append("- No immediate actions.")
+    return "\n".join(lines).strip()
+
+
+def render_ops_digest_html(hours: int = 24) -> str:
+    digest = get_ops_digest(hours=max(1, hours))
+    highlights = digest.get("highlights") if isinstance(digest.get("highlights"), list) else []
+    actions = digest.get("recommended_actions") if isinstance(digest.get("recommended_actions"), list) else []
+    counts = digest.get("counts") if isinstance(digest.get("counts"), dict) else {}
+
+    highlight_rows = "".join(f"<li>{html.escape(str(item))}</li>" for item in highlights) or "<li>No highlights.</li>"
+    action_rows = "".join(f"<li>{html.escape(str(item))}</li>" for item in actions) or "<li>No immediate actions.</li>"
+    count_cards = "".join(
+        '<div class="metric-card">'
+        f"<span>{html.escape(label.replace('_', ' ').title())}</span>"
+        f"<strong>{int(value)}</strong>"
+        "</div>"
+        for label, value in counts.items()
+    )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ops Digest</title>
+  <style>
+    :root {{
+      --bg: #081119;
+      --panel: rgba(11, 24, 38, 0.9);
+      --line: rgba(116, 153, 186, 0.16);
+      --text: #edf5fb;
+      --muted: #8ca4b8;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; color: var(--text); font-family: "Segoe UI", sans-serif; background: linear-gradient(180deg, #071018 0%, #09131c 100%); }}
+    .shell {{ max-width: 1100px; margin: 0 auto; padding: 24px 18px 36px; }}
+    .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 22px; padding: 20px; margin-top: 18px; }}
+    .metric-grid {{ display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap:16px; }}
+    .metric-card {{ background: rgba(18, 34, 52, 0.96); border: 1px solid var(--line); border-radius: 18px; padding: 16px; display:flex; flex-direction:column; gap:8px; }}
+    .metric-card span {{ color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }}
+    .metric-card strong {{ font-size: 24px; }}
+    h1 {{ margin: 0 0 8px; font-size: 34px; }}
+    h2 {{ margin: 0 0 12px; font-size: 18px; }}
+    p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
+    ul {{ margin: 0; padding-left: 18px; }}
+    @media (max-width: 900px) {{ .metric-grid {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="panel">
+      <h1>Ops Digest</h1>
+      <p><strong>Severity:</strong> {html.escape(str(digest.get('severity') or 'info'))} &nbsp; <strong>Window:</strong> {int(digest.get('lookback_hours') or hours)}h</p>
+      <p>{html.escape(str(digest.get('summary') or ''))}</p>
+    </section>
+    <section class="panel">
+      <h2>Decision Counts</h2>
+      <div class="metric-grid">{count_cards}</div>
+    </section>
+    <section class="panel">
+      <h2>Highlights</h2>
+      <ul>{highlight_rows}</ul>
+    </section>
+    <section class="panel">
+      <h2>Recommended Actions</h2>
+      <ul>{action_rows}</ul>
+    </section>
+  </div>
+</body>
+</html>"""
+
+
+def dispatch_ops_digest(hours: int = 24, *, force: bool = False) -> dict[str, Any]:
+    digest = get_ops_digest(hours=max(1, hours))
+    if not force and not bool(digest.get("needs_attention")):
+        return {
+            "dispatched": False,
+            "reason": "no_attention_needed",
+            "digest": digest,
+        }
+
+    notification = emit_rollout_notification(
+        event_type="ops_digest",
+        level=str(digest.get("severity") or "info"),
+        message=str(digest.get("summary") or "Signal Engine ops digest"),
+        target_name="command-center",
+        deployment_service=_default_deployment_metadata().get("deployment_service") or None,
+        deployment_sha=_default_deployment_metadata().get("deployment_sha") or None,
+        payload={
+            "lookback_hours": digest.get("lookback_hours"),
+            "needs_attention": digest.get("needs_attention"),
+            "attention_reasons": digest.get("attention_reasons"),
+            "highlights": digest.get("highlights"),
+            "recommended_actions": digest.get("recommended_actions"),
+            "counts": digest.get("counts"),
+        },
+    )
+    return {
+        "dispatched": True,
+        "notification": notification,
+        "digest": digest,
+    }
+
+
 def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:
     summary = sls.get_diagnostics_summary(hours=max(1, hours))
     guidance = summary.get("threshold_guidance") if isinstance(summary.get("threshold_guidance"), list) else []

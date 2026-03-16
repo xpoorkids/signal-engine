@@ -7,12 +7,16 @@ from app.services.tuning_service import (
     build_tuning_profiles,
     build_tuning_proposals,
     create_tuning_approval,
+    dispatch_ops_digest,
     get_config_drift_report,
     get_latest_tuning_approval,
+    get_ops_digest,
     get_operator_command_center,
     list_rollout_notifications,
     get_tuning_rollout_summary,
     list_tuning_approvals,
+    render_ops_digest_html,
+    render_ops_digest_text,
     render_operator_command_center_html,
     render_profile_apply_diff,
     render_profile_env_snippet,
@@ -269,6 +273,27 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     command_center_html = render_operator_command_center_html(hours=24)
     assert "Operator Command Center" in command_center_html
     assert "Health Snapshot" in command_center_html
+
+    digest = get_ops_digest(hours=24)
+    assert digest["severity"] in {"info", "warning", "error"}
+    assert "summary" in digest
+    assert "highlights" in digest
+
+    digest_text = render_ops_digest_text(hours=24)
+    assert "Signal Engine Ops Digest" in digest_text
+    assert "Summary:" in digest_text
+
+    digest_html = render_ops_digest_html(hours=24)
+    assert "Ops Digest" in digest_html
+    assert "Recommended Actions" in digest_html
+
+    skipped_dispatch = dispatch_ops_digest(hours=24, force=False)
+    assert skipped_dispatch["dispatched"] is False
+    assert skipped_dispatch["reason"] == "no_attention_needed"
+
+    forced_dispatch = dispatch_ops_digest(hours=24, force=True)
+    assert forced_dispatch["dispatched"] is True
+    assert forced_dispatch["notification"]["event_type"] == "ops_digest"
 
     monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SERVICE", "engine")
     monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SHA", "diff999")
