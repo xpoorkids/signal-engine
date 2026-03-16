@@ -665,6 +665,65 @@ def test_run_policy_replay_persists_run_and_results(tmp_path, monkeypatch):
     assert latest["run_id"] == replay["run_id"]
 
 
+def test_policy_profiles_and_rollouts_resolve_live_policy(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    profile = sls.create_policy_profile(
+        policy_name="adaptive_candidate",
+        policy_version="v1",
+        config={"candidate_creator_min": 0.55, "promoted_liquidity_min": 22000.0},
+        description="candidate strict profile",
+        created_by="ops",
+    )
+    rollout = sls.activate_policy_rollout(
+        policy_name="adaptive_candidate",
+        policy_version="v1",
+        rollout_mode="active",
+        stage_scope="candidate",
+        traffic_percent=100,
+        priority=10,
+        activated_by="ops",
+    )
+    resolved = sls.resolve_live_policy("candidate", token="token-123")
+    default_promoted = sls.resolve_live_policy("promoted", token="token-123")
+
+    assert profile["policy_name"] == "adaptive_candidate"
+    assert rollout["rollout_mode"] == "active"
+    assert resolved["policy_name"] == "adaptive_candidate"
+    assert resolved["config"]["candidate_creator_min"] == 0.55
+    assert default_promoted["policy_name"]
+
+
+def test_canary_rollout_resolution_respects_token_bucket(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    sls.create_policy_profile(
+        policy_name="canary_policy",
+        policy_version="v1",
+        config={"promoted_buyers_15m_min": 99},
+        created_by="ops",
+    )
+    sls.activate_policy_rollout(
+        policy_name="canary_policy",
+        policy_version="v1",
+        rollout_mode="canary",
+        stage_scope="promoted",
+        traffic_percent=5,
+        priority=1,
+        activated_by="ops",
+    )
+
+    resolved_low = sls.resolve_live_policy("promoted", token="")
+    resolved_high = sls.resolve_live_policy("promoted", token="zzzzzz")
+
+    assert resolved_low["policy_name"] == "canary_policy"
+    assert resolved_high["policy_name"] != "canary_policy"
+
+
 def test_diagnostics_summary_builds_reason_quality_scorecards(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

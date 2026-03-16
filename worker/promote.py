@@ -59,7 +59,7 @@ from worker.creator_score import compute_creator_score
 from worker.progression import metrics_improved
 from worker.recheck import schedule_rechecks, update_stop_counters, min_liquidity_gate
 from app.services.signal_metrics import compute_confidence_score, metric_state
-from app.services.signal_learning_service import record_signal_decision
+from app.services.signal_learning_service import record_signal_decision, resolve_live_policy
 from app.services.state_service import (
     init as state_init,
     upsert_seen,
@@ -78,18 +78,16 @@ from app.services.wallet_service import wallet_risk_score
 
 logger = logging.getLogger(__name__)
 logger.info("[PROMOTE FILE LOADED]")
-POLICY_NAME = os.getenv("SIGNAL_ENGINE_POLICY_NAME", "").strip() or "deterministic_engine"
-POLICY_VERSION = (
-    os.getenv("SIGNAL_ENGINE_POLICY_VERSION", "").strip()
-    or os.getenv("RENDER_GIT_COMMIT", "").strip()
-    or "deterministic-v1"
-)
 
 
-def _candidate_send_eligible(attention_score: float | None, creator_score: float) -> bool:
+def _candidate_send_eligible(
+    attention_score: float | None,
+    creator_score: float,
+    creator_min: float = EARLY_CREATOR_MIN,
+) -> bool:
     attn = float(attention_score or 0.0)
     # Creator quality can help borderline setups, but should not push weak attention through on its own.
-    return attn >= 0.50 or (creator_score >= EARLY_CREATOR_MIN and attn >= 0.35)
+    return attn >= 0.50 or (creator_score >= creator_min and attn >= 0.35)
 
 
 def _record_decision(
@@ -104,6 +102,8 @@ def _record_decision(
     confidence_score: float | None = None,
     creator_score: float | None = None,
     lifecycle: str | None = None,
+    policy_name: str | None = None,
+    policy_version: str | None = None,
 ) -> None:
     try:
         extra = e.extra if isinstance(e.extra, dict) else {}
@@ -145,8 +145,8 @@ def _record_decision(
             action_taken=action_taken,
             reasons=reasons,
             features=features,
-            policy_name=POLICY_NAME,
-            policy_version=POLICY_VERSION,
+            policy_name=policy_name,
+            policy_version=policy_version,
             attention_score=attention_score,
             risk_score=risk_score,
             confidence_score=confidence_score,
@@ -166,6 +166,16 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
     out: list[Event] = []
     logger.info("[PROMOTE HANDLER CALLED] type=%s token=%s", e.type, e.token)
     logger.info("[promote-enter] token=%s", e.token)
+    candidate_policy = resolve_live_policy("candidate", e.token)
+    promoted_policy = resolve_live_policy("promoted", e.token)
+    candidate_config = candidate_policy.get("config") if isinstance(candidate_policy.get("config"), dict) else {}
+    promoted_config = promoted_policy.get("config") if isinstance(promoted_policy.get("config"), dict) else {}
+    creator_min = float(candidate_config.get("candidate_creator_min") or EARLY_CREATOR_MIN)
+    promoted_confidence_min = float(promoted_config.get("promoted_confidence_min") or 0.80)
+    promoted_attention_min = float(promoted_config.get("promoted_attention_min") or PROMOTION_MIN_ATTENTION)
+    promoted_risk_max = float(promoted_config.get("promoted_risk_max") or PROMOTION_MAX_RISK)
+    promoted_liquidity_min = float(promoted_config.get("promoted_liquidity_min") or PROM_MIN_LIQ_USD)
+    promoted_buyers_15m_min = int(promoted_config.get("promoted_buyers_15m_min") or 30)
 
     # Early events without token: state only, never alert or promote
     if e.type.startswith("early") and not e.token:
@@ -677,6 +687,8 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     confidence_score=e.confidence,
                     creator_score=float(creator_score_info.get("score") or 0.0),
                     lifecycle=lifecycle,
+                    policy_name=candidate_policy.get("policy_name"),
+                    policy_version=candidate_policy.get("policy_version"),
                 )
             else:
                 if attention_unavailable:
@@ -692,9 +704,9 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     attn_reasons,
                 )
                 creator_score_value = float(creator_score_info.get("score") or 0.0)
-                creator_ok = creator_score_value >= EARLY_CREATOR_MIN
+                creator_ok = creator_score_value >= creator_min
                 attention_improving = (attention_score or 0.0) > prev_attention
-                send_eligible = _candidate_send_eligible(attention_score, creator_score_value)
+                send_eligible = _candidate_send_eligible(attention_score, creator_score_value, creator_min)
                 allow_rate = allow_candidate_rate_limit(EARLY_WATCH_RATE_LIMIT_PER_HOUR) if send_eligible else False
                 should_send = send_eligible and allow_rate
                 extra["candidate_rate_limit_allowed"] = allow_rate
@@ -716,6 +728,8 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                             confidence_score=e.confidence,
                             creator_score=creator_score_value,
                             lifecycle=lifecycle,
+                            policy_name=candidate_policy.get("policy_name"),
+                            policy_version=candidate_policy.get("policy_version"),
                         )
                 elif not send_eligible:
                     logger.info(
@@ -734,6 +748,8 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                         confidence_score=e.confidence,
                         creator_score=creator_score_value,
                         lifecycle=lifecycle,
+                        policy_name=candidate_policy.get("policy_name"),
+                        policy_version=candidate_policy.get("policy_version"),
                     )
 
                 extra["lifecycle"] = lifecycle
@@ -759,6 +775,8 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     confidence_score=e.confidence,
                     creator_score=creator_score_value,
                     lifecycle=lifecycle,
+                    policy_name=candidate_policy.get("policy_name"),
+                    policy_version=candidate_policy.get("policy_version"),
                 )
                 logger.info(
                     "[candidate-progress] token=%s improved=%s keys=%s",
@@ -881,7 +899,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         liq_usd = 0.0
         if isinstance(extra, dict):
             liq_usd = float((extra.get("dex_summary") or {}).get("liquidity_usd") or 0.0)
-        liquidity_factor = min(liq_usd / PROM_MIN_LIQ_USD, 1.0) if PROM_MIN_LIQ_USD > 0 else 0.0
+        liquidity_factor = min(liq_usd / promoted_liquidity_min, 1.0) if promoted_liquidity_min > 0 else 0.0
         creator_score = float(creator_score_info.get("score") or 0.0)
         e.confidence, confidence_components = compute_confidence_score(
             attention_score=attention_score,
@@ -949,44 +967,46 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     confidence_score=e.confidence,
                     creator_score=creator_score,
                     lifecycle=str(extra.get("lifecycle") or ""),
+                    policy_name=promoted_policy.get("policy_name"),
+                    policy_version=promoted_policy.get("policy_version"),
                 )
             else:
                 pass
 
-        if e.confidence >= 0.80 and e.token and not ts.is_promoted:
+        if e.confidence >= promoted_confidence_min and e.token and not ts.is_promoted:
             dex_summary = extra.get("dex_summary") if isinstance(extra, dict) else None
             has_dex_pool = bool(dex_summary)
             if not has_dex_pool:
                 logger.info("[promotion-block] reason=no_dex_pool token=%s", e.token)
-                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["no_dex_pool"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="unknown")
+                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["no_dex_pool"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="unknown", policy_name=promoted_policy.get("policy_name"), policy_version=promoted_policy.get("policy_version"))
                 return out
             liq = float((dex_summary or {}).get("liquidity_usd") or 0.0)
             buyers_15m = int(attn_metrics.get("unique_buyers_15m") or 0)
             lp_drain = bool(extra.get("lp_drain"))
             creator_sell = bool(extra.get("creator_sold"))
-            if liq < PROM_MIN_LIQ_USD:
+            if liq < promoted_liquidity_min:
                 logger.info("[promotion-block] reason=liq_low token=%s liq=%.0f", e.token, liq)
-                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["liq_low"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
+                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["liq_low"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex", policy_name=promoted_policy.get("policy_name"), policy_version=promoted_policy.get("policy_version"))
                 return out
-            if buyers_15m < 30:
+            if buyers_15m < promoted_buyers_15m_min:
                 logger.info("[promotion-block] reason=buyers_low token=%s buyers_15m=%s", e.token, buyers_15m)
-                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["buyers_low"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
+                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["buyers_low"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex", policy_name=promoted_policy.get("policy_name"), policy_version=promoted_policy.get("policy_version"))
                 return out
-            if attention_score is None or attention_score < PROMOTION_MIN_ATTENTION:
+            if attention_score is None or attention_score < promoted_attention_min:
                 logger.info("[promotion-block] reason=attention_low token=%s attention=%s", e.token, attention_score)
-                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["attention_low"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
+                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["attention_low"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex", policy_name=promoted_policy.get("policy_name"), policy_version=promoted_policy.get("policy_version"))
                 return out
-            if risk_score is not None and risk_score >= PROMOTION_MAX_RISK:
+            if risk_score is not None and risk_score >= promoted_risk_max:
                 logger.info("[promotion-block] reason=risk_high token=%s risk=%.2f", e.token, risk_score)
-                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["risk_high"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
+                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["risk_high"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex", policy_name=promoted_policy.get("policy_name"), policy_version=promoted_policy.get("policy_version"))
                 return out
             if lp_drain:
                 logger.info("[promotion-block] reason=lp_drain token=%s", e.token)
-                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["lp_drain"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
+                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["lp_drain"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex", policy_name=promoted_policy.get("policy_name"), policy_version=promoted_policy.get("policy_version"))
                 return out
             if creator_sell:
                 logger.info("[promotion-block] reason=creator_sell token=%s", e.token)
-                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["creator_sell"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
+                _record_decision(e, stage="promoted", decision="promotion_block", reasons=["creator_sell"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex", policy_name=promoted_policy.get("policy_name"), policy_version=promoted_policy.get("policy_version"))
                 return out
 
             confirm_count = update_promo_confirm(e.token, True)
@@ -996,7 +1016,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 confirm_count,
             )
             if confirm_count < 2:
-                _record_decision(e, stage="promoted", decision="promotion_wait_confirm", reasons=[f"confirm_count:{confirm_count}"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
+                _record_decision(e, stage="promoted", decision="promotion_wait_confirm", reasons=[f"confirm_count:{confirm_count}"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex", policy_name=promoted_policy.get("policy_name"), policy_version=promoted_policy.get("policy_version"))
                 return out
             gate_pass, gate_reasons = evaluate_alert_gate(
                 "promoted",
@@ -1008,13 +1028,13 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     e.token,
                     gate_reasons,
                 )
-                _record_decision(e, stage="promoted", decision="promotion_gate_skip", reasons=gate_reasons, attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
+                _record_decision(e, stage="promoted", decision="promotion_gate_skip", reasons=gate_reasons, attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex", policy_name=promoted_policy.get("policy_name"), policy_version=promoted_policy.get("policy_version"))
                 return out
             logger.info(
                 "[promotion-validated] token=%s score=%.3f threshold=%.3f",
                 e.token,
                 e.confidence,
-                0.80,
+                promoted_confidence_min,
             )
             ts.is_promoted = True
             if isinstance(extra, dict):
@@ -1031,6 +1051,6 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     signature=e.signature,
                 )
             )
-            _record_decision(e, stage="promoted", decision="promoted_sent", action_taken="emit", reasons=["promotion_gate_passed"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex")
+            _record_decision(e, stage="promoted", decision="promoted_sent", action_taken="emit", reasons=["promotion_gate_passed"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex", policy_name=promoted_policy.get("policy_name"), policy_version=promoted_policy.get("policy_version"))
 
     return out

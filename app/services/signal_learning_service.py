@@ -239,6 +239,37 @@ def init() -> None:
             )
             """
         )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS policy_profiles (
+                profile_id TEXT PRIMARY KEY,
+                created_ts INTEGER NOT NULL,
+                policy_name TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                description TEXT,
+                config_json TEXT NOT NULL,
+                created_by TEXT,
+                UNIQUE(policy_name, policy_version)
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS policy_rollouts (
+                rollout_id TEXT PRIMARY KEY,
+                created_ts INTEGER NOT NULL,
+                policy_name TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                rollout_mode TEXT NOT NULL,
+                rollout_status TEXT NOT NULL DEFAULT 'active',
+                stage_scope TEXT,
+                traffic_percent INTEGER NOT NULL DEFAULT 100,
+                priority INTEGER NOT NULL DEFAULT 100,
+                activated_by TEXT,
+                notes TEXT
+            )
+            """
+        )
         c.execute("CREATE INDEX IF NOT EXISTS idx_signals_alert_ts ON signals(alert_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_signal_jobs_due ON signal_snapshot_jobs(status, due_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_signal ON signal_snapshots(signal_id, horizon_minutes)")
@@ -247,6 +278,8 @@ def init() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_ts ON signal_decisions(created_ts, decision)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_replay_runs_ts ON policy_replay_runs(created_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_replay_results_run ON policy_replay_results(run_id, changed)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_policy_profiles_name ON policy_profiles(policy_name, created_ts DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_policy_rollouts_active ON policy_rollouts(rollout_status, priority, created_ts DESC)")
         approval_cols = {row[1] for row in c.execute("PRAGMA table_info(tuning_approvals)").fetchall()}
         if "rollout_status" not in approval_cols:
             c.execute("ALTER TABLE tuning_approvals ADD COLUMN rollout_status TEXT NOT NULL DEFAULT 'pending'")
@@ -453,6 +486,286 @@ def _normalize_policy_descriptor(
         if value is not None:
             descriptor[key] = value
     return descriptor
+
+
+def _policy_fingerprint(token: str | None) -> int:
+    raw = str(token or "")
+    if not raw:
+        return 0
+    return sum(ord(ch) for ch in raw) % 100
+
+
+def _public_policy_profile(record: sqlite3.Row | tuple[Any, ...]) -> dict[str, Any]:
+    row = record
+    config_json = row[5] if isinstance(row, tuple) else row["config_json"]
+    try:
+        config = json.loads(config_json or "{}")
+        if not isinstance(config, dict):
+            config = {}
+    except Exception:
+        config = {}
+    return {
+        "profile_id": row[0] if isinstance(row, tuple) else row["profile_id"],
+        "created_ts": row[1] if isinstance(row, tuple) else row["created_ts"],
+        "policy_name": row[2] if isinstance(row, tuple) else row["policy_name"],
+        "policy_version": row[3] if isinstance(row, tuple) else row["policy_version"],
+        "description": row[4] if isinstance(row, tuple) else row["description"],
+        "config": config,
+        "created_by": row[6] if isinstance(row, tuple) else row["created_by"],
+    }
+
+
+def create_policy_profile(
+    *,
+    policy_name: str,
+    policy_version: str,
+    config: dict[str, Any] | None = None,
+    description: str | None = None,
+    created_by: str | None = None,
+) -> dict[str, Any]:
+    _ensure_schema()
+    name = str(policy_name or "").strip()
+    version = str(policy_version or "").strip()
+    if not name:
+        raise ValueError("policy_name_required")
+    if not version:
+        raise ValueError("policy_version_required")
+    profile_id = uuid.uuid4().hex
+    created_ts = int(time.time())
+    resolved = _normalize_policy_descriptor(policy_name=name, policy_version=version, overrides=config)
+    with _connect() as c:
+        c.execute(
+            """
+            INSERT INTO policy_profiles (
+                profile_id, created_ts, policy_name, policy_version, description, config_json, created_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                profile_id,
+                created_ts,
+                name,
+                version,
+                description,
+                _json_dumps(resolved),
+                created_by,
+            ),
+        )
+        row = c.execute(
+            """
+            SELECT profile_id, created_ts, policy_name, policy_version, description, config_json, created_by
+            FROM policy_profiles
+            WHERE profile_id=?
+            """,
+            (profile_id,),
+        ).fetchone()
+    return _public_policy_profile(row)
+
+
+def list_policy_profiles(limit: int = 20, policy_name: str | None = None) -> list[dict[str, Any]]:
+    _ensure_schema()
+    clauses: list[str] = []
+    params: list[Any] = []
+    if policy_name:
+        clauses.append("policy_name = ?")
+        params.append(policy_name)
+    params.append(max(1, limit))
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with _connect() as c:
+        rows = c.execute(
+            f"""
+            SELECT profile_id, created_ts, policy_name, policy_version, description, config_json, created_by
+            FROM policy_profiles
+            {where_sql}
+            ORDER BY created_ts DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+    return [_public_policy_profile(row) for row in rows]
+
+
+def activate_policy_rollout(
+    *,
+    policy_name: str,
+    policy_version: str,
+    rollout_mode: str = "active",
+    rollout_status: str = "active",
+    stage_scope: str | None = None,
+    traffic_percent: int = 100,
+    priority: int = 100,
+    activated_by: str | None = None,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    _ensure_schema()
+    mode = str(rollout_mode or "").strip() or "active"
+    if mode not in {"active", "shadow", "canary"}:
+        raise ValueError("invalid_rollout_mode")
+    name = str(policy_name or "").strip()
+    version = str(policy_version or "").strip()
+    if not name or not version:
+        raise ValueError("policy_identity_required")
+    if not list_policy_profiles(limit=1, policy_name=name):
+        raise ValueError("policy_profile_not_found")
+    rollout_id = uuid.uuid4().hex
+    created_ts = int(time.time())
+    effective_traffic = max(0, min(100, int(traffic_percent)))
+    with _connect() as c:
+        if mode == "active":
+            c.execute(
+                """
+                UPDATE policy_rollouts
+                SET rollout_status='superseded'
+                WHERE rollout_status='active'
+                  AND rollout_mode='active'
+                  AND (stage_scope IS ? OR stage_scope = ?)
+                """,
+                (stage_scope, stage_scope),
+            )
+        c.execute(
+            """
+            INSERT INTO policy_rollouts (
+                rollout_id, created_ts, policy_name, policy_version, rollout_mode, rollout_status,
+                stage_scope, traffic_percent, priority, activated_by, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                rollout_id,
+                created_ts,
+                name,
+                version,
+                mode,
+                rollout_status,
+                stage_scope,
+                effective_traffic,
+                priority,
+                activated_by,
+                notes,
+            ),
+        )
+        row = c.execute(
+            """
+            SELECT rollout_id, created_ts, policy_name, policy_version, rollout_mode, rollout_status,
+                   stage_scope, traffic_percent, priority, activated_by, notes
+            FROM policy_rollouts
+            WHERE rollout_id=?
+            """,
+            (rollout_id,),
+        ).fetchone()
+    return {
+        "rollout_id": row[0],
+        "created_ts": row[1],
+        "policy_name": row[2],
+        "policy_version": row[3],
+        "rollout_mode": row[4],
+        "rollout_status": row[5],
+        "stage_scope": row[6],
+        "traffic_percent": row[7],
+        "priority": row[8],
+        "activated_by": row[9],
+        "notes": row[10],
+    }
+
+
+def list_policy_rollouts(limit: int = 20, active_only: bool = False) -> list[dict[str, Any]]:
+    _ensure_schema()
+    params: list[Any] = [max(1, limit)]
+    where_sql = "WHERE rollout_status='active'" if active_only else ""
+    with _connect() as c:
+        rows = c.execute(
+            f"""
+            SELECT rollout_id, created_ts, policy_name, policy_version, rollout_mode, rollout_status,
+                   stage_scope, traffic_percent, priority, activated_by, notes
+            FROM policy_rollouts
+            {where_sql}
+            ORDER BY priority ASC, created_ts DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+    return [
+        {
+            "rollout_id": row[0],
+            "created_ts": row[1],
+            "policy_name": row[2],
+            "policy_version": row[3],
+            "rollout_mode": row[4],
+            "rollout_status": row[5],
+            "stage_scope": row[6],
+            "traffic_percent": row[7],
+            "priority": row[8],
+            "activated_by": row[9],
+            "notes": row[10],
+        }
+        for row in rows
+    ]
+
+
+def resolve_live_policy(stage: str, token: str | None = None) -> dict[str, Any]:
+    _ensure_schema()
+    stage_value = str(stage or "").strip() or None
+    with _connect() as c:
+        rows = c.execute(
+            """
+            SELECT r.rollout_id, r.policy_name, r.policy_version, r.rollout_mode, r.stage_scope,
+                   r.traffic_percent, r.priority, p.config_json
+            FROM policy_rollouts r
+            JOIN policy_profiles p
+              ON p.policy_name = r.policy_name
+             AND p.policy_version = r.policy_version
+            WHERE r.rollout_status='active'
+            ORDER BY r.priority ASC, r.created_ts DESC
+            """
+        ).fetchall()
+    selected_rollout = None
+    fallback_active = None
+    token_bucket = _policy_fingerprint(token)
+    for row in rows:
+        stage_scope = row[4]
+        if stage_scope and stage_scope != stage_value:
+            continue
+        rollout_mode = row[3]
+        traffic_percent = int(row[5] or 0)
+        if rollout_mode == "shadow":
+            continue
+        if fallback_active is None and rollout_mode == "active":
+            fallback_active = row
+        if rollout_mode == "canary" and token_bucket >= traffic_percent:
+            continue
+        selected_rollout = row
+        break
+    row = selected_rollout or fallback_active
+    if row is None:
+        descriptor = _default_policy_descriptor()
+        return {
+            "source": "default",
+            "rollout_id": None,
+            "policy_name": descriptor["policy_name"],
+            "policy_version": descriptor["policy_version"],
+            "rollout_mode": "default",
+            "stage_scope": stage_value,
+            "traffic_percent": 100,
+            "config": descriptor,
+        }
+    config = json.loads(row[7] or "{}")
+    if not isinstance(config, dict):
+        config = {}
+    resolved = _normalize_policy_descriptor(
+        policy_name=str(row[1]),
+        policy_version=str(row[2]),
+        overrides=config,
+    )
+    return {
+        "source": "rollout",
+        "rollout_id": row[0],
+        "policy_name": row[1],
+        "policy_version": row[2],
+        "rollout_mode": row[3],
+        "stage_scope": row[4],
+        "traffic_percent": row[5],
+        "config": resolved,
+    }
 
 
 def _normalize_feature_map(features: dict[str, Any] | None) -> dict[str, Any]:

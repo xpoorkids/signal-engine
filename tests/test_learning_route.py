@@ -293,6 +293,57 @@ def test_learning_policy_replay_routes_run_and_fetch_results(tmp_path, monkeypat
     assert by_id_payload["results"][0]["shadow_action"] == "hold"
 
 
+def test_learning_policy_profile_and_rollout_routes(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    client = TestClient(main.app)
+    profile_response = client.post(
+        "/learning/policy/profiles",
+        json={
+            "policy_name": "adaptive_candidate",
+            "policy_version": "v1",
+            "description": "candidate strict profile",
+            "created_by": "ops",
+            "config": {"candidate_creator_min": 0.55, "promoted_liquidity_min": 22000.0},
+        },
+    )
+    assert profile_response.status_code == 200
+    profile_payload = profile_response.json()
+    assert profile_payload["policy_name"] == "adaptive_candidate"
+
+    list_profiles_response = client.get("/learning/policy/profiles?limit=10")
+    assert list_profiles_response.status_code == 200
+    assert list_profiles_response.json()["profiles"]
+
+    rollout_response = client.post(
+        "/learning/policy/rollouts",
+        json={
+            "policy_name": "adaptive_candidate",
+            "policy_version": "v1",
+            "rollout_mode": "active",
+            "stage_scope": "candidate",
+            "traffic_percent": 100,
+            "priority": 10,
+            "activated_by": "ops",
+        },
+    )
+    assert rollout_response.status_code == 200
+    rollout_payload = rollout_response.json()
+    assert rollout_payload["policy_name"] == "adaptive_candidate"
+
+    list_rollouts_response = client.get("/learning/policy/rollouts?active_only=true")
+    assert list_rollouts_response.status_code == 200
+    assert list_rollouts_response.json()["rollouts"]
+
+    resolve_response = client.get("/learning/policy/resolve?stage=candidate&token=token-123")
+    assert resolve_response.status_code == 200
+    resolve_payload = resolve_response.json()
+    assert resolve_payload["policy_name"] == "adaptive_candidate"
+    assert resolve_payload["config"]["candidate_creator_min"] == 0.55
+
+
 def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

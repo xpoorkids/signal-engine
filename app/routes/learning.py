@@ -2,6 +2,8 @@ from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from app.services.signal_learning_service import (
+    activate_policy_rollout,
+    create_policy_profile,
     evaluate_shadow_policy,
     get_engine_health_digest,
     get_diagnostics_summary,
@@ -9,8 +11,11 @@ from app.services.signal_learning_service import (
     get_latest_learning_report,
     get_latest_policy_replay,
     get_learning_report,
+    list_policy_profiles,
+    list_policy_rollouts,
     get_policy_trace_summary,
     get_policy_replay,
+    resolve_live_policy,
     run_policy_replay,
     render_engine_health_html,
     render_diagnostics_html,
@@ -129,6 +134,53 @@ def learning_diagnostics_summary(hours: int = 24):
 @router.get("/learning/policy/traces")
 def learning_policy_traces(hours: int = 24, limit: int = 50, stage: str | None = None, decision: str | None = None):
     return get_policy_trace_summary(hours=max(1, hours), limit=max(1, limit), stage=stage, decision=decision)
+
+
+@router.get("/learning/policy/profiles")
+def learning_policy_profiles(limit: int = 20, policy_name: str | None = None):
+    return {"profiles": list_policy_profiles(limit=max(1, limit), policy_name=policy_name)}
+
+
+@router.post("/learning/policy/profiles")
+def learning_policy_profiles_create(payload: dict[str, object] = Body(...)):
+    try:
+        return create_policy_profile(
+            policy_name=str(payload.get("policy_name") or ""),
+            policy_version=str(payload.get("policy_version") or ""),
+            config=payload.get("config") if isinstance(payload.get("config"), dict) else None,
+            description=str(payload.get("description") or "") or None,
+            created_by=str(payload.get("created_by") or "") or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/learning/policy/rollouts")
+def learning_policy_rollouts(limit: int = 20, active_only: bool = False):
+    return {"rollouts": list_policy_rollouts(limit=max(1, limit), active_only=active_only)}
+
+
+@router.post("/learning/policy/rollouts")
+def learning_policy_rollouts_create(payload: dict[str, object] = Body(...)):
+    try:
+        return activate_policy_rollout(
+            policy_name=str(payload.get("policy_name") or ""),
+            policy_version=str(payload.get("policy_version") or ""),
+            rollout_mode=str(payload.get("rollout_mode") or "active"),
+            rollout_status=str(payload.get("rollout_status") or "active"),
+            stage_scope=str(payload.get("stage_scope") or "") or None,
+            traffic_percent=int(payload.get("traffic_percent") or 100),
+            priority=int(payload.get("priority") or 100),
+            activated_by=str(payload.get("activated_by") or "") or None,
+            notes=str(payload.get("notes") or "") or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/learning/policy/resolve")
+def learning_policy_resolve(stage: str, token: str | None = None):
+    return resolve_live_policy(stage=stage, token=token)
 
 
 @router.get("/learning/policy/shadow")
