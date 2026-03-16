@@ -198,6 +198,12 @@ def truncate_text(value: str, limit: int) -> str:
     return value[: limit - 1] + "…"
 
 
+def _clean_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return " ".join(str(value).split())
+
+
 def _score_band(score: float | None, *, invert: bool = False) -> str:
     if score is None:
         return "Unavailable"
@@ -391,15 +397,15 @@ def _build_flow_section(metrics: dict, attention_score: float | None, risk_score
     sells = metrics.get("txns_m5_sells")
     flow_bias = _flow_bias_label(buys if isinstance(buys, int) else None, sells if isinstance(sells, int) else None)
     momentum = _momentum_label(attention_score, metrics)
-    structure = f"Attention {_score_band(attention_score).lower()} / risk {_risk_band(risk_score).lower()}"
+    structure = f"{_score_band(attention_score)} attention | {_risk_band(risk_score)} risk"
     lines = []
     if buys is not None or sells is not None:
-        lines.append(f"- {_status_dot('green')} Up 5m Buy Flow: `{buys if buys is not None else 'N/A'}`")
-        lines.append(f"- {_status_dot('red')} Down 5m Sell Flow: `{sells if sells is not None else 'N/A'}`")
+        lines.append(f"- {_status_dot('green')} Buy Flow 5m: `{buys if buys is not None else 'N/A'}`")
+        lines.append(f"- {_status_dot('red')} Sell Flow 5m: `{sells if sells is not None else 'N/A'}`")
     if flow_bias:
         lines.append(f"- {_flow_dot(flow_bias)} Flow Bias: `{flow_bias}`")
     lines.append(f"- {_momentum_dot(momentum)} Momentum: `{momentum}`")
-    lines.append(f"- Structure: `{structure}`")
+    lines.append(f"- Market Structure: `{structure}`")
     return "\n".join(lines[:5])
 
 
@@ -415,6 +421,60 @@ def _build_social_section(e: Event) -> str:
     if x_likes:
         lines.append(f"- X Engagement: `{x_likes} likes`")
     return "\n".join(lines[:3])
+
+
+def _build_intelligence_section(e: Event) -> str:
+    extra = e.extra if isinstance(e.extra, dict) else {}
+    attention_metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
+    risk_flags = extra.get("risk_flags") if isinstance(extra.get("risk_flags"), dict) else {}
+
+    lines: list[str] = []
+    reason_stack = _reason_stack(e)
+    if reason_stack and reason_stack != "- flow + structure":
+        lines.extend(line for line in reason_stack.splitlines() if line)
+
+    unique_buyers_5m = attention_metrics.get("unique_buyers_5m")
+    unique_buyers_15m = attention_metrics.get("unique_buyers_15m")
+    burst_count_60s = attention_metrics.get("burst_count_60s")
+    tracked_hits = int(attention_metrics.get("tracked_wallet_hits") or 0)
+    kol_hits = int(attention_metrics.get("kol_wallet_hits") or 0)
+    boosts = int(attention_metrics.get("dexscreener_boosts_count") or 0)
+    x_mentions = int(attention_metrics.get("x_tweet_count") or 0)
+    x_authors = int(attention_metrics.get("x_unique_authors") or 0)
+    narrative_hits = attention_metrics.get("narrative_hits") if isinstance(attention_metrics.get("narrative_hits"), list) else []
+
+    if unique_buyers_5m:
+        lines.append(f"- 5m buyer breadth: `{unique_buyers_5m}`")
+    if unique_buyers_15m:
+        lines.append(f"- 15m buyer breadth: `{unique_buyers_15m}`")
+    if burst_count_60s:
+        lines.append(f"- 1m burst strength: `{burst_count_60s}`")
+    if tracked_hits or kol_hits:
+        lines.append(f"- Smart / KOL wallets: `{tracked_hits} / {kol_hits}`")
+    if boosts:
+        lines.append(f"- DexScreener boosts: `{boosts}`")
+    if x_mentions or x_authors:
+        lines.append(f"- X momentum: `{x_mentions} mentions / {x_authors} authors`")
+    if narrative_hits:
+        narrative = ", ".join(_clean_text(str(item)) for item in narrative_hits[:2] if str(item).strip())
+        if narrative:
+            lines.append(f"- Narrative: `{narrative}`")
+
+    if risk_flags.get("holder_concentration"):
+        lines.append("- Holder concentration flagged")
+    if risk_flags.get("wallet_cluster"):
+        lines.append("- Wallet clustering detected")
+    if risk_flags.get("bot_cadence"):
+        lines.append("- Bot-like cadence detected")
+
+    if not lines:
+        return "- flow + structure"
+
+    deduped: list[str] = []
+    for line in lines:
+        if line not in deduped:
+            deduped.append(line)
+    return "\n".join(deduped[:7])
 
 
 def _build_quality_section(e: Event, metrics: dict, risk_score: float | None, confidence_score: float | None) -> str:
@@ -453,7 +513,7 @@ def _market_tile_fields(metrics: dict, liq_mc: str) -> list[dict]:
     liq_name = "LIQ  Unavailable" if liq_value is None else f"LIQ  {liq}"
     return [
         {
-            "name": liq_name,
+            "name": liq_name.replace("  ", " | ", 1),
             "value": _section_lines(
                 [
                     f"Market Cap: {mc}",
@@ -464,7 +524,7 @@ def _market_tile_fields(metrics: dict, liq_mc: str) -> list[dict]:
             "inline": True,
         },
         {
-            "name": f"VOL5  {vol5}",
+            "name": f"VOL5 | {vol5}",
             "value": _section_lines(
                 [
                     f"5m Volume: {vol5}",
@@ -475,7 +535,7 @@ def _market_tile_fields(metrics: dict, liq_mc: str) -> list[dict]:
             "inline": True,
         },
         {
-            "name": f"AGE  {age}",
+            "name": f"AGE | {age}",
             "value": _section_lines(
                 [
                     f"Age / M5: {age} / {chg5}",
@@ -518,7 +578,7 @@ def _signal_title(signal_type: str, symbol: str) -> str:
         "risk_alert": "🔴 SE RISK ALERT",
     }
     prefix = mapping.get(signal_type, "🔵 SE WATCH")
-    return truncate_text(f"{prefix}  ${symbol}", 256)
+    return truncate_text(f"{prefix} ${symbol}", 256)
 
 
 def _decision_field(extra: dict | None, confidence_pct: str, lifecycle: str, conviction: str, confidence_score: float | None, risk_score: float | None) -> dict:
@@ -537,7 +597,7 @@ def _decision_field(extra: dict | None, confidence_pct: str, lifecycle: str, con
 
 
 def _trigger_field(e: Event) -> dict | None:
-    value = _reason_stack(e)
+    value = _build_intelligence_section(e)
     if not value or value == "- flow + structure":
         return None
     return {"name": "Signal Intelligence", "value": _section_lines([value]), "inline": False}
@@ -862,9 +922,14 @@ def _build_overview_lines(
     name: str,
     full_addr: str,
 ) -> list[str]:
+    clean_symbol = _clean_text(symbol).upper() or "UNK"
+    clean_name = _clean_text(name) or clean_symbol
+    if clean_symbol and clean_name.upper().endswith(f"(${clean_symbol})"):
+        clean_name = _clean_text(clean_name[: -(len(clean_symbol) + 3)])
     return [
-        f"**Token:** {name} (`${symbol}`)",
-        f"**Contract:** `{full_addr}`",
+        f"**Asset:** {clean_name}",
+        f"**Ticker:** `${clean_symbol}`",
+        f"**Contract:** `{shorten_address(full_addr, head=8, tail=8)}`",
     ]
 
 
@@ -943,7 +1008,6 @@ def _format_candidate_like(e: Event, description: str) -> dict:
                 "value": _section_lines([_build_quality_section(e, metrics, vm.risk_score, vm.confidence_score)]),
                 "inline": True,
             },
-            _social_field(e),
             _trigger_field(e),
             _links_field(token, metrics),
         ]
@@ -951,10 +1015,10 @@ def _format_candidate_like(e: Event, description: str) -> dict:
 
     embed = {
         "title": _signal_title(signal_type, vm.symbol),
-        "description": f"{_summary_blurb(vm.attention_score, vm.risk_score, vm.lifecycle)}\n",
+        "description": _summary_blurb(vm.attention_score, vm.risk_score, vm.lifecycle),
         "color": get_signal_color(signal_type, vm.risk_score),
         "fields": fields,
-        "footer": {"text": truncate_text(f"Signal Engine  Radar Deck  {e.type}", 2048)},
+        "footer": {"text": truncate_text(f"Signal Engine | Radar Deck | {e.type}", 2048)},
     }
     return {"embeds": [embed]}
 
@@ -1022,7 +1086,6 @@ def format_discord(e: Event) -> dict:
                     "value": _section_lines([_build_quality_section(e, metrics, vm.risk_score, vm.confidence_score)]),
                     "inline": True,
                 },
-                _social_field(e),
                 _trigger_field(e),
                 {"name": "Why Promoted", "value": _section_lines([f"- {_pretty_reason(r)}" for r in reasons]), "inline": False} if reasons else None,
                 _links_field(token, metrics),
@@ -1031,10 +1094,10 @@ def format_discord(e: Event) -> dict:
 
         embed = {
             "title": _signal_title(signal_type, vm.symbol),
-            "description": f"{_summary_blurb(vm.attention_score, vm.risk_score, vm.lifecycle)}\n",
+            "description": _summary_blurb(vm.attention_score, vm.risk_score, vm.lifecycle),
             "color": get_signal_color(signal_type, vm.risk_score),
             "fields": fields,
-            "footer": {"text": truncate_text(f"Signal Engine  Alpha Deck  {e.type}", 2048)},
+            "footer": {"text": truncate_text(f"Signal Engine | Alpha Deck | {e.type}", 2048)},
         }
         return {"embeds": [embed]}
 

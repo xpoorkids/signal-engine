@@ -103,7 +103,7 @@ def test_format_discord_missing_metrics_do_not_render_as_zero():
     assert "0.00" not in identity_field
     assert "Insufficient data" in quality_field
     assert "Not computed" in command_view
-    assert "..." not in identity_field
+    assert f"**Contract:** `{shorten_address(event.token, head=8, tail=8)}`" in identity_field
 
 
 def test_review_html_missing_metrics_render_semantic_state():
@@ -173,11 +173,14 @@ def test_format_discord_regression_sample_payload_keeps_real_risk():
     identity_field = _candidate_field(embed, "Token Identity")
     quality_field = _candidate_field(embed, "Quality")
     flow_field = _candidate_field(embed, "Flow + Structure")
+    intelligence_field = _candidate_field(embed, "Signal Intelligence")
 
-    assert "**Token:** Test Token (`$TEST`)" in identity_field
+    assert "**Asset:** Test Token" in identity_field
+    assert "**Ticker:** `$TEST`" in identity_field
     assert "🟡 Risk Score: `0.47" in quality_field
     assert "Flow Bias:" in flow_field
-    assert "**Contract:** `So11111111111111111111111111111111111111112`" in identity_field
+    assert f"**Contract:** `{shorten_address(event.token, head=8, tail=8)}`" in identity_field
+    assert "X momentum:" in intelligence_field
 
 
 def test_format_discord_fetches_metadata_when_identity_missing(monkeypatch):
@@ -205,7 +208,8 @@ def test_format_discord_fetches_metadata_when_identity_missing(monkeypatch):
     embed = format_discord(event)["embeds"][0]
     identity_field = _candidate_field(embed, "Token Identity")
 
-    assert "**Token:** Real Token (`$REAL`)" in identity_field
+    assert "**Asset:** Real Token" in identity_field
+    assert "**Ticker:** `$REAL`" in identity_field
 
 
 def test_format_discord_actions_include_ops_links_when_public_base_url_set(monkeypatch):
@@ -272,11 +276,12 @@ def test_format_discord_overview_uses_new_hierarchy():
     embed = format_discord(event)["embeds"][0]
 
     assert embed["fields"][0]["name"] == "Command View"
-    assert "**Token:** Pumpers (`$PUMPERS`)" in _candidate_field(embed, "Token Identity")
-    assert "🟢 Up 5m Buy Flow:" in _candidate_field(embed, "Flow + Structure")
+    assert "**Asset:** Pumpers" in _candidate_field(embed, "Token Identity")
+    assert "**Ticker:** `$PUMPERS`" in _candidate_field(embed, "Token Identity")
+    assert "🟢 Buy Flow 5m:" in _candidate_field(embed, "Flow + Structure")
     assert "`LIQ $25,482`" in _candidate_field(embed, "Market Snapshot")
-    assert "VOL5  $141.4K" == _candidate_field_name_contains(embed, "VOL5")
-    assert "AGE  3.2m" == _candidate_field_name_contains(embed, "AGE")
+    assert "VOL5 | $141.4K" == _candidate_field_name_contains(embed, "VOL5")
+    assert "AGE | 3.2m" == _candidate_field_name_contains(embed, "AGE")
     assert "\n" not in embed["description"].strip()
     assert "Watch-only" in embed["description"] or "Constructive setup" in embed["description"]
 
@@ -315,9 +320,9 @@ def test_risk_alert_uses_colored_semantic_indicators():
     quality_field = _candidate_field(embed, "Quality")
 
     assert "defensive" in embed["description"].lower() or "risk is elevated" in embed["description"].lower()
-    assert "LIQ  Unavailable" == _candidate_field_name_contains(embed, "LIQ")
+    assert "LIQ | Unavailable" == _candidate_field_name_contains(embed, "LIQ")
     assert "🟢 Flow Bias: `Buy-side`" in flow_field
-    assert "Attention mixed / risk high" in flow_field
+    assert "Mixed attention | High risk" in flow_field
     assert "🔴 Risk Score: `0.70 (High)`" in quality_field
 
 
