@@ -312,6 +312,10 @@ def _verification_attribution(
 
 
 def _normalize_approval(row: Any) -> dict[str, Any]:
+    try:
+        payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+    except Exception:
+        payload = {}
     return {
         "approval_id": row["approval_id"],
         "created_ts": row["created_ts"],
@@ -330,7 +334,7 @@ def _normalize_approval(row: Any) -> dict[str, Any]:
         "verification_summary": row["verification_summary"] or "",
         "notes": row["notes"] or "",
         "artifact_text": row["artifact_text"],
-        "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
+        "payload": payload,
     }
 
 
@@ -1272,12 +1276,20 @@ def _rollout_family_scorecards(
     focus_set = {str(item).strip() for item in (focus_families or []) if str(item).strip()}
 
     for approval in approvals:
-        verification = _build_rollout_verification_payload(
-            approval,
-            baseline_hours=baseline_hours,
-            post_hours=post_hours,
-            include_family_scorecards=False,
-        )
+        try:
+            verification = _build_rollout_verification_payload(
+                approval,
+                baseline_hours=baseline_hours,
+                post_hours=post_hours,
+                include_family_scorecards=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[rollout-family-scorecards] skipping approval_id=%s due to verification error: %s",
+                approval.get("approval_id"),
+                exc,
+            )
+            continue
         families = verification.get("changed_config", {}).get("changed_config_families") if isinstance(verification.get("changed_config"), dict) else []
         for family_info in families if isinstance(families, list) else []:
             if not isinstance(family_info, dict):
@@ -1822,7 +1834,12 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
                 ][:3]
                 if attribution.get("summary"):
                     summary_text = str(attribution.get("summary"))
-            except KeyError:
+            except Exception as exc:
+                logger.warning(
+                    "[command-center] verification lookup failed for approval_id=%s: %s",
+                    approval_id,
+                    exc,
+                )
                 pass
         verification_cards.append(
             {

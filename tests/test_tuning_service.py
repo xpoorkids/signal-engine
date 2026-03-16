@@ -795,3 +795,48 @@ def test_rollout_verification_worker_runs_single_iteration(monkeypatch):
         assert str(exc) == "stop-loop"
 
     assert calls == ["24:24:10:False"]
+
+
+def test_command_center_tolerates_malformed_approval_payload(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO tuning_approvals (
+                approval_id, created_ts, approved_by, approval_kind, target_name,
+                artifact_kind, lookback_hours, rollout_status, rolled_out_ts,
+                deployment_service, deployment_sha, deployment_env,
+                verification_status, verification_ts, verification_summary,
+                notes, artifact_text, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "bad-approval-1",
+                1_773_620_000,
+                "ops",
+                "profile",
+                "strict",
+                "env",
+                24,
+                "rolled_out",
+                1_773_620_100,
+                "worker",
+                "sha-bad",
+                "production",
+                "",
+                None,
+                "",
+                "bad payload row",
+                "PROM_MIN_LIQ_USD=10000",
+                "{not-json",
+            ),
+        )
+
+    center = get_operator_command_center(hours=24)
+    assert "rollout_verification_cards" in center
+
+    html = render_operator_command_center_html(hours=24)
+    assert "Operator Command Center" in html
