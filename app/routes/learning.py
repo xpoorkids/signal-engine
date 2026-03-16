@@ -3,11 +3,15 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from app.services.signal_learning_service import (
     activate_policy_rollout,
+    auto_create_policy_approvals,
+    auto_promote_policy_canaries,
+    auto_schedule_policy_canaries,
     create_policy_approval,
     create_policy_profile,
     evaluate_shadow_policy,
     evaluate_policy_guardrails,
     get_engine_health_digest,
+    get_policy_automation_status,
     get_diagnostics_summary,
     get_learning_digest,
     get_latest_learning_report,
@@ -21,6 +25,7 @@ from app.services.signal_learning_service import (
     get_policy_trace_summary,
     get_policy_replay,
     resolve_live_policy,
+    run_policy_automation_cycle,
     run_policy_replay,
     render_engine_health_html,
     render_diagnostics_html,
@@ -244,6 +249,34 @@ def learning_policy_guardrails_evaluate(payload: dict[str, object] = Body(defaul
         min_samples=max(1, int(payload.get("min_samples") or 3)),
         max_negative_rate=float(payload.get("max_negative_rate") or 60.0),
         auto_apply=bool(payload.get("auto_apply") or False),
+    )
+
+
+@router.get("/learning/policy/automation/status")
+def learning_policy_automation_status():
+    return get_policy_automation_status()
+
+
+@router.post("/learning/policy/automation/approvals")
+def learning_policy_automation_approvals(payload: dict[str, object] = Body(default={})):
+    return auto_create_policy_approvals(limit=int(payload.get("limit") or 20))
+
+
+@router.post("/learning/policy/automation/canaries")
+def learning_policy_automation_canaries(payload: dict[str, object] = Body(default={})):
+    return auto_schedule_policy_canaries(hours=max(1, int(payload.get("hours") or 24)))
+
+
+@router.post("/learning/policy/automation/promote")
+def learning_policy_automation_promote(payload: dict[str, object] = Body(default={})):
+    return auto_promote_policy_canaries(hours=max(1, int(payload.get("hours") or 24)))
+
+
+@router.post("/learning/policy/automation/run")
+def learning_policy_automation_run(payload: dict[str, object] = Body(default={})):
+    return run_policy_automation_cycle(
+        hours=max(1, int(payload.get("hours") or 24)),
+        replay_limit=int(payload.get("replay_limit") or 20),
     )
 
 

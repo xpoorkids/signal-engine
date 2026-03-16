@@ -1932,6 +1932,445 @@ def get_latest_policy_replay() -> dict[str, Any] | None:
     return get_policy_replay(str(row[0]))
 
 
+def list_policy_replays(limit: int = 20) -> list[dict[str, Any]]:
+    _ensure_schema()
+    with _connect() as c:
+        rows = c.execute(
+            """
+            SELECT summary_json
+            FROM policy_replay_runs
+            ORDER BY created_ts DESC
+            LIMIT ?
+            """,
+            (max(1, limit),),
+        ).fetchall()
+    replays: list[dict[str, Any]] = []
+    for row in rows:
+        if not row or not row[0]:
+            continue
+        try:
+            payload = json.loads(row[0] or "{}")
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            replays.append(payload)
+    return replays
+
+
+def _policy_automation_config() -> dict[str, Any]:
+    return {
+        "replay_limit": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTOMATION_REPLAY_LIMIT", "20"))),
+        "auto_approval_min_trace_count": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_APPROVAL_MIN_TRACE_COUNT", "1"))),
+        "auto_approval_min_changed_count": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_APPROVAL_MIN_CHANGED_COUNT", "1"))),
+        "auto_approval_min_change_rate": float(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_APPROVAL_MIN_CHANGE_RATE", "1.0")),
+        "auto_approval_max_negative_rate": float(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_APPROVAL_MAX_NEGATIVE_RATE", "35.0")),
+        "auto_approval_min_positive_outcomes": max(0, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_APPROVAL_MIN_POSITIVE_OUTCOMES", "0"))),
+        "canary_traffic_percent": max(1, min(100, int(os.getenv("SIGNAL_ENGINE_POLICY_CANARY_TRAFFIC_PERCENT", "10")))),
+        "canary_priority": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_CANARY_PRIORITY", "5"))),
+        "auto_promote_min_samples": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_PROMOTE_MIN_SAMPLES", "3"))),
+        "auto_promote_max_negative_rate": float(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_PROMOTE_MAX_NEGATIVE_RATE", "34.0")),
+        "auto_promote_min_positive_rate": float(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_PROMOTE_MIN_POSITIVE_RATE", "50.0")),
+    }
+
+
+def get_policy_automation_status() -> dict[str, Any]:
+    config = _policy_automation_config()
+    active_rollouts = list_policy_rollouts(limit=50, active_only=True)
+    return {
+        "config": config,
+        "recent_replays": list_policy_replays(limit=min(10, int(config["replay_limit"]))),
+        "pending_approvals": [
+            item
+            for item in list_policy_approvals(limit=20)
+            if str(item.get("approval_status") or "") in {"draft", "approved"}
+        ],
+        "active_rollouts": active_rollouts,
+        "active_canaries": [item for item in active_rollouts if item.get("rollout_mode") == "canary"],
+    }
+
+
+def _find_policy_profile(policy_name: str, policy_version: str) -> dict[str, Any] | None:
+    for item in list_policy_profiles(limit=200, policy_name=policy_name):
+        if str(item.get("policy_version") or "") == str(policy_version or ""):
+            return item
+    return None
+
+
+def _insert_policy_rollout_event(
+    *,
+    rollout_id: str | None,
+    approval_id: str | None,
+    policy_name: str,
+    policy_version: str,
+    event_type: str,
+    event_status: str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    _ensure_schema()
+    with _connect() as c:
+        c.execute(
+            """
+            INSERT INTO policy_rollout_events (
+                event_id, created_ts, rollout_id, approval_id, policy_name, policy_version,
+                event_type, event_status, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                int(time.time()),
+                rollout_id,
+                approval_id,
+                policy_name,
+                policy_version,
+                event_type,
+                event_status,
+                _json_dumps(payload or {}),
+            ),
+        )
+
+
+def _emit_policy_notification(
+    *,
+    event_type: str,
+    level: str,
+    message: str,
+    target_name: str,
+    approval_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    try:
+        from app.services.tuning_service import emit_rollout_notification
+
+        emit_rollout_notification(
+            event_type=event_type,
+            level=level,
+            message=message,
+            target_name=target_name,
+            approval_id=approval_id,
+            payload=payload,
+        )
+    except Exception:
+        logger.exception("[policy-automation] notification_failed event_type=%s target=%s", event_type, target_name)
+
+
+def _replay_negative_rate(replay: dict[str, Any]) -> float:
+    impact = replay.get("impact") if isinstance(replay.get("impact"), dict) else {}
+    positive = int(impact.get("positive_outcomes") or 0)
+    negative = int(impact.get("negative_outcomes") or 0)
+    total = positive + negative
+    return round((negative / total) * 100.0, 1) if total else 0.0
+
+
+def _auto_approval_exists(source_ref: str) -> bool:
+    for item in list_policy_approvals(limit=200):
+        if str(item.get("source_ref") or "") == source_ref:
+            return True
+    return False
+
+
+def auto_create_policy_approvals(limit: int | None = None) -> dict[str, Any]:
+    config = _policy_automation_config()
+    replay_limit = max(1, int(limit or config["replay_limit"]))
+    created: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for replay in list_policy_replays(limit=replay_limit):
+        shadow_policy = replay.get("shadow_policy") if isinstance(replay.get("shadow_policy"), dict) else {}
+        policy_name = str(shadow_policy.get("policy_name") or "")
+        policy_version = str(shadow_policy.get("policy_version") or "")
+        run_id = str(replay.get("run_id") or "")
+        if not policy_name or not policy_version or not run_id:
+            continue
+        if _auto_approval_exists(run_id):
+            skipped.append({"run_id": run_id, "policy_name": policy_name, "reason": "approval_exists"})
+            continue
+        if _find_policy_profile(policy_name, policy_version) is None:
+            skipped.append({"run_id": run_id, "policy_name": policy_name, "reason": "profile_missing"})
+            continue
+        trace_count = int(replay.get("trace_count") or 0)
+        changed_count = int(replay.get("changed_count") or 0)
+        change_rate = float(replay.get("change_rate") or 0.0)
+        negative_rate = _replay_negative_rate(replay)
+        impact = replay.get("impact") if isinstance(replay.get("impact"), dict) else {}
+        positive_outcomes = int(impact.get("positive_outcomes") or 0)
+        if trace_count < int(config["auto_approval_min_trace_count"]):
+            skipped.append({"run_id": run_id, "policy_name": policy_name, "reason": "trace_count_too_low"})
+            continue
+        if changed_count < int(config["auto_approval_min_changed_count"]):
+            skipped.append({"run_id": run_id, "policy_name": policy_name, "reason": "changed_count_too_low"})
+            continue
+        if change_rate < float(config["auto_approval_min_change_rate"]):
+            skipped.append({"run_id": run_id, "policy_name": policy_name, "reason": "change_rate_too_low"})
+            continue
+        if negative_rate > float(config["auto_approval_max_negative_rate"]):
+            skipped.append({"run_id": run_id, "policy_name": policy_name, "reason": "negative_rate_too_high"})
+            continue
+        if positive_outcomes < int(config["auto_approval_min_positive_outcomes"]):
+            skipped.append({"run_id": run_id, "policy_name": policy_name, "reason": "positive_outcomes_too_low"})
+            continue
+        approval = create_policy_approval(
+            policy_name=policy_name,
+            policy_version=policy_version,
+            source_type="replay",
+            source_ref=run_id,
+            notes=(
+                f"Auto-approved from replay {run_id}: traces={trace_count}, changed={changed_count}, "
+                f"change_rate={change_rate}%, replay_negative_rate={negative_rate}%"
+            ),
+            approved_by="policy-automation",
+        )
+        _insert_policy_rollout_event(
+            rollout_id=None,
+            approval_id=str(approval.get("approval_id") or ""),
+            policy_name=policy_name,
+            policy_version=policy_version,
+            event_type="auto_approval_created",
+            event_status=str(approval.get("approval_status") or "approved"),
+            payload={
+                "run_id": run_id,
+                "trace_count": trace_count,
+                "changed_count": changed_count,
+                "change_rate": change_rate,
+                "replay_negative_rate": negative_rate,
+            },
+        )
+        _emit_policy_notification(
+            event_type="policy_auto_approval_created",
+            level="info",
+            message=f"Auto-approved {policy_name}@{policy_version} from replay {run_id}.",
+            target_name=policy_name,
+            approval_id=str(approval.get("approval_id") or ""),
+            payload={"run_id": run_id, "policy_version": policy_version},
+        )
+        created.append(approval)
+    return {
+        "config": config,
+        "created": created,
+        "skipped": skipped,
+    }
+
+
+def _canary_metrics_for_rollout(rollout: dict[str, Any], hours: int) -> dict[str, Any]:
+    cutoff = int(time.time()) - max(1, hours) * 3600
+    with _connect() as c:
+        rows = c.execute(
+            """
+            SELECT ss.outcome_label
+            FROM signal_decisions sd
+            LEFT JOIN signal_snapshots ss
+              ON ss.signal_id = sd.signal_id
+             AND ss.horizon_minutes = (
+                SELECT MAX(horizon_minutes)
+                FROM signal_snapshots ss2
+                WHERE ss2.signal_id = sd.signal_id
+             )
+            WHERE sd.policy_name=?
+              AND sd.policy_version=?
+              AND sd.created_ts >= ?
+              AND (? IS NULL OR sd.stage = ?)
+            """,
+            (
+                rollout["policy_name"],
+                rollout["policy_version"],
+                cutoff,
+                rollout.get("stage_scope"),
+                rollout.get("stage_scope"),
+            ),
+        ).fetchall()
+    total = 0
+    positive = 0
+    negative = 0
+    pending = 0
+    for row in rows:
+        outcome_label = str((row[0] if row else None) or "pending")
+        if outcome_label == "pending":
+            pending += 1
+            continue
+        total += 1
+        if outcome_label in {"worked", "strong_continuation"}:
+            positive += 1
+        elif outcome_label in {"failed", "faded"}:
+            negative += 1
+    return {
+        "samples": total,
+        "positive": positive,
+        "negative": negative,
+        "pending": pending,
+        "positive_rate": round((positive / total) * 100.0, 1) if total else 0.0,
+        "negative_rate": round((negative / total) * 100.0, 1) if total else 0.0,
+    }
+
+
+def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
+    config = _policy_automation_config()
+    rollouts = list_policy_rollouts(limit=200, active_only=False)
+    approvals = list_policy_approvals(limit=200, approval_status="approved")
+    scheduled: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for approval in approvals:
+        policy_name = str(approval.get("policy_name") or "")
+        policy_version = str(approval.get("policy_version") or "")
+        approval_id = str(approval.get("approval_id") or "")
+        if any(
+            str(item.get("policy_name") or "") == policy_name
+            and str(item.get("policy_version") or "") == policy_version
+            and str(item.get("rollout_status") or "") in {"active", "promoted"}
+            for item in rollouts
+        ):
+            skipped.append({"approval_id": approval_id, "policy_name": policy_name, "reason": "rollout_exists"})
+            continue
+        stage_scope = None
+        source_ref = str(approval.get("source_ref") or "")
+        if str(approval.get("source_type") or "") == "replay" and source_ref:
+            replay = get_policy_replay(source_ref)
+            if replay is not None:
+                stage_scope = str(replay.get("stage") or "") or None
+        baseline = resolve_live_policy(stage_scope or "promoted")
+        rollout = activate_policy_rollout(
+            policy_name=policy_name,
+            policy_version=policy_version,
+            rollout_mode="canary",
+            rollout_status="active",
+            stage_scope=stage_scope,
+            traffic_percent=int(config["canary_traffic_percent"]),
+            priority=int(config["canary_priority"]),
+            activated_by="policy-automation",
+            notes=f"Auto-canary from approval {approval_id}",
+        )
+        update_policy_approval_status(
+            approval_id,
+            approval_status="rolled_out",
+            approved_by="policy-automation",
+            notes=f"Auto-canary started with {int(config['canary_traffic_percent'])}% traffic",
+        )
+        _insert_policy_rollout_event(
+            rollout_id=str(rollout.get("rollout_id") or ""),
+            approval_id=approval_id,
+            policy_name=policy_name,
+            policy_version=policy_version,
+            event_type="auto_canary_started",
+            event_status="active",
+            payload={
+                "stage_scope": stage_scope,
+                "traffic_percent": int(config["canary_traffic_percent"]),
+                "baseline_policy_name": baseline.get("policy_name"),
+                "baseline_policy_version": baseline.get("policy_version"),
+            },
+        )
+        _emit_policy_notification(
+            event_type="policy_canary_started",
+            level="info",
+            message=f"Started canary for {policy_name}@{policy_version} on {stage_scope or 'all'} at {int(config['canary_traffic_percent'])}% traffic.",
+            target_name=policy_name,
+            approval_id=approval_id,
+            payload={
+                "policy_version": policy_version,
+                "stage_scope": stage_scope,
+                "traffic_percent": int(config["canary_traffic_percent"]),
+                "baseline_policy_name": baseline.get("policy_name"),
+                "baseline_policy_version": baseline.get("policy_version"),
+            },
+        )
+        scheduled.append(rollout)
+        rollouts.append(rollout)
+    return {"config": config, "scheduled": scheduled, "skipped": skipped}
+
+
+def auto_promote_policy_canaries(hours: int = 24) -> dict[str, Any]:
+    config = _policy_automation_config()
+    promoted: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    active_rollouts = list_policy_rollouts(limit=200, active_only=True)
+    approvals = list_policy_approvals(limit=200)
+    for rollout in active_rollouts:
+        if str(rollout.get("rollout_mode") or "") != "canary":
+            continue
+        metrics = _canary_metrics_for_rollout(rollout, hours=max(1, hours))
+        if metrics["samples"] < int(config["auto_promote_min_samples"]):
+            skipped.append({"rollout_id": rollout["rollout_id"], "reason": "samples_too_low", **metrics})
+            continue
+        if metrics["negative_rate"] > float(config["auto_promote_max_negative_rate"]):
+            skipped.append({"rollout_id": rollout["rollout_id"], "reason": "negative_rate_too_high", **metrics})
+            continue
+        if metrics["positive_rate"] < float(config["auto_promote_min_positive_rate"]):
+            skipped.append({"rollout_id": rollout["rollout_id"], "reason": "positive_rate_too_low", **metrics})
+            continue
+        baseline = resolve_live_policy(str(rollout.get("stage_scope") or "promoted"))
+        with _connect() as c:
+            c.execute(
+                "UPDATE policy_rollouts SET rollout_status='promoted' WHERE rollout_id=?",
+                (rollout["rollout_id"],),
+            )
+        active = activate_policy_rollout(
+            policy_name=str(rollout.get("policy_name") or ""),
+            policy_version=str(rollout.get("policy_version") or ""),
+            rollout_mode="active",
+            rollout_status="active",
+            stage_scope=str(rollout.get("stage_scope") or "") or None,
+            traffic_percent=100,
+            priority=max(1, int(rollout.get("priority") or 1)),
+            activated_by="policy-automation",
+            notes=f"Auto-promoted from canary {rollout['rollout_id']}",
+        )
+        approval_id = None
+        for approval in approvals:
+            if (
+                str(approval.get("policy_name") or "") == str(rollout.get("policy_name") or "")
+                and str(approval.get("policy_version") or "") == str(rollout.get("policy_version") or "")
+            ):
+                approval_id = str(approval.get("approval_id") or "") or None
+                break
+        _insert_policy_rollout_event(
+            rollout_id=str(active.get("rollout_id") or ""),
+            approval_id=approval_id,
+            policy_name=str(rollout.get("policy_name") or ""),
+            policy_version=str(rollout.get("policy_version") or ""),
+            event_type="canary_promoted",
+            event_status="active",
+            payload={
+                "from_rollout_id": rollout["rollout_id"],
+                "stage_scope": rollout.get("stage_scope"),
+                "baseline_policy_name": baseline.get("policy_name"),
+                "baseline_policy_version": baseline.get("policy_version"),
+                "metrics": metrics,
+            },
+        )
+        _emit_policy_notification(
+            event_type="policy_canary_promoted",
+            level="info",
+            message=(
+                f"Promoted canary {rollout.get('policy_name')}@{rollout.get('policy_version')} "
+                f"to active after {metrics['samples']} scored outcomes."
+            ),
+            target_name=str(rollout.get("policy_name") or ""),
+            approval_id=approval_id,
+            payload={
+                "policy_version": rollout.get("policy_version"),
+                "stage_scope": rollout.get("stage_scope"),
+                "metrics": metrics,
+                "baseline_policy_name": baseline.get("policy_name"),
+                "baseline_policy_version": baseline.get("policy_version"),
+            },
+        )
+        promoted.append({"canary_rollout_id": rollout["rollout_id"], "active_rollout": active, "metrics": metrics})
+    return {"config": config, "promoted": promoted, "skipped": skipped}
+
+
+def run_policy_automation_cycle(hours: int = 24, replay_limit: int | None = None) -> dict[str, Any]:
+    approvals = auto_create_policy_approvals(limit=replay_limit)
+    canaries = auto_schedule_policy_canaries(hours=max(1, hours))
+    guardrails = evaluate_policy_guardrails(hours=max(1, hours), min_samples=3, max_negative_rate=60.0, auto_apply=True)
+    promotions = auto_promote_policy_canaries(hours=max(1, hours))
+    return {
+        "hours": max(1, hours),
+        "config": _policy_automation_config(),
+        "approvals": approvals,
+        "canaries": canaries,
+        "guardrails": guardrails,
+        "promotions": promotions,
+    }
+
+
 def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
     _ensure_schema()
     cutoff = int(time.time()) - max(1, hours) * 3600

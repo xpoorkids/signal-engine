@@ -824,6 +824,170 @@ def test_policy_approval_and_guardrail_rollback_flow(tmp_path, monkeypatch):
     assert matching_rollout["rollout_status"] == "rolled_back"
 
 
+def test_policy_automation_cycle_auto_promotes_stable_canary(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    sls.create_policy_profile(
+        policy_name="baseline_policy",
+        policy_version="v1",
+        config={"promoted_risk_max": 0.60},
+        created_by="ops",
+    )
+    sls.activate_policy_rollout(
+        policy_name="baseline_policy",
+        policy_version="v1",
+        rollout_mode="active",
+        stage_scope="promoted",
+        traffic_percent=100,
+        priority=20,
+        activated_by="ops",
+    )
+    sls.create_policy_profile(
+        policy_name="auto_policy",
+        policy_version="v2",
+        config={"promoted_risk_max": 0.40},
+        created_by="ops",
+    )
+
+    signal_id = sls.record_signal_decision(
+        token="token-auto-replay",
+        event_type="promoted",
+        stage="promoted",
+        decision="promoted_sent",
+        action_taken="emit",
+        attention_score=0.82,
+        risk_score=0.31,
+        confidence_score=0.92,
+        creator_score=0.3,
+        lifecycle="dex",
+        policy_name="baseline_policy",
+        policy_version="v1",
+        features={
+            "attention_score": 0.82,
+            "risk_score": 0.31,
+            "confidence_score": 0.92,
+            "liquidity_usd": 22000.0,
+            "txns_m5_buys": 22,
+        },
+        ts_value=1_773_800_000,
+        source="test",
+    )
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                60,
+                1_773_803_600,
+                "dex",
+                21000,
+                11000,
+                7500,
+                80.0,
+                18.0,
+                45.0,
+                48,
+                16,
+                60.0,
+                20.0,
+                35.0,
+                "worked",
+                json.dumps({"outcome_label": "worked"}),
+            ),
+        )
+
+    replay = sls.run_policy_replay(
+        hours=10_000,
+        stage="promoted",
+        policy_name="auto_policy",
+        policy_version="v2",
+        overrides={"promoted_risk_max": 0.20},
+    )
+
+    for idx in range(3):
+        canary_signal_id = sls.record_signal_decision(
+            token=f"token-auto-canary-{idx}",
+            event_type="promoted",
+            stage="promoted",
+            decision="promoted_sent",
+            action_taken="emit",
+            attention_score=0.86,
+            risk_score=0.22,
+            confidence_score=0.94,
+            creator_score=0.35,
+            lifecycle="dex",
+            policy_name="auto_policy",
+            policy_version="v2",
+            ts_value=1_773_810_000 + idx,
+            source="test",
+        )
+        with sls._connect() as c:
+            c.execute(
+                """
+                INSERT INTO signal_snapshots (
+                    signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                    volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                    txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                    outcome_label, snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    canary_signal_id,
+                    60,
+                    1_773_813_600 + idx,
+                    "dex",
+                    26000,
+                    12000,
+                    8000,
+                    70.0,
+                    24.0,
+                    60.0,
+                    60,
+                    18,
+                    75.0,
+                    18.0,
+                    40.0,
+                    "strong_continuation",
+                    json.dumps({"outcome_label": "strong_continuation"}),
+                ),
+            )
+
+    cycle = sls.run_policy_automation_cycle(hours=10_000, replay_limit=10)
+    rollouts = sls.list_policy_rollouts(limit=20, active_only=False)
+    events = sls.list_policy_rollout_events(limit=20)
+    approvals = sls.list_policy_approvals(limit=20)
+
+    assert replay["run_id"]
+    assert cycle["approvals"]["created"]
+    assert cycle["canaries"]["scheduled"]
+    assert cycle["promotions"]["promoted"]
+    assert any(item["event_type"] == "auto_approval_created" for item in events)
+    assert any(item["event_type"] == "auto_canary_started" for item in events)
+    assert any(item["event_type"] == "canary_promoted" for item in events)
+    assert any(
+        item["policy_name"] == "auto_policy"
+        and item["policy_version"] == "v2"
+        and item["rollout_mode"] == "active"
+        and item["rollout_status"] == "active"
+        for item in rollouts
+    )
+    assert any(
+        item["policy_name"] == "auto_policy"
+        and item["policy_version"] == "v2"
+        and item["approval_status"] == "rolled_out"
+        for item in approvals
+    )
+
+
 def test_diagnostics_summary_builds_reason_quality_scorecards(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
