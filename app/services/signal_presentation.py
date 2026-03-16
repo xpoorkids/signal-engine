@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.services.signal_metrics import to_optional_float
+from app.services.signal_metrics import get_metric_meta, get_metric_value, metric_label, to_optional_float
 
 
 @dataclass
@@ -19,6 +19,17 @@ class SignalViewModel:
     market: dict[str, Any] = field(default_factory=dict)
     social: dict[str, Any] = field(default_factory=dict)
     links: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class MetricIntel:
+    key: str
+    label: str
+    value: Any
+    status: str
+    freshness: str
+    source: str
+    display: str
 
 
 def format_currency_compact(value: float | int | None) -> str:
@@ -171,3 +182,142 @@ def signal_color(signal_class: str, risk_score: float | None) -> str:
     if signal_class == "setup":
         return "#f4c430"
     return "#2f6bff"
+
+
+def infer_metric_source(key: str, payload: dict[str, Any] | None) -> str:
+    extra = payload if isinstance(payload, dict) else {}
+    dex_summary = extra.get("dex_summary") if isinstance(extra.get("dex_summary"), dict) else {}
+    attention_metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
+    risk_flags = extra.get("risk_flags") if isinstance(extra.get("risk_flags"), dict) else {}
+
+    if key in {"attention_score", "confidence"}:
+        return "signal_engine"
+    if key in {"risk_score"}:
+        return "forensics"
+    if key in {"elite_score"}:
+        return "elite_model"
+    if key == "lifecycle":
+        return "signal_engine"
+    if key in {"market_cap", "liquidity_usd", "volume_m5", "volume_h1", "txns_m5_buys", "txns_m5_sells", "price_change_m5", "price_change_h1", "price_change_h24"}:
+        return "dexscreener" if dex_summary else "unavailable"
+    if key in {"x_tweet_count", "x_unique_authors", "x_likes"}:
+        return "x_signal" if attention_metrics else "unavailable"
+    if key in {"tracked_wallet_hits", "kol_wallet_hits", "narrative_hits", "unique_buyers_5m", "unique_buyers_15m", "burst_count_60s", "dexscreener_boosts_count"}:
+        return "attention_engine" if attention_metrics else "unavailable"
+    if key in {"wallet_cluster", "holder_concentration", "bot_cadence"}:
+        return "forensics" if risk_flags else "unavailable"
+    return "signal_engine"
+
+
+def metric_freshness(meta: dict[str, Any] | None) -> str:
+    payload = meta if isinstance(meta, dict) else {}
+    status = str(payload.get("status") or "")
+    reason = str(payload.get("reason") or "").lower()
+    if status in {"disabled", "not_computed"}:
+        return "unavailable"
+    if status == "insufficient_data":
+        return "missing"
+    if "stale" in reason or "delayed" in reason:
+        return "stale"
+    if "inferred" in reason or "fallback" in reason:
+        return "inferred"
+    return "fresh"
+
+
+def metric_intel(payload: dict[str, Any] | None, key: str, label: str) -> MetricIntel:
+    value = get_metric_value(payload, key)
+    meta = get_metric_meta(payload, key)
+    status = str(meta.get("status") or ("computed" if value is not None else "unknown"))
+    freshness = metric_freshness(meta)
+    source = infer_metric_source(key, payload)
+    display = metric_label(meta) if value is None else str(value)
+    return MetricIntel(
+        key=key,
+        label=label,
+        value=value,
+        status=status,
+        freshness=freshness,
+        source=source,
+        display=display,
+    )
+
+
+def build_alert_explanation(
+    *,
+    signal_kind: str,
+    lifecycle: str,
+    attention_score: float | None,
+    risk_score: float | None,
+    confidence_score: float | None,
+    payload: dict[str, Any] | None,
+    reasons: list[str] | None = None,
+) -> dict[str, list[str] | str]:
+    extra = payload if isinstance(payload, dict) else {}
+    attn = metric_intel(extra, "attention_score", "attention")
+    risk = metric_intel(extra, "risk_score", "risk")
+    confidence = metric_intel(extra, "confidence", "confidence")
+    elite = metric_intel(extra, "elite_score", "elite")
+
+    why_now: list[str] = []
+    if attention_score is not None and attention_score >= 0.80:
+        why_now.append("attention is strong enough to justify immediate monitoring")
+    elif attention_score is not None and attention_score >= 0.55:
+        why_now.append("attention is constructive but still early")
+    elif attn.freshness != "fresh":
+        why_now.append(f"attention is {attn.display.lower()}")
+
+    if lifecycle == "dex":
+        why_now.append("dex liquidity is live")
+    if confidence_score is not None and confidence_score >= 0.65:
+        why_now.append("confidence is in an actionable range")
+    elif confidence.freshness != "fresh":
+        why_now.append(f"confidence is {confidence.display.lower()}")
+
+    why_not_promoted: list[str] = []
+    if risk_score is not None and risk_score >= 0.70:
+        why_not_promoted.append("risk remains too high for an aggressive posture")
+    elif risk_score is not None and risk_score >= 0.45:
+        why_not_promoted.append("risk is still elevated relative to conviction")
+    elif risk.freshness != "fresh":
+        why_not_promoted.append(f"risk is {risk.display.lower()}")
+    if confidence_score is not None and confidence_score < 0.65:
+        why_not_promoted.append("confidence has not cleared the stronger promotion band")
+    if elite.value is not None and to_optional_float(elite.value) is not None and float(elite.value) < 10:
+        why_not_promoted.append("elite score is not yet in the top tier")
+
+    next_steps: list[str] = []
+    if attention_score is not None and attention_score < 0.85:
+        next_steps.append("watch for stronger buyer breadth and repeated flow")
+    if risk_score is not None and risk_score >= 0.45:
+        next_steps.append("wait for risk compression before sizing up")
+    if lifecycle != "dex":
+        next_steps.append("wait for dex liquidity and pair discovery")
+    if confidence_score is not None and confidence_score < 0.65:
+        next_steps.append("look for confirmation that lifts confidence into the strong band")
+    if not next_steps:
+        next_steps.append("monitor for continuation and maintain discipline on risk")
+
+    data_quality: list[str] = []
+    for intel in (attn, risk, confidence, elite):
+        if intel.freshness != "fresh":
+            data_quality.append(f"{intel.label}: {intel.display.lower()} ({intel.source})")
+    if not data_quality:
+        data_quality.append(
+            "attention / risk / confidence are fresh"
+        )
+
+    short_reasons: list[str] = []
+    for reason in reasons or []:
+        text = str(reason or "").replace("_", " ").strip()
+        if text and text not in short_reasons:
+            short_reasons.append(text)
+    if short_reasons and len(why_now) < 3:
+        why_now.append(short_reasons[0])
+
+    return {
+        "why_now": why_now[:3],
+        "why_not_promoted": why_not_promoted[:3],
+        "next_steps": next_steps[:3],
+        "data_quality": data_quality[:3],
+        "profile": signal_type(signal_kind, attention_score, risk_score),
+    }

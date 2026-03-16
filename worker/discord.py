@@ -1,7 +1,7 @@
 ﻿import json
 import requests
 import os
-from app.services.signal_presentation import SignalViewModel
+from app.services.signal_presentation import SignalViewModel, build_alert_explanation
 from app.services.signal_metrics import (
     format_metric_number,
     get_metric_meta,
@@ -611,6 +611,32 @@ def _decision_field(extra: dict | None, confidence_pct: str, lifecycle: str, con
     }
 
 
+def _operator_brief_field(
+    e: Event,
+    *,
+    lifecycle: str,
+    attention_score: float | None,
+    risk_score: float | None,
+    confidence_score: float | None,
+) -> dict:
+    explanation = build_alert_explanation(
+        signal_kind=e.type,
+        lifecycle=lifecycle,
+        attention_score=attention_score,
+        risk_score=risk_score,
+        confidence_score=confidence_score,
+        payload=e.extra if isinstance(e.extra, dict) else {},
+        reasons=e.reasons if isinstance(e.reasons, list) else [],
+    )
+    lines = [
+        f"**Why Now:** {('; '.join(explanation.get('why_now') or []) or 'monitoring state established')}",
+        f"**Not Yet:** {('; '.join(explanation.get('why_not_promoted') or []) or 'no active blockers recorded')}",
+        f"**Next:** {('; '.join(explanation.get('next_steps') or []) or 'continue monitoring')}",
+        f"**Data:** {('; '.join(explanation.get('data_quality') or []) or 'fresh')}",
+    ]
+    return {"name": "Operator Brief", "value": _section_lines(lines, indent=0), "inline": False}
+
+
 def _trigger_field(e: Event) -> dict | None:
     value = _build_intelligence_section(e)
     if not value or value == "- flow + structure":
@@ -1000,6 +1026,13 @@ def _format_candidate_like(e: Event, description: str) -> dict:
     fields = _finalize_fields(
         [
             _decision_field(e.extra if isinstance(e.extra, dict) else {}, confidence_pct, vm.lifecycle, conviction, vm.confidence_score, vm.risk_score),
+            _operator_brief_field(
+                e,
+                lifecycle=vm.lifecycle,
+                attention_score=vm.attention_score,
+                risk_score=vm.risk_score,
+                confidence_score=vm.confidence_score,
+            ),
             {
                 "name": "Token Identity",
                 "value": _section_lines(
@@ -1078,6 +1111,13 @@ def format_discord(e: Event) -> dict:
         fields = _finalize_fields(
             [
                 _decision_field(e.extra if isinstance(e.extra, dict) else {}, confidence_pct, vm.lifecycle, conviction, vm.confidence_score, vm.risk_score),
+                _operator_brief_field(
+                    e,
+                    lifecycle=vm.lifecycle,
+                    attention_score=vm.attention_score,
+                    risk_score=vm.risk_score,
+                    confidence_score=vm.confidence_score,
+                ),
                 {
                     "name": "Token Identity",
                     "value": _section_lines(

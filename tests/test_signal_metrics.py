@@ -1,4 +1,5 @@
 from app.services.review_service import render_review_html
+from app.services.signal_presentation import build_alert_explanation
 from app.services.signal_metrics import compute_risk_score, metric_state
 from worker.discord import format_discord, get_signal_color, shorten_address
 from worker.events import Event, as_dict
@@ -78,6 +79,30 @@ def test_metric_state_serialization_preserves_nulls():
     assert payload["extra"]["metric_states"]["risk_score"]["status"] == "disabled"
 
 
+def test_build_alert_explanation_surfaces_blockers_and_data_quality():
+    explanation = build_alert_explanation(
+        signal_kind="candidate",
+        lifecycle="dex",
+        attention_score=0.62,
+        risk_score=0.51,
+        confidence_score=0.44,
+        payload={
+            "metric_states": {
+                "attention_score": metric_state(0.62, status="computed"),
+                "risk_score": metric_state(0.51, status="computed"),
+                "confidence": metric_state(0.44, status="computed"),
+                "elite_score": metric_state(None, status="insufficient_data", reason="elite_inputs_missing"),
+            }
+        },
+        reasons=["tracked_wallet_flow"],
+    )
+
+    assert explanation["why_now"]
+    assert any("risk" in item for item in explanation["why_not_promoted"])
+    assert any("confidence" in item for item in explanation["next_steps"])
+    assert any("elite" in item for item in explanation["data_quality"])
+
+
 def test_format_discord_missing_metrics_do_not_render_as_zero():
     event = Event(
         type="candidate",
@@ -99,11 +124,14 @@ def test_format_discord_missing_metrics_do_not_render_as_zero():
     identity_field = _candidate_field(embed, "Token Identity")
     quality_field = _candidate_field(embed, "Quality")
     command_view = _candidate_field(embed, "Command View")
+    operator_brief = _candidate_field(embed, "Operator Brief")
 
     assert "0.00" not in identity_field
     assert "Insufficient data" in quality_field
     assert "Not computed" in command_view
     assert f"**Contract:** `{shorten_address(event.token, head=8, tail=8)}`" in identity_field
+    assert "Data:" in operator_brief
+    assert "risk: insufficient data" in operator_brief.lower() or "attention: not computed" in operator_brief.lower()
 
 
 def test_review_html_missing_metrics_render_semantic_state():
