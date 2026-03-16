@@ -132,6 +132,7 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SERVICE", "worker")
     monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SHA", "auto123")
     monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_ENV", "production")
+    monkeypatch.setenv("SIGNAL_ENGINE_REQUIRED_ALIGNED_PROFILES", "strict")
     sls.init()
 
     base_ts = 1_773_620_000
@@ -302,16 +303,46 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert rollout_summary_response.status_code == 200
     rollout_summary_payload = rollout_summary_response.json()
     assert rollout_summary_payload["latest_by_service"]["worker"]["approval_id"] == approval_id
+    assert rollout_summary_payload["notifications"]
+    assert rollout_summary_payload["recommended_actions"]
 
     rollout_dashboard_response = client.get("/learning/tuning/rollout/dashboard")
     assert rollout_dashboard_response.status_code == 200
     assert "Tuning Rollout Summary" in rollout_dashboard_response.text
+    assert "Recommended Actions" in rollout_dashboard_response.text
 
     approvals_dashboard_response = client.get("/learning/tuning/approvals/dashboard?limit=10&rollout_status=rolled_out&q=render")
     assert approvals_dashboard_response.status_code == 200
     assert "Tuning Approvals" in approvals_dashboard_response.text
     assert "Config Drift / Strict" in approvals_dashboard_response.text
     assert "worker" in approvals_dashboard_response.text
+
+    monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SERVICE", "engine")
+    monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SHA", "diff999")
+    second_create_response = client.post(
+        "/learning/tuning/approvals",
+        json={
+            "approval_kind": "profile",
+            "target_name": "strict",
+            "artifact_kind": "env",
+            "hours": 10000,
+            "approved_by": "ops",
+            "notes": "engine rollout candidate",
+        },
+    )
+    assert second_create_response.status_code == 200
+    second_id = second_create_response.json()["approval_id"]
+    second_approve_response = client.post(
+        f"/learning/tuning/approvals/{second_id}/status",
+        json={"rollout_status": "approved", "notes": "engine approved"},
+    )
+    assert second_approve_response.status_code == 200
+    blocked_rollout_response = client.post(
+        f"/learning/tuning/approvals/{second_id}/status",
+        json={"rollout_status": "rolled_out", "notes": "should block"},
+    )
+    assert blocked_rollout_response.status_code == 400
+    assert blocked_rollout_response.json()["detail"] == "alignment_guardrail_blocked"
 
 
 def test_learning_diagnostics_dashboard_returns_html(tmp_path, monkeypatch):

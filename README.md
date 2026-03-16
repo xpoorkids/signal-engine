@@ -88,6 +88,8 @@ Features:
    - `deployment_sha`
    - `deployment_env`
    If omitted and available, these can default from environment variables such as `SIGNAL_ENGINE_DEPLOY_*` or Render metadata.
+   Required aligned profiles can be enforced with `SIGNAL_ENGINE_REQUIRED_ALIGNED_PROFILES`.
+   Use `allow_misaligned=true` on the status transition only when you intentionally need to bypass that guardrail.
 
 ### Requirements
 

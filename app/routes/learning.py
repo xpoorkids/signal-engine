@@ -202,6 +202,7 @@ def learning_tuning_approvals_status(approval_id: str, payload: dict[str, object
             deployment_service=str(payload.get("deployment_service") or "") or None,
             deployment_sha=str(payload.get("deployment_sha") or "") or None,
             deployment_env=str(payload.get("deployment_env") or "") or None,
+            allow_misaligned=bool(payload.get("allow_misaligned") or False),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

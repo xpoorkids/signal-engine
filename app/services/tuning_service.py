@@ -30,6 +30,7 @@ PROFILE_LABELS: dict[str, str] = {
     "aggressive": "Relaxed early filters for faster candidate capture.",
 }
 APPROVAL_STATUSES: set[str] = {"pending", "approved", "rolled_out", "rejected"}
+ROLLOUT_COMPARISON_SERVICES: tuple[str, str] = ("worker", "engine")
 
 
 def _proposal(
@@ -67,6 +68,11 @@ def _format_diff_value(value: Any) -> str:
 
 def _profile_baseline() -> dict[str, Any]:
     return {key: getattr(cfg, key) for key in PROFILE_CONFIG_KEYS}
+
+
+def _required_aligned_profiles() -> set[str]:
+    raw = os.getenv("SIGNAL_ENGINE_REQUIRED_ALIGNED_PROFILES", "").strip()
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
 
 
 def _default_deployment_metadata() -> dict[str, str]:
@@ -122,6 +128,103 @@ def _approval_matches(
         if needle not in haystack:
             return False
     return True
+
+
+def _normalize_approval(row: Any) -> dict[str, Any]:
+    return {
+        "approval_id": row["approval_id"],
+        "created_ts": row["created_ts"],
+        "approved_by": row["approved_by"],
+        "approval_kind": row["approval_kind"],
+        "target_name": row["target_name"],
+        "artifact_kind": row["artifact_kind"],
+        "lookback_hours": row["lookback_hours"],
+        "rollout_status": row["rollout_status"] or "pending",
+        "rolled_out_ts": row["rolled_out_ts"],
+        "deployment_service": row["deployment_service"] or "",
+        "deployment_sha": row["deployment_sha"] or "",
+        "deployment_env": row["deployment_env"] or "",
+        "notes": row["notes"] or "",
+        "artifact_text": row["artifact_text"],
+        "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
+    }
+
+
+def _latest_rolled_out_profile_for_service(target_name: str, service: str) -> dict[str, Any] | None:
+    approvals = list_tuning_approvals(
+        limit=50,
+        approval_kind="profile",
+        artifact_kind="env",
+        target_name=target_name,
+        rollout_status="rolled_out",
+    )
+    for approval in approvals:
+        if str(approval.get("deployment_service") or "") == service:
+            return approval
+    return None
+
+
+def _approvals_aligned(left: dict[str, Any] | None, right: dict[str, Any] | None) -> bool:
+    if not left or not right:
+        return False
+    return (
+        str(left.get("artifact_text") or "") == str(right.get("artifact_text") or "")
+        and str(left.get("deployment_sha") or "") == str(right.get("deployment_sha") or "")
+    )
+
+
+def _rollout_notifications(alignment: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    required = _required_aligned_profiles()
+    notifications: list[dict[str, Any]] = []
+    for item in alignment:
+        target = str(item.get("target_name") or "")
+        worker_present = bool(item.get("worker_approval_id"))
+        engine_present = bool(item.get("engine_approval_id"))
+        aligned = bool(item.get("aligned"))
+        if target in required and worker_present and engine_present and not aligned:
+            notifications.append(
+                {
+                    "level": "warning",
+                    "code": "required_profile_misaligned",
+                    "message": f"{target} is required to align across worker and engine, but the rolled-out approvals differ.",
+                    "target_name": target,
+                }
+            )
+        elif worker_present and engine_present and aligned:
+            notifications.append(
+                {
+                    "level": "info",
+                    "code": "profile_aligned",
+                    "message": f"{target} is aligned across worker and engine.",
+                    "target_name": target,
+                }
+            )
+        elif worker_present ^ engine_present:
+            notifications.append(
+                {
+                    "level": "warning",
+                    "code": "partial_rollout",
+                    "message": f"{target} is rolled out on only one service.",
+                    "target_name": target,
+                }
+            )
+    return notifications
+
+
+def _rollout_recommendations(alignment: list[dict[str, Any]]) -> list[str]:
+    recommendations: list[str] = []
+    required = _required_aligned_profiles()
+    for item in alignment:
+        target = str(item.get("target_name") or "")
+        if target in required and not bool(item.get("aligned")):
+            recommendations.append(f"Block further {target} profile rollout until worker and engine use the same approval and SHA.")
+        elif bool(item.get("worker_approval_id")) and not bool(item.get("engine_approval_id")):
+            recommendations.append(f"Deploy the latest {target} profile to engine to complete the rollout.")
+        elif bool(item.get("engine_approval_id")) and not bool(item.get("worker_approval_id")):
+            recommendations.append(f"Deploy the latest {target} profile to worker to complete the rollout.")
+    if not recommendations:
+        recommendations.append("No rollout action required. Current worker/engine profile state is aligned.")
+    return recommendations
 
 
 def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:
@@ -689,23 +792,7 @@ def list_tuning_approvals(
         ).fetchall()
     approvals: list[dict[str, Any]] = []
     for row in rows:
-        approval = {
-            "approval_id": row["approval_id"],
-            "created_ts": row["created_ts"],
-            "approved_by": row["approved_by"],
-            "approval_kind": row["approval_kind"],
-            "target_name": row["target_name"],
-            "artifact_kind": row["artifact_kind"],
-            "lookback_hours": row["lookback_hours"],
-            "rollout_status": row["rollout_status"] or "pending",
-            "rolled_out_ts": row["rolled_out_ts"],
-            "deployment_service": row["deployment_service"] or "",
-            "deployment_sha": row["deployment_sha"] or "",
-            "deployment_env": row["deployment_env"] or "",
-            "notes": row["notes"] or "",
-            "artifact_text": row["artifact_text"],
-            "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
-        }
+        approval = _normalize_approval(row)
         if _approval_matches(
             approval,
             approval_kind=approval_kind,
@@ -728,6 +815,7 @@ def update_tuning_approval_status(
     deployment_service: str | None = None,
     deployment_sha: str | None = None,
     deployment_env: str | None = None,
+    allow_misaligned: bool = False,
 ) -> dict[str, Any]:
     status = str(rollout_status or "").strip().lower()
     if status not in APPROVAL_STATUSES:
@@ -765,6 +853,24 @@ def update_tuning_approval_status(
         effective_env = env_value or str(existing["deployment_env"] or "")
         if status == "rolled_out" and (not effective_service or not effective_sha):
             raise ValueError("missing_deployment_metadata")
+        target_name = str(existing["target_name"] or "")
+        approval_kind = str(existing["approval_kind"] or "")
+        if (
+            status == "rolled_out"
+            and approval_kind == "profile"
+            and effective_service in ROLLOUT_COMPARISON_SERVICES
+            and target_name.lower() in _required_aligned_profiles()
+            and not allow_misaligned
+        ):
+            counterpart_service = "engine" if effective_service == "worker" else "worker"
+            counterpart = _latest_rolled_out_profile_for_service(target_name, counterpart_service)
+            if counterpart:
+                candidate_alignment = {
+                    "artifact_text": str(existing["artifact_text"] or ""),
+                    "deployment_sha": effective_sha,
+                }
+                if not _approvals_aligned(counterpart, candidate_alignment):
+                    raise ValueError("alignment_guardrail_blocked")
         c.execute(
             """
             UPDATE tuning_approvals
@@ -824,23 +930,7 @@ def get_latest_tuning_approval(
         ).fetchone()
     if not row:
         return None
-    return {
-        "approval_id": row["approval_id"],
-        "created_ts": row["created_ts"],
-        "approved_by": row["approved_by"],
-        "approval_kind": row["approval_kind"],
-        "target_name": row["target_name"],
-        "artifact_kind": row["artifact_kind"],
-        "lookback_hours": row["lookback_hours"],
-        "rollout_status": row["rollout_status"] or "pending",
-        "rolled_out_ts": row["rolled_out_ts"],
-        "deployment_service": row["deployment_service"] or "",
-        "deployment_sha": row["deployment_sha"] or "",
-        "deployment_env": row["deployment_env"] or "",
-        "notes": row["notes"] or "",
-        "artifact_text": row["artifact_text"],
-        "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
-    }
+    return _normalize_approval(row)
 
 
 def get_tuning_rollout_summary() -> dict[str, Any]:
@@ -869,10 +959,7 @@ def get_tuning_rollout_summary() -> dict[str, Any]:
                 "worker_sha": worker_item.get("deployment_sha") if worker_item else None,
                 "engine_sha": engine_item.get("deployment_sha") if engine_item else None,
                 "aligned": bool(
-                    worker_item
-                    and engine_item
-                    and worker_item.get("approval_id") == engine_item.get("approval_id")
-                    and worker_item.get("deployment_sha") == engine_item.get("deployment_sha")
+                    _approvals_aligned(worker_item, engine_item)
                 ),
             }
         )
@@ -883,6 +970,9 @@ def get_tuning_rollout_summary() -> dict[str, Any]:
         "latest_by_service": latest_by_service,
         "latest_profiles_by_service": latest_profiles_by_service,
         "worker_engine_alignment": alignment,
+        "required_alignment_profiles": sorted(_required_aligned_profiles()),
+        "notifications": _rollout_notifications(alignment),
+        "recommended_actions": _rollout_recommendations(alignment),
     }
 
 
@@ -890,6 +980,8 @@ def render_tuning_rollout_summary_html() -> str:
     summary = get_tuning_rollout_summary()
     latest_by_service = summary.get("latest_by_service") if isinstance(summary.get("latest_by_service"), dict) else {}
     alignment = summary.get("worker_engine_alignment") if isinstance(summary.get("worker_engine_alignment"), list) else []
+    notifications = summary.get("notifications") if isinstance(summary.get("notifications"), list) else []
+    recommendations = summary.get("recommended_actions") if isinstance(summary.get("recommended_actions"), list) else []
 
     service_cards = "".join(
         '<section class="panel">'
@@ -915,7 +1007,18 @@ def render_tuning_rollout_summary_html() -> str:
         for item in alignment
     ) or "<tr><td colspan='6'>No worker/engine comparison data yet.</td></tr>"
 
+    notification_rows = "".join(
+        f"<li><strong>{html.escape(str(item.get('level') or 'info').upper())}</strong>: {html.escape(str(item.get('message') or ''))}</li>"
+        for item in notifications
+    ) or "<li>No rollout notifications.</li>"
+
+    recommendation_rows = "".join(
+        f"<li>{html.escape(str(item))}</li>"
+        for item in recommendations
+    ) or "<li>No recommendations.</li>"
+
     defaults = summary.get("defaults") if isinstance(summary.get("defaults"), dict) else {}
+    required = summary.get("required_alignment_profiles") if isinstance(summary.get("required_alignment_profiles"), list) else []
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -947,8 +1050,17 @@ def render_tuning_rollout_summary_html() -> str:
     <section class="panel">
       <h1>Tuning Rollout Summary</h1>
       <p><strong>Default Deployment Metadata:</strong> service={html.escape(defaults.get('deployment_service') or 'n/a')} sha={html.escape(defaults.get('deployment_sha') or 'n/a')} env={html.escape(defaults.get('deployment_env') or 'n/a')}</p>
+      <p><strong>Required Alignment Profiles:</strong> {html.escape(', '.join(required) if required else 'none')}</p>
     </section>
     {service_cards}
+    <section class="panel">
+      <h2>Rollout Notifications</h2>
+      <ul>{notification_rows}</ul>
+    </section>
+    <section class="panel">
+      <h2>Recommended Actions</h2>
+      <ul>{recommendation_rows}</ul>
+    </section>
     <section class="panel">
       <h2>Worker / Engine Alignment</h2>
       <table>

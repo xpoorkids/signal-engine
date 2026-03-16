@@ -30,6 +30,7 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SERVICE", "worker")
     monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SHA", "auto123")
     monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_ENV", "production")
+    monkeypatch.setenv("SIGNAL_ENGINE_REQUIRED_ALIGNED_PROFILES", "strict")
     sls.init()
 
     base_ts = 1_773_620_000
@@ -242,7 +243,36 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     summary = get_tuning_rollout_summary()
     assert summary["latest_by_service"]["worker"]["approval_id"] == approval["approval_id"]
     assert summary["defaults"]["deployment_sha"] == "auto123"
+    assert summary["notifications"]
+    assert any(item["code"] == "partial_rollout" for item in summary["notifications"])
+    assert any("engine" in item.lower() for item in summary["recommended_actions"])
 
     summary_html = render_tuning_rollout_summary_html()
     assert "Tuning Rollout Summary" in summary_html
     assert "Worker / Engine Alignment" in summary_html
+    assert "Recommended Actions" in summary_html
+
+    monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SERVICE", "engine")
+    monkeypatch.setenv("SIGNAL_ENGINE_DEPLOY_SHA", "diff999")
+    second_approval = create_tuning_approval(
+        approval_kind="profile",
+        artifact_kind="env",
+        target_name="strict",
+        hours=10_000,
+        approved_by="ops",
+        notes="engine rollout candidate",
+    )
+    update_tuning_approval_status(
+        second_approval["approval_id"],
+        rollout_status="approved",
+        notes="engine approved",
+    )
+    try:
+        update_tuning_approval_status(
+            second_approval["approval_id"],
+            rollout_status="rolled_out",
+            notes="should block on alignment guardrail",
+        )
+        assert False, "expected alignment_guardrail_blocked"
+    except ValueError as exc:
+        assert str(exc) == "alignment_guardrail_blocked"
