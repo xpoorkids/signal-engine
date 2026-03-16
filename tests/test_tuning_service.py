@@ -153,26 +153,40 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     mapped = {item["reason"]: item for item in proposals["proposals"]}
     assert mapped["attention<0.20"]["config_key"] == "EARLY_ATTENTION_MIN"
     assert mapped["attention<0.20"]["action"] == "relax_slightly"
+    assert mapped["attention<0.20"]["family"] == "candidate_attention"
+    assert mapped["attention<0.20"]["historical_support"]["support"] == "supportive"
+    assert mapped["attention<0.20"]["proposal_priority"] in {"high", "medium"}
+    assert mapped["attention<0.20"]["evidence_summary"]
     assert mapped["dex_gate:liq<12000.0"]["config_key"] == "PROM_MIN_LIQ_USD"
     assert mapped["dex_gate:liq<12000.0"]["action"] == "tighten"
+    assert mapped["dex_gate:liq<12000.0"]["family"] == "market_quality"
+    assert mapped["dex_gate:liq<12000.0"]["historical_support"]["support"] == "caution"
+    assert mapped["dex_gate:liq<12000.0"]["proposal_priority"] in {"high", "medium", "low"}
     assert "aggressive" in proposals["preset_overrides"]
     assert "strict" in proposals["preset_overrides"]
+    assert proposals["historical_family_scorecards"]
 
     html = render_tuning_proposals_html(hours=10_000)
     assert "Tuning Proposals" in html
     assert "Concrete Proposals" in html
     assert ".env Snippet" in html
     assert "Apply Manually Diff" in html
+    assert "Priority" in html
+    assert "Historical" in html
+    assert "Evidence" in html
 
     env_snippet = render_tuning_env_snippet(hours=10_000)
     assert "EARLY_ATTENTION_MIN=" in env_snippet
     assert "PROM_MIN_LIQ_USD=" in env_snippet
     assert "# attention<0.20 | relax_slightly" in env_snippet
+    assert "priority" in env_snippet
+    assert "historical supportive" in env_snippet
 
     apply_diff = render_tuning_apply_diff(hours=10_000)
     assert "EARLY_ATTENTION_MIN:" in apply_diff
     assert "PROM_MIN_LIQ_USD:" in apply_diff
     assert "->" in apply_diff
+    assert "supportive" in apply_diff or "caution" in apply_diff
 
     profiles = build_tuning_profiles(hours=10_000)
     assert profiles["base_profile"] == "balanced"

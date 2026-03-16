@@ -1342,6 +1342,89 @@ def _rollout_family_scorecards(
     )
 
 
+def _proposal_historical_support(
+    *,
+    family: str,
+    family_scorecards: list[dict[str, Any]],
+) -> dict[str, Any]:
+    for item in family_scorecards:
+        if str(item.get("family") or "") != family:
+            continue
+        rollout_count = int(item.get("rollout_count") or 0)
+        improved_count = int(item.get("improved_count") or 0)
+        degraded_count = int(item.get("degraded_count") or 0)
+        avg_send_delta = float(item.get("avg_send_rate_delta") or 0.0)
+        avg_post_win_rate = float(item.get("avg_post_win_rate") or 0.0)
+
+        support = "neutral"
+        if rollout_count >= 2:
+            if improved_count > degraded_count and avg_send_delta >= 0 and avg_post_win_rate >= 45.0:
+                support = "supportive"
+            elif degraded_count > improved_count and (avg_send_delta < 0 or avg_post_win_rate < 40.0):
+                support = "caution"
+
+        return {
+            "family": family,
+            "label": _family_label(family),
+            "support": support,
+            "rollout_count": rollout_count,
+            "improved_count": improved_count,
+            "degraded_count": degraded_count,
+            "avg_send_rate_delta": avg_send_delta,
+            "avg_post_win_rate": avg_post_win_rate,
+        }
+    return {
+        "family": family,
+        "label": _family_label(family),
+        "support": "unknown",
+        "rollout_count": 0,
+        "improved_count": 0,
+        "degraded_count": 0,
+        "avg_send_rate_delta": 0.0,
+        "avg_post_win_rate": 0.0,
+    }
+
+
+def _proposal_priority(
+    *,
+    action: str,
+    confidence: str,
+    sample_size: int,
+    historical_support: dict[str, Any],
+) -> tuple[str, str]:
+    score = 0
+    if action == "tighten":
+        score += 3
+    elif action == "relax_slightly":
+        score += 2
+
+    score += {"high": 3, "medium": 2, "low": 1}.get(confidence, 0)
+    if sample_size >= 20:
+        score += 2
+    elif sample_size >= 8:
+        score += 1
+
+    support = str(historical_support.get("support") or "unknown")
+    if support == "supportive":
+        score += 2
+    elif support == "caution":
+        score -= 2
+
+    if score >= 8:
+        priority = "high"
+    elif score >= 5:
+        priority = "medium"
+    else:
+        priority = "low"
+
+    summary = (
+        f"{historical_support.get('label', 'historical evidence')} is {support}; "
+        f"{int(historical_support.get('rollout_count') or 0)} rollouts, "
+        f"{float(historical_support.get('avg_post_win_rate') or 0.0)}% avg post win rate."
+    )
+    return priority, summary
+
+
 def get_rollout_verification(
     *,
     approval_id: str | None = None,
@@ -2346,6 +2429,12 @@ async def ops_digest_worker() -> None:
 def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:
     summary = sls.get_diagnostics_summary(hours=max(1, hours))
     guidance = summary.get("threshold_guidance") if isinstance(summary.get("threshold_guidance"), list) else []
+    family_scorecards = _rollout_family_scorecards(
+        baseline_hours=max(1, hours),
+        post_hours=max(1, hours),
+        focus_families=[],
+        limit=100,
+    )
     proposals: list[dict[str, Any]] = []
     deferred: list[dict[str, Any]] = []
 
@@ -2403,22 +2492,39 @@ def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:
             delta = 5
             proposed_value = max(5, current_value - delta) if action == "relax_slightly" else current_value + delta
 
-        proposals.append(
-            _proposal(
-                reason=reason,
-                action=action,
-                config_key=config_key,
-                current_value=current_value,
-                proposed_value=proposed_value,
-                confidence=confidence,
-                sample_size=sample_size,
-                rationale=str(item.get("rationale") or ""),
-            )
+        family = CONFIG_KEY_FAMILIES.get(config_key, "other")
+        historical_support = _proposal_historical_support(family=family, family_scorecards=family_scorecards)
+        proposal_priority, evidence_summary = _proposal_priority(
+            action=action,
+            confidence=confidence,
+            sample_size=sample_size,
+            historical_support=historical_support,
         )
+
+        proposal = _proposal(
+            reason=reason,
+            action=action,
+            config_key=config_key,
+            current_value=current_value,
+            proposed_value=proposed_value,
+            confidence=confidence,
+            sample_size=sample_size,
+            rationale=str(item.get("rationale") or ""),
+        )
+        proposal["family"] = family
+        proposal["historical_support"] = historical_support
+        proposal["proposal_priority"] = proposal_priority
+        proposal["evidence_summary"] = evidence_summary
+        proposals.append(proposal)
 
     proposals.sort(
         key=lambda item: (
+            {"high": 0, "medium": 1, "low": 2}.get(str(item.get("proposal_priority") or "low"), 3),
             {"tighten": 0, "relax_slightly": 1}.get(str(item["action"]), 2),
+            {"supportive": 0, "neutral": 1, "unknown": 2, "caution": 3}.get(
+                str((item.get("historical_support") if isinstance(item.get("historical_support"), dict) else {}).get("support") or "unknown"),
+                4,
+            ),
             {"high": 0, "medium": 1, "low": 2}.get(str(item["confidence"]), 3),
             -int(item["sample_size"]),
             str(item["config_key"]),
@@ -2449,6 +2555,7 @@ def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:
         "proposals": proposals,
         "deferred": deferred[:10],
         "preset_overrides": preset_overrides,
+        "historical_family_scorecards": family_scorecards[:10],
     }
 
 
@@ -2503,8 +2610,13 @@ def render_tuning_env_snippet(hours: int = 72) -> str:
         reason = str(item.get("reason") or "unknown")
         action = str(item.get("action") or "hold")
         confidence = str(item.get("confidence") or "low")
+        priority = str(item.get("proposal_priority") or "low")
+        historical = item.get("historical_support") if isinstance(item.get("historical_support"), dict) else {}
         sample_size = int(item.get("sample_size") or 0)
-        lines.append(f"# {reason} | {action} | {confidence} confidence | sample {sample_size}")
+        lines.append(
+            f"# {reason} | {action} | {confidence} confidence | priority {priority} | "
+            f"historical {historical.get('support', 'unknown')} | sample {sample_size}"
+        )
         lines.append(f"{key}={_format_env_value(item.get('proposed_value'))}")
     return "\n".join(lines)
 
@@ -2526,7 +2638,9 @@ def render_tuning_apply_diff(hours: int = 72) -> str:
             "- "
             f"{item.get('config_key')}: "
             f"{_format_diff_value(item.get('current_value'))} -> {_format_diff_value(item.get('proposed_value'))} "
-            f"[{item.get('action')} | {item.get('confidence')} | {item.get('reason')}]"
+            f"[{item.get('action')} | {item.get('confidence')} | {item.get('proposal_priority')} | "
+            f"{(item.get('historical_support') if isinstance(item.get('historical_support'), dict) else {}).get('support', 'unknown')} | "
+            f"{item.get('reason')}]"
         )
     return "\n".join(header + rows)
 
@@ -2583,9 +2697,12 @@ def render_tuning_proposals_html(hours: int = 72) -> str:
         f"<td>{html.escape(str(item.get('proposed_value') or ''))}</td>"
         f"<td>{html.escape(str(item.get('action') or 'hold'))}</td>"
         f"<td>{html.escape(str(item.get('confidence') or 'low'))}</td>"
+        f"<td>{html.escape(str(item.get('proposal_priority') or 'low'))}</td>"
+        f"<td>{html.escape(str((item.get('historical_support') if isinstance(item.get('historical_support'), dict) else {}).get('support') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('evidence_summary') or ''))}</td>"
         "</tr>"
         for item in proposals
-    ) or "<tr><td colspan='6'>No concrete proposals available.</td></tr>"
+    ) or "<tr><td colspan='9'>No concrete proposals available.</td></tr>"
 
     deferred_rows = "".join(
         "<tr>"
@@ -2685,7 +2802,7 @@ def render_tuning_proposals_html(hours: int = 72) -> str:
     <section class="panel">
       <h2>Concrete Proposals</h2>
       <table>
-        <thead><tr><th>Reason</th><th>Config</th><th>Current</th><th>Proposed</th><th>Action</th><th>Confidence</th></tr></thead>
+        <thead><tr><th>Reason</th><th>Config</th><th>Current</th><th>Proposed</th><th>Action</th><th>Confidence</th><th>Priority</th><th>Historical</th><th>Evidence</th></tr></thead>
         <tbody>{proposal_rows}</tbody>
       </table>
     </section>
