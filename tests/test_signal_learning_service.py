@@ -724,6 +724,106 @@ def test_canary_rollout_resolution_respects_token_bucket(tmp_path, monkeypatch):
     assert resolved_high["policy_name"] != "canary_policy"
 
 
+def test_policy_approval_and_guardrail_rollback_flow(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    sls.create_policy_profile(
+        policy_name="canary_guarded",
+        policy_version="v1",
+        config={"promoted_risk_max": 0.45},
+        created_by="ops",
+    )
+    replay = sls.run_policy_replay(
+        hours=24,
+        stage="promoted",
+        policy_name="canary_guarded",
+        policy_version="v1",
+        overrides={"promoted_risk_max": 0.45},
+    )
+    approval = sls.create_policy_approval(
+        policy_name="canary_guarded",
+        policy_version="v1",
+        source_type="replay",
+        source_ref=replay["run_id"],
+        approved_by="ops",
+    )
+    rollout = sls.activate_policy_rollout(
+        policy_name="canary_guarded",
+        policy_version="v1",
+        rollout_mode="canary",
+        stage_scope="promoted",
+        traffic_percent=100,
+        priority=1,
+        activated_by="ops",
+    )
+
+    for idx in range(3):
+        signal_id = sls.record_signal_decision(
+            token=f"token-canary-{idx}",
+            event_type="promoted",
+            stage="promoted",
+            decision="promoted_sent",
+            action_taken="emit",
+            attention_score=0.7,
+            risk_score=0.5,
+            confidence_score=0.9,
+            creator_score=0.3,
+            lifecycle="dex",
+            policy_name="canary_guarded",
+            policy_version="v1",
+            ts_value=1_773_700_000 + idx,
+            source="test",
+        )
+        with sls._connect() as c:
+            c.execute(
+                """
+                INSERT INTO signal_snapshots (
+                    signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                    volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                    txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                    outcome_label, snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    60,
+                    1_773_703_600 + idx,
+                    "dex",
+                    7000,
+                    2500,
+                    700,
+                    65.0,
+                    -25.0,
+                    -45.0,
+                    20,
+                    70,
+                    -41.0,
+                    -42.0,
+                    -70.0,
+                    "failed",
+                    json.dumps({"outcome_label": "failed"}),
+                ),
+            )
+
+    approval_after = sls.update_policy_approval_status(
+        approval["approval_id"],
+        approval_status="rolled_out",
+        notes="canary started",
+    )
+    guardrails = sls.evaluate_policy_guardrails(hours=10000, min_samples=3, max_negative_rate=60.0, auto_apply=True)
+    events = sls.list_policy_rollout_events(limit=20)
+    rollouts = sls.list_policy_rollouts(limit=20, active_only=False)
+
+    assert approval_after["approval_status"] == "rolled_out"
+    assert guardrails["evaluations"][0]["recommended_action"] == "rollback"
+    assert guardrails["evaluations"][0]["applied"] is True
+    assert any(item["event_type"] == "guardrail_rollback" for item in events)
+    matching_rollout = next(item for item in rollouts if item["rollout_id"] == rollout["rollout_id"])
+    assert matching_rollout["rollout_status"] == "rolled_back"
+
+
 def test_diagnostics_summary_builds_reason_quality_scorecards(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

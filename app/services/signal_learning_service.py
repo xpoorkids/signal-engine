@@ -270,6 +270,38 @@ def init() -> None:
             )
             """
         )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS policy_approvals (
+                approval_id TEXT PRIMARY KEY,
+                created_ts INTEGER NOT NULL,
+                policy_name TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_ref TEXT,
+                approval_status TEXT NOT NULL DEFAULT 'draft',
+                approved_by TEXT,
+                approved_ts INTEGER,
+                notes TEXT,
+                summary_json TEXT NOT NULL
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS policy_rollout_events (
+                event_id TEXT PRIMARY KEY,
+                created_ts INTEGER NOT NULL,
+                rollout_id TEXT,
+                approval_id TEXT,
+                policy_name TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                event_status TEXT,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
         c.execute("CREATE INDEX IF NOT EXISTS idx_signals_alert_ts ON signals(alert_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_signal_jobs_due ON signal_snapshot_jobs(status, due_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_signal ON signal_snapshots(signal_id, horizon_minutes)")
@@ -280,6 +312,8 @@ def init() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_replay_results_run ON policy_replay_results(run_id, changed)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_profiles_name ON policy_profiles(policy_name, created_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_rollouts_active ON policy_rollouts(rollout_status, priority, created_ts DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_policy_approvals_ts ON policy_approvals(created_ts DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_policy_rollout_events_ts ON policy_rollout_events(created_ts DESC)")
         approval_cols = {row[1] for row in c.execute("PRAGMA table_info(tuning_approvals)").fetchall()}
         if "rollout_status" not in approval_cols:
             c.execute("ALTER TABLE tuning_approvals ADD COLUMN rollout_status TEXT NOT NULL DEFAULT 'pending'")
@@ -653,6 +687,35 @@ def activate_policy_rollout(
             """,
             (rollout_id,),
         ).fetchone()
+        c.execute(
+            """
+            INSERT INTO policy_rollout_events (
+                event_id, created_ts, rollout_id, approval_id, policy_name, policy_version,
+                event_type, event_status, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                created_ts,
+                rollout_id,
+                None,
+                name,
+                version,
+                "rollout_activated",
+                rollout_status,
+                _json_dumps(
+                    {
+                        "rollout_mode": mode,
+                        "stage_scope": stage_scope,
+                        "traffic_percent": effective_traffic,
+                        "priority": priority,
+                        "activated_by": activated_by,
+                        "notes": notes,
+                    }
+                ),
+            ),
+        )
     return {
         "rollout_id": row[0],
         "created_ts": row[1],
@@ -665,6 +728,324 @@ def activate_policy_rollout(
         "priority": row[8],
         "activated_by": row[9],
         "notes": row[10],
+    }
+
+
+def create_policy_approval(
+    *,
+    policy_name: str,
+    policy_version: str,
+    source_type: str,
+    source_ref: str | None = None,
+    notes: str | None = None,
+    approved_by: str | None = None,
+) -> dict[str, Any]:
+    _ensure_schema()
+    name = str(policy_name or "").strip()
+    version = str(policy_version or "").strip()
+    source = str(source_type or "").strip()
+    if not name or not version:
+        raise ValueError("policy_identity_required")
+    if source not in {"profile", "replay"}:
+        raise ValueError("invalid_source_type")
+    profile = None
+    for item in list_policy_profiles(limit=100, policy_name=name):
+        if item["policy_version"] == version:
+            profile = item
+            break
+    if profile is None:
+        raise ValueError("policy_profile_not_found")
+    approval_id = uuid.uuid4().hex
+    created_ts = int(time.time())
+    status = "approved" if approved_by else "draft"
+    approved_ts = created_ts if approved_by else None
+    summary = {
+        "profile": profile,
+        "source_type": source,
+        "source_ref": source_ref,
+    }
+    with _connect() as c:
+        c.execute(
+            """
+            INSERT INTO policy_approvals (
+                approval_id, created_ts, policy_name, policy_version, source_type, source_ref,
+                approval_status, approved_by, approved_ts, notes, summary_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                approval_id,
+                created_ts,
+                name,
+                version,
+                source,
+                source_ref,
+                status,
+                approved_by,
+                approved_ts,
+                notes,
+                _json_dumps(summary),
+            ),
+        )
+    return get_policy_approval(approval_id)  # type: ignore[return-value]
+
+
+def get_policy_approval(approval_id: str) -> dict[str, Any] | None:
+    _ensure_schema()
+    with _connect() as c:
+        row = c.execute(
+            """
+            SELECT approval_id, created_ts, policy_name, policy_version, source_type, source_ref,
+                   approval_status, approved_by, approved_ts, notes, summary_json
+            FROM policy_approvals
+            WHERE approval_id=?
+            """,
+            (approval_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "approval_id": row[0],
+        "created_ts": row[1],
+        "policy_name": row[2],
+        "policy_version": row[3],
+        "source_type": row[4],
+        "source_ref": row[5],
+        "approval_status": row[6],
+        "approved_by": row[7],
+        "approved_ts": row[8],
+        "notes": row[9],
+        "summary": json.loads(row[10] or "{}"),
+    }
+
+
+def list_policy_approvals(limit: int = 20, approval_status: str | None = None) -> list[dict[str, Any]]:
+    _ensure_schema()
+    params: list[Any] = []
+    where_sql = ""
+    if approval_status:
+        where_sql = "WHERE approval_status=?"
+        params.append(approval_status)
+    params.append(max(1, limit))
+    with _connect() as c:
+        rows = c.execute(
+            f"""
+            SELECT approval_id
+            FROM policy_approvals
+            {where_sql}
+            ORDER BY created_ts DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+    return [approval for row in rows if (approval := get_policy_approval(str(row[0])))]
+
+
+def update_policy_approval_status(
+    approval_id: str,
+    *,
+    approval_status: str,
+    approved_by: str | None = None,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    _ensure_schema()
+    status = str(approval_status or "").strip()
+    if status not in {"draft", "approved", "rejected", "rolled_out"}:
+        raise ValueError("invalid_approval_status")
+    now = int(time.time())
+    with _connect() as c:
+        row = c.execute(
+            """
+            SELECT policy_name, policy_version
+            FROM policy_approvals
+            WHERE approval_id=?
+            """,
+            (approval_id,),
+        ).fetchone()
+        if not row:
+            raise KeyError("policy_approval_not_found")
+        c.execute(
+            """
+            UPDATE policy_approvals
+            SET approval_status=?, approved_by=COALESCE(?, approved_by),
+                approved_ts=CASE WHEN ?='approved' THEN ? ELSE approved_ts END,
+                notes=COALESCE(?, notes)
+            WHERE approval_id=?
+            """,
+            (status, approved_by, status, now, notes, approval_id),
+        )
+        c.execute(
+            """
+            INSERT INTO policy_rollout_events (
+                event_id, created_ts, rollout_id, approval_id, policy_name, policy_version,
+                event_type, event_status, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                now,
+                None,
+                approval_id,
+                row[0],
+                row[1],
+                "approval_status_changed",
+                status,
+                _json_dumps({"approved_by": approved_by, "notes": notes}),
+            ),
+        )
+    return get_policy_approval(approval_id)  # type: ignore[return-value]
+
+
+def list_policy_rollout_events(limit: int = 50, event_type: str | None = None) -> list[dict[str, Any]]:
+    _ensure_schema()
+    params: list[Any] = []
+    where_sql = ""
+    if event_type:
+        where_sql = "WHERE event_type=?"
+        params.append(event_type)
+    params.append(max(1, limit))
+    with _connect() as c:
+        rows = c.execute(
+            f"""
+            SELECT event_id, created_ts, rollout_id, approval_id, policy_name, policy_version,
+                   event_type, event_status, payload_json
+            FROM policy_rollout_events
+            {where_sql}
+            ORDER BY created_ts DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+    return [
+        {
+            "event_id": row[0],
+            "created_ts": row[1],
+            "rollout_id": row[2],
+            "approval_id": row[3],
+            "policy_name": row[4],
+            "policy_version": row[5],
+            "event_type": row[6],
+            "event_status": row[7],
+            "payload": json.loads(row[8] or "{}"),
+        }
+        for row in rows
+    ]
+
+
+def evaluate_policy_guardrails(
+    *,
+    hours: int = 24,
+    min_samples: int = 3,
+    max_negative_rate: float = 60.0,
+    auto_apply: bool = False,
+) -> dict[str, Any]:
+    _ensure_schema()
+    cutoff = int(time.time()) - max(1, hours) * 3600
+    canaries = [
+        rollout
+        for rollout in list_policy_rollouts(limit=100, active_only=True)
+        if rollout["rollout_mode"] == "canary"
+    ]
+    evaluations: list[dict[str, Any]] = []
+    for rollout in canaries:
+        with _connect() as c:
+            rows = c.execute(
+                """
+                SELECT sd.decision_id, sd.signal_id, ss.outcome_label
+                FROM signal_decisions sd
+                LEFT JOIN signal_snapshots ss
+                  ON ss.signal_id = sd.signal_id
+                 AND ss.horizon_minutes = (
+                    SELECT MAX(horizon_minutes)
+                    FROM signal_snapshots ss2
+                    WHERE ss2.signal_id = sd.signal_id
+                 )
+                WHERE sd.policy_name=?
+                  AND sd.policy_version=?
+                  AND sd.created_ts >= ?
+                  AND (? IS NULL OR sd.stage = ?)
+                """,
+                (
+                    rollout["policy_name"],
+                    rollout["policy_version"],
+                    cutoff,
+                    rollout["stage_scope"],
+                    rollout["stage_scope"],
+                ),
+            ).fetchall()
+        total = 0
+        positive = 0
+        negative = 0
+        for row in rows:
+            outcome_label = str(row[2] or "pending")
+            if outcome_label == "pending":
+                continue
+            total += 1
+            if outcome_label in {"worked", "strong_continuation"}:
+                positive += 1
+            elif outcome_label in {"failed", "faded"}:
+                negative += 1
+        negative_rate = round((negative / total) * 100.0, 1) if total else 0.0
+        recommended_action = "hold"
+        applied = False
+        if total >= max(1, min_samples) and negative_rate >= max_negative_rate:
+            recommended_action = "rollback"
+            if auto_apply:
+                now = int(time.time())
+                with _connect() as c:
+                    c.execute(
+                        "UPDATE policy_rollouts SET rollout_status='rolled_back' WHERE rollout_id=?",
+                        (rollout["rollout_id"],),
+                    )
+                    c.execute(
+                        """
+                        INSERT INTO policy_rollout_events (
+                            event_id, created_ts, rollout_id, approval_id, policy_name, policy_version,
+                            event_type, event_status, payload_json
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            uuid.uuid4().hex,
+                            now,
+                            rollout["rollout_id"],
+                            None,
+                            rollout["policy_name"],
+                            rollout["policy_version"],
+                            "guardrail_rollback",
+                            "rolled_back",
+                            _json_dumps(
+                                {
+                                    "hours": hours,
+                                    "min_samples": min_samples,
+                                    "max_negative_rate": max_negative_rate,
+                                    "negative_rate": negative_rate,
+                                    "total": total,
+                                }
+                            ),
+                        ),
+                    )
+                applied = True
+        evaluations.append(
+            {
+                "rollout_id": rollout["rollout_id"],
+                "policy_name": rollout["policy_name"],
+                "policy_version": rollout["policy_version"],
+                "stage_scope": rollout["stage_scope"],
+                "samples": total,
+                "positive": positive,
+                "negative": negative,
+                "negative_rate": negative_rate,
+                "recommended_action": recommended_action,
+                "applied": applied,
+            }
+        )
+    return {
+        "hours": max(1, hours),
+        "min_samples": max(1, min_samples),
+        "max_negative_rate": max_negative_rate,
+        "evaluations": evaluations,
     }
 
 

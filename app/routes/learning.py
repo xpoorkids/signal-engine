@@ -3,16 +3,21 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from app.services.signal_learning_service import (
     activate_policy_rollout,
+    create_policy_approval,
     create_policy_profile,
     evaluate_shadow_policy,
+    evaluate_policy_guardrails,
     get_engine_health_digest,
     get_diagnostics_summary,
     get_learning_digest,
     get_latest_learning_report,
     get_latest_policy_replay,
     get_learning_report,
+    get_policy_approval,
     list_policy_profiles,
+    list_policy_approvals,
     list_policy_rollouts,
+    list_policy_rollout_events,
     get_policy_trace_summary,
     get_policy_replay,
     resolve_live_policy,
@@ -21,6 +26,7 @@ from app.services.signal_learning_service import (
     render_diagnostics_html,
     render_learning_digest_html,
     render_learning_report_html,
+    update_policy_approval_status,
 )
 from app.services.tuning_service import (
     build_tuning_profiles,
@@ -181,6 +187,64 @@ def learning_policy_rollouts_create(payload: dict[str, object] = Body(...)):
 @router.get("/learning/policy/resolve")
 def learning_policy_resolve(stage: str, token: str | None = None):
     return resolve_live_policy(stage=stage, token=token)
+
+
+@router.get("/learning/policy/approvals")
+def learning_policy_approvals(limit: int = 20, approval_status: str | None = None):
+    return {"approvals": list_policy_approvals(limit=max(1, limit), approval_status=approval_status)}
+
+
+@router.post("/learning/policy/approvals")
+def learning_policy_approvals_create(payload: dict[str, object] = Body(...)):
+    try:
+        return create_policy_approval(
+            policy_name=str(payload.get("policy_name") or ""),
+            policy_version=str(payload.get("policy_version") or ""),
+            source_type=str(payload.get("source_type") or ""),
+            source_ref=str(payload.get("source_ref") or "") or None,
+            notes=str(payload.get("notes") or "") or None,
+            approved_by=str(payload.get("approved_by") or "") or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/learning/policy/approvals/{approval_id}")
+def learning_policy_approvals_by_id(approval_id: str):
+    approval = get_policy_approval(approval_id)
+    if approval is None:
+        raise HTTPException(status_code=404, detail="policy_approval_not_found")
+    return approval
+
+
+@router.post("/learning/policy/approvals/{approval_id}/status")
+def learning_policy_approvals_status(approval_id: str, payload: dict[str, object] = Body(...)):
+    try:
+        return update_policy_approval_status(
+            approval_id,
+            approval_status=str(payload.get("approval_status") or ""),
+            approved_by=str(payload.get("approved_by") or "") or None,
+            notes=str(payload.get("notes") or "") or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="policy_approval_not_found")
+
+
+@router.get("/learning/policy/events")
+def learning_policy_events(limit: int = 50, event_type: str | None = None):
+    return {"events": list_policy_rollout_events(limit=max(1, limit), event_type=event_type)}
+
+
+@router.post("/learning/policy/guardrails/evaluate")
+def learning_policy_guardrails_evaluate(payload: dict[str, object] = Body(default={})):
+    return evaluate_policy_guardrails(
+        hours=max(1, int(payload.get("hours") or 24)),
+        min_samples=max(1, int(payload.get("min_samples") or 3)),
+        max_negative_rate=float(payload.get("max_negative_rate") or 60.0),
+        auto_apply=bool(payload.get("auto_apply") or False),
+    )
 
 
 @router.get("/learning/policy/shadow")

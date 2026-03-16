@@ -344,6 +344,120 @@ def test_learning_policy_profile_and_rollout_routes(tmp_path, monkeypatch):
     assert resolve_payload["config"]["candidate_creator_min"] == 0.55
 
 
+def test_learning_policy_approval_and_guardrail_routes(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    client = TestClient(main.app)
+    profile_response = client.post(
+        "/learning/policy/profiles",
+        json={
+            "policy_name": "canary_guarded",
+            "policy_version": "v1",
+            "created_by": "ops",
+            "config": {"promoted_risk_max": 0.45},
+        },
+    )
+    assert profile_response.status_code == 200
+
+    approval_response = client.post(
+        "/learning/policy/approvals",
+        json={
+            "policy_name": "canary_guarded",
+            "policy_version": "v1",
+            "source_type": "profile",
+            "approved_by": "ops",
+        },
+    )
+    assert approval_response.status_code == 200
+    approval_id = approval_response.json()["approval_id"]
+
+    approval_status_response = client.post(
+        f"/learning/policy/approvals/{approval_id}/status",
+        json={"approval_status": "approved", "approved_by": "ops"},
+    )
+    assert approval_status_response.status_code == 200
+    assert approval_status_response.json()["approval_status"] == "approved"
+
+    rollout_response = client.post(
+        "/learning/policy/rollouts",
+        json={
+            "policy_name": "canary_guarded",
+            "policy_version": "v1",
+            "rollout_mode": "canary",
+            "stage_scope": "promoted",
+            "traffic_percent": 100,
+            "priority": 1,
+            "activated_by": "ops",
+        },
+    )
+    assert rollout_response.status_code == 200
+
+    for idx in range(3):
+        signal_id = sls.record_signal_decision(
+            token=f"token-canary-route-{idx}",
+            event_type="promoted",
+            stage="promoted",
+            decision="promoted_sent",
+            action_taken="emit",
+            attention_score=0.7,
+            risk_score=0.5,
+            confidence_score=0.9,
+            creator_score=0.3,
+            lifecycle="dex",
+            policy_name="canary_guarded",
+            policy_version="v1",
+            ts_value=1_773_700_100 + idx,
+            source="test",
+        )
+        with sls._connect() as c:
+            c.execute(
+                """
+                INSERT INTO signal_snapshots (
+                    signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                    volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                    txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                    outcome_label, snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    60,
+                    1_773_703_700 + idx,
+                    "dex",
+                    7000,
+                    2500,
+                    700,
+                    65.0,
+                    -25.0,
+                    -45.0,
+                    20,
+                    70,
+                    -41.0,
+                    -42.0,
+                    -70.0,
+                    "failed",
+                    '{"outcome_label":"failed"}',
+                ),
+            )
+
+    guardrail_response = client.post(
+        "/learning/policy/guardrails/evaluate",
+        json={"hours": 10000, "min_samples": 3, "max_negative_rate": 60.0, "auto_apply": True},
+    )
+    assert guardrail_response.status_code == 200
+    assert guardrail_response.json()["evaluations"][0]["recommended_action"] == "rollback"
+
+    approvals_response = client.get("/learning/policy/approvals?limit=10")
+    assert approvals_response.status_code == 200
+    assert approvals_response.json()["approvals"]
+
+    events_response = client.get("/learning/policy/events?limit=20")
+    assert events_response.status_code == 200
+    assert any(item["event_type"] == "guardrail_rollback" for item in events_response.json()["events"])
+
+
 def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
