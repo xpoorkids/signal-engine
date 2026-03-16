@@ -416,11 +416,11 @@ def _build_flow_section(metrics: dict, attention_score: float | None, risk_score
     structure = f"{_score_band(attention_score)} attention | {_risk_band(risk_score)} risk"
     lines = []
     if buys is not None or sells is not None:
-        lines.append(f"- ▲ Buy Flow 5m: `{buys if buys is not None else 'N/A'}`")
-        lines.append(f"- ▼ Sell Flow 5m: `{sells if sells is not None else 'N/A'}`")
+        lines.append(f"- {_status_dot('green')} Buy Flow 5m: `{buys if buys is not None else 'N/A'}`")
+        lines.append(f"- {_status_dot('red')} Sell Flow 5m: `{sells if sells is not None else 'N/A'}`")
     if flow_bias:
-        lines.append(f"- ↔ Flow Bias: `{flow_bias}`")
-    lines.append(f"- ◔ Momentum: `{momentum}`")
+        lines.append(f"- {_flow_dot(flow_bias)} Flow Bias: `{flow_bias}`")
+    lines.append(f"- {_momentum_dot(momentum)} Momentum: `{momentum}`")
     lines.append(f"- ▣ Market Structure: `{structure}`")
     return "\n".join(lines[:5])
 
@@ -535,10 +535,10 @@ def _market_header_field(metrics: dict) -> dict:
     chg5_arrow = _trend_arrow(metrics.get("price_change_m5"))
     return {
         "name": "Market Snapshot",
-        "value": _boxed_lines(
+        "value": "\n".join(
             [
-                f"LIQ {liq} | MC {mc} | VOL5 {vol5}",
-                f"AGE {age} | {chg5_arrow} M5 {chg5} | FLOW {flow}",
+                f"`LIQ {liq}` `MC {mc}` `VOL5 {vol5}`",
+                f"`AGE {age}` `{chg5_arrow} M5 {chg5}` `FLOW {flow}`",
             ]
         ),
         "inline": False,
@@ -655,7 +655,7 @@ def _operator_brief_field(
         f"Next: {(' | '.join(explanation.get('next_steps') or []) or 'continue monitoring')}",
         f"Data: {(' | '.join(explanation.get('data_quality') or []) or 'fresh')}",
     ]
-    return {"name": "Operator Brief", "value": _boxed_lines(lines), "inline": False}
+    return {"name": "Operator Brief", "value": _section_lines(lines, indent=0), "inline": False}
 
 
 def _trigger_field(e: Event) -> dict | None:
@@ -999,13 +999,14 @@ def _build_overview_lines(
 def _identity_field(symbol: str, name: str, full_addr: str) -> dict:
     return {
         "name": "Token Identity",
-        "value": _boxed_lines(
+        "value": _section_lines(
             [
-                f"ASSET   {_clean_text(name) or _clean_text(symbol) or 'Unknown'}",
-                f"TICKER  ${_clean_text(symbol).upper() or 'UNK'}",
-                "CONTRACT",
-                str(full_addr or "unknown"),
-            ]
+                f"**Asset:** {_clean_text(name) or _clean_text(symbol) or 'Unknown'}",
+                f"**Ticker:** `${_clean_text(symbol).upper() or 'UNK'}`",
+                "**Contract:**",
+                f"`{str(full_addr or 'unknown')}`",
+            ],
+            indent=0,
         ),
         "inline": False,
     }
@@ -1076,6 +1077,13 @@ def _format_candidate_like(e: Event, description: str) -> dict:
             },
             _trigger_field(e),
             _links_field(token, metrics),
+            _operator_brief_field(
+                e,
+                lifecycle=vm.lifecycle,
+                attention_score=vm.attention_score,
+                risk_score=vm.risk_score,
+                confidence_score=vm.confidence_score,
+            ),
         ]
     )
 
@@ -1143,6 +1151,13 @@ def format_discord(e: Event) -> dict:
                 _trigger_field(e),
                 {"name": "Why Promoted", "value": _section_lines([f"- {_pretty_reason(r)}" for r in reasons]), "inline": False} if reasons else None,
                 _links_field(token, metrics),
+                _operator_brief_field(
+                    e,
+                    lifecycle=vm.lifecycle,
+                    attention_score=vm.attention_score,
+                    risk_score=vm.risk_score,
+                    confidence_score=vm.confidence_score,
+                ),
             ]
         )
 
