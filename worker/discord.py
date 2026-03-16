@@ -119,6 +119,17 @@ def _format_change_pct(value: float | int | None) -> str | None:
     return f"{sign}{num:.1f}%"
 
 
+def _trend_arrow(value: float | int | None) -> str:
+    number = to_optional_float(value)
+    if number is None:
+        return "•"
+    if number > 0:
+        return "▲"
+    if number < 0:
+        return "▼"
+    return "→"
+
+
 def render_confidence_pct(score: float | None) -> str:
     clamped = to_optional_float(score)
     if clamped is None:
@@ -405,12 +416,12 @@ def _build_flow_section(metrics: dict, attention_score: float | None, risk_score
     structure = f"{_score_band(attention_score)} attention | {_risk_band(risk_score)} risk"
     lines = []
     if buys is not None or sells is not None:
-        lines.append(f"- {_status_dot('green')} Buy Flow 5m: `{buys if buys is not None else 'N/A'}`")
-        lines.append(f"- {_status_dot('red')} Sell Flow 5m: `{sells if sells is not None else 'N/A'}`")
+        lines.append(f"- ▲ Buy Flow 5m: `{buys if buys is not None else 'N/A'}`")
+        lines.append(f"- ▼ Sell Flow 5m: `{sells if sells is not None else 'N/A'}`")
     if flow_bias:
-        lines.append(f"- {_flow_dot(flow_bias)} Flow Bias: `{flow_bias}`")
-    lines.append(f"- {_momentum_dot(momentum)} Momentum: `{momentum}`")
-    lines.append(f"- Market Structure: `{structure}`")
+        lines.append(f"- ↔ Flow Bias: `{flow_bias}`")
+    lines.append(f"- ◔ Momentum: `{momentum}`")
+    lines.append(f"- ▣ Market Structure: `{structure}`")
     return "\n".join(lines[:5])
 
 
@@ -521,12 +532,13 @@ def _market_header_field(metrics: dict) -> dict:
     vol5 = format_currency_compact(metrics.get("volume_m5"))
     age = _fmt_age_minutes(metrics.get("age"))
     chg5 = _format_change_pct(metrics.get("price_change_m5")) or "N/A"
+    chg5_arrow = _trend_arrow(metrics.get("price_change_m5"))
     return {
         "name": "Market Snapshot",
         "value": _boxed_lines(
             [
                 f"LIQ {liq} | MC {mc} | VOL5 {vol5}",
-                f"AGE {age} | M5 {chg5} | FLOW {flow}",
+                f"AGE {age} | {chg5_arrow} M5 {chg5} | FLOW {flow}",
             ]
         ),
         "inline": False,
@@ -603,15 +615,7 @@ def _signal_type(e: Event, attention_score: float | None, risk_score: float | No
 
 
 def _signal_title(signal_type: str, symbol: str) -> str:
-    mapping = {
-        "promoted": "🔥 SE BREAKOUT",
-        "breakout": "🔥 SE BREAKOUT",
-        "setup": "🟡 SE SETUP",
-        "watch": "🔵 SE WATCH",
-        "risk_alert": "🔴 SE RISK ALERT",
-    }
-    prefix = mapping.get(signal_type, "🔵 SE WATCH")
-    return truncate_text(f"{prefix} ${symbol}", 256)
+    return truncate_text(f"${symbol}", 256)
 
 
 def _decision_field(extra: dict | None, confidence_pct: str, lifecycle: str, conviction: str, confidence_score: float | None, risk_score: float | None) -> dict:
@@ -987,7 +991,8 @@ def _build_overview_lines(
     return [
         f"**Asset:** {clean_name}",
         f"**Ticker:** `${clean_symbol}`",
-        f"**Contract:** `{full_addr}`",
+        "**Contract:**",
+        f"`{full_addr}`",
     ]
 
 
@@ -1042,14 +1047,6 @@ def _format_candidate_like(e: Event, description: str) -> dict:
     signal_type = _signal_type(e, vm.attention_score, vm.risk_score)
     fields = _finalize_fields(
         [
-            _decision_field(e.extra if isinstance(e.extra, dict) else {}, confidence_pct, vm.lifecycle, conviction, vm.confidence_score, vm.risk_score),
-            _operator_brief_field(
-                e,
-                lifecycle=vm.lifecycle,
-                attention_score=vm.attention_score,
-                risk_score=vm.risk_score,
-                confidence_score=vm.confidence_score,
-            ),
             {
                 "name": "Token Identity",
                 "value": _section_lines(
@@ -1072,6 +1069,14 @@ def _format_candidate_like(e: Event, description: str) -> dict:
                 "value": _section_lines([_build_quality_section(e, metrics, vm.risk_score, vm.confidence_score)]),
                 "inline": True,
             },
+            _decision_field(e.extra if isinstance(e.extra, dict) else {}, confidence_pct, vm.lifecycle, conviction, vm.confidence_score, vm.risk_score),
+            _operator_brief_field(
+                e,
+                lifecycle=vm.lifecycle,
+                attention_score=vm.attention_score,
+                risk_score=vm.risk_score,
+                confidence_score=vm.confidence_score,
+            ),
             _trigger_field(e),
             _links_field(token, metrics),
         ]
@@ -1126,14 +1131,6 @@ def format_discord(e: Event) -> dict:
         signal_type = _signal_type(e, vm.attention_score, vm.risk_score)
         fields = _finalize_fields(
             [
-                _decision_field(e.extra if isinstance(e.extra, dict) else {}, confidence_pct, vm.lifecycle, conviction, vm.confidence_score, vm.risk_score),
-                _operator_brief_field(
-                    e,
-                    lifecycle=vm.lifecycle,
-                    attention_score=vm.attention_score,
-                    risk_score=vm.risk_score,
-                    confidence_score=vm.confidence_score,
-                ),
                 {
                     "name": "Token Identity",
                     "value": _section_lines(
@@ -1156,6 +1153,14 @@ def format_discord(e: Event) -> dict:
                     "value": _section_lines([_build_quality_section(e, metrics, vm.risk_score, vm.confidence_score)]),
                     "inline": True,
                 },
+                _decision_field(e.extra if isinstance(e.extra, dict) else {}, confidence_pct, vm.lifecycle, conviction, vm.confidence_score, vm.risk_score),
+                _operator_brief_field(
+                    e,
+                    lifecycle=vm.lifecycle,
+                    attention_score=vm.attention_score,
+                    risk_score=vm.risk_score,
+                    confidence_score=vm.confidence_score,
+                ),
                 _trigger_field(e),
                 {"name": "Why Promoted", "value": _section_lines([f"- {_pretty_reason(r)}" for r in reasons]), "inline": False} if reasons else None,
                 _links_field(token, metrics),
