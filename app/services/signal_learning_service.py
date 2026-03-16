@@ -1506,6 +1506,16 @@ def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
                     ),
                 }
             )
+    if session_signal_quality:
+        recs.append(
+            {
+                "title": "Weakest Session x Signal",
+                "detail": (
+                    f"`{worst_combo['signal_type']}` in `{worst_combo['session_bucket']}` is weakest at "
+                    f"{worst_combo['win_rate']}% positive outcomes across {worst_combo['total']} samples."
+                ),
+            }
+        )
     if session_signal_trends:
         improving_combo = max(session_signal_trends, key=lambda item: (item["win_rate_delta"], item["current_total"]))
         degrading_combo = min(session_signal_trends, key=lambda item: (item["win_rate_delta"], -item["current_total"]))
@@ -1529,15 +1539,6 @@ def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
                     ),
                 }
             )
-        recs.append(
-            {
-                "title": "Weakest Session x Signal",
-                "detail": (
-                    f"`{worst_combo['signal_type']}` in `{worst_combo['session_bucket']}` is weakest at "
-                    f"{worst_combo['win_rate']}% positive outcomes across {worst_combo['total']} samples."
-                ),
-            }
-        )
     if int(conversion.get("candidate_tokens") or 0) > 0:
         conv_rate = round(
             (int(conversion.get("candidate_to_promoted_tokens") or 0) / max(1, int(conversion.get("candidate_tokens") or 0))) * 100.0,

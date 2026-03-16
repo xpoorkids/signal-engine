@@ -221,7 +221,9 @@ def _summary_blurb(attention_score: float | None, risk_score: float | None, life
     if attention_score >= 0.70:
         return "Early coordination detected. Watch for continued buyer breadth and stable liquidity."
     if risk_score is not None and risk_score >= 0.50:
-        return "Interest is present, but risk remains elevated. Keep sizing defensive."
+        return "Watch-only: interest is present, but risk remains elevated. Keep sizing defensive."
+    if lifecycle == "dex" and attention_score >= 0.50:
+        return "Constructive setup with improving flow. Wait for cleaner confirmation."
     return "Market is forming. Wait for stronger participation or cleaner structure."
 
 

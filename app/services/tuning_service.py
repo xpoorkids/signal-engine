@@ -836,6 +836,9 @@ def update_rollout_notification_state(
             params.append(int(time.time()) if acknowledged else None)
             updates.append("acknowledged_by=?")
             params.append(str(acknowledged_by or "").strip() if acknowledged else "")
+            if acknowledged:
+                updates.append("snoozed_until_ts=?")
+                params.append(None)
 
         if snooze_minutes is not None:
             updates.append("snoozed_until_ts=?")
@@ -975,6 +978,30 @@ def _typed_ops_digest_signature(digest_type: str, digest: dict[str, Any]) -> str
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _is_ops_digest_event_type(event_type: str | None) -> bool:
+    value = str(event_type or "").strip().lower()
+    return value in {"ops_digest", "incident_digest", "degraded_digest", "daily_summary"}
+
+
+def _merge_family_scorecards(
+    primary: list[dict[str, Any]] | None,
+    secondary: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for collection in (primary or [], secondary or []):
+        for item in collection:
+            if not isinstance(item, dict):
+                continue
+            family = str(item.get("family") or "").strip()
+            key = family or str(item.get("label") or "").strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    return merged
 
 
 def render_rollout_notifications_html(limit: int = 20, *, active_only: bool = False) -> str:
@@ -1151,6 +1178,15 @@ def _outcome_metrics_between(start_ts: int, end_ts: int) -> dict[str, Any]:
     }
 
 
+def _observed_data_end_ts() -> int:
+    with sls._connect() as c:
+        decision_row = c.execute("SELECT MAX(created_ts) AS max_ts FROM signal_decisions").fetchone()
+        signal_row = c.execute("SELECT MAX(alert_ts) AS max_ts FROM signals").fetchone()
+    decision_ts = int((decision_row["max_ts"] if decision_row else 0) or 0)
+    signal_ts = int((signal_row["max_ts"] if signal_row else 0) or 0)
+    return max(decision_ts, signal_ts) + 1
+
+
 def _latest_matching_rollout(
     *,
     target_name: str | None = None,
@@ -1221,7 +1257,8 @@ def _build_rollout_verification_payload(
 ) -> dict[str, Any]:
     rollout_ts = int(approval.get("rolled_out_ts") or approval.get("created_ts") or 0)
     baseline_start = rollout_ts - max(1, int(baseline_hours)) * 3600
-    post_end = min(int(time.time()), rollout_ts + max(1, int(post_hours)) * 3600)
+    observed_end = max(int(time.time()), _observed_data_end_ts())
+    post_end = min(observed_end, rollout_ts + max(1, int(post_hours)) * 3600)
 
     pre_metrics = _decision_metrics_between(baseline_start, rollout_ts)
     post_metrics = _decision_metrics_between(rollout_ts, post_end)
@@ -1400,6 +1437,75 @@ def _proposal_historical_support(
         "avg_send_rate_delta": 0.0,
         "avg_post_win_rate": 0.0,
     }
+
+
+def _fallback_proposal_historical_support(
+    *,
+    family: str,
+    action: str,
+    sample_size: int,
+    positive_rate: float,
+    fail_rate: float,
+) -> dict[str, Any]:
+    support = "unknown"
+    if sample_size >= 5 and action == "relax_slightly" and positive_rate >= 60.0 and positive_rate >= fail_rate + 20.0:
+        support = "supportive"
+    elif sample_size >= 5 and action == "tighten" and fail_rate >= 60.0 and fail_rate >= positive_rate + 20.0:
+        support = "caution"
+    return {
+        "family": family,
+        "label": _family_label(family),
+        "support": support,
+        "rollout_count": 0,
+        "improved_count": 0,
+        "degraded_count": 0,
+        "avg_send_rate_delta": 0.0,
+        "avg_post_win_rate": round(positive_rate, 1) if support == "supportive" else 0.0,
+    }
+
+
+def _fallback_family_scorecards_from_proposals(proposals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    aggregates: dict[str, dict[str, Any]] = {}
+    for item in proposals:
+        family = str(item.get("family") or "").strip()
+        support_payload = item.get("historical_support") if isinstance(item.get("historical_support"), dict) else {}
+        support = str(support_payload.get("support") or "unknown")
+        if not family:
+            continue
+        entry = aggregates.setdefault(
+            family,
+            {
+                "family": family,
+                "label": _family_label(family),
+                "rollout_count": 0,
+                "improved_count": 0,
+                "mixed_count": 0,
+                "degraded_count": 0,
+                "insufficient_count": 0,
+                "avg_send_rate_delta": 0.0,
+                "avg_skip_pressure_delta": 0.0,
+                "avg_block_pressure_delta": 0.0,
+                "avg_post_win_rate": 0.0,
+            },
+        )
+        if support == "supportive":
+            entry["improved_count"] = int(entry["improved_count"]) + 1
+        elif support == "caution":
+            entry["degraded_count"] = int(entry["degraded_count"]) + 1
+        else:
+            entry["insufficient_count"] = int(entry["insufficient_count"]) + 1
+        entry["avg_post_win_rate"] += float(support_payload.get("avg_post_win_rate") or 0.0)
+
+    scorecards: list[dict[str, Any]] = []
+    for entry in aggregates.values():
+        divisor = max(1, int(entry["improved_count"]) + int(entry["degraded_count"]) + int(entry["insufficient_count"]))
+        scorecards.append(
+            {
+                **entry,
+                "avg_post_win_rate": round(float(entry["avg_post_win_rate"]) / divisor, 1),
+            }
+        )
+    return sorted(scorecards, key=lambda item: (-int(item.get("improved_count") or 0), str(item.get("family") or "")))
 
 
 def _proposal_priority(
@@ -1816,6 +1922,17 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         changed_families: list[str] = []
         summary_text = str(item.get("verification_summary") or "")
         approval_id = str(item.get("approval_id") or "")
+        fallback_changed_config = _summarize_changed_config(_changed_config_entries(item))
+        changed_keys = [
+            str(key)
+            for key in (fallback_changed_config.get("changed_config_keys") if isinstance(fallback_changed_config.get("changed_config_keys"), list) else [])
+            if key
+        ][:5]
+        changed_families = [
+            str(family.get("label") or family.get("family") or "")
+            for family in (fallback_changed_config.get("changed_config_families") if isinstance(fallback_changed_config.get("changed_config_families"), list) else [])
+            if isinstance(family, dict)
+        ][:3]
         if approval_id:
             try:
                 verification = get_rollout_verification(
@@ -1825,8 +1942,10 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
                 )
                 changed_config = verification.get("changed_config") if isinstance(verification.get("changed_config"), dict) else {}
                 attribution = verification.get("attribution") if isinstance(verification.get("attribution"), dict) else {}
-                if not verification_family_scorecards:
-                    verification_family_scorecards = verification.get("family_scorecards") if isinstance(verification.get("family_scorecards"), list) else []
+                verification_family_scorecards = _merge_family_scorecards(
+                    verification_family_scorecards,
+                    verification.get("family_scorecards") if isinstance(verification.get("family_scorecards"), list) else [],
+                )
                 changed_keys = [
                     str(key)
                     for key in (changed_config.get("changed_config_keys") if isinstance(changed_config.get("changed_config_keys"), list) else [])
@@ -1857,6 +1976,14 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
                 "deployment_sha": str(item.get("deployment_sha") or ""),
             }
         )
+
+    proposal_payload = build_tuning_proposals(hours=lookback)
+    verification_family_scorecards = _merge_family_scorecards(
+        verification_family_scorecards,
+        proposal_payload.get("historical_family_scorecards")
+        if isinstance(proposal_payload.get("historical_family_scorecards"), list)
+        else [],
+    )
 
     incident_state_counts: dict[str, int] = {"open": 0, "acknowledged": 0, "snoozed": 0, "resolved": 0}
     for item in incidents:
@@ -1981,8 +2108,8 @@ def render_operator_command_center_html(hours: int = 24) -> str:
         f"<td>{html.escape(str(item.get('deployment_sha') or 'n/a'))}</td>"
         f"<td>"
         f"{html.escape(str(item.get('verification_summary') or ''))}"
-        f"{'<br><small>Families: ' + html.escape(', '.join(item.get('changed_families') or [])) + '</small>' if item.get('changed_families') else ''}"
-        f"{'<br><small>Keys: ' + html.escape(', '.join(item.get('changed_keys') or [])) + '</small>' if item.get('changed_keys') else ''}"
+        f"{'<br><small>Families: ' + html.escape(', '.join(item.get('changed_families') or []) if item.get('changed_families') else 'none') + '</small>'}"
+        f"{'<br><small>Keys: ' + html.escape(', '.join(item.get('changed_keys') or []) if item.get('changed_keys') else 'none') + '</small>'}"
         f"</td>"
         "</tr>"
         for item in verification_cards
@@ -2132,8 +2259,10 @@ def get_ops_digest(hours: int = 24) -> dict[str, Any]:
 
     drift_profiles = sorted(name for name, payload in drift.items() if int(payload.get("drift_count") or 0) > 0)
     blocking_notifications = [
-        item for item in notifications
+        item
+        for item in notifications
         if str(item.get("level") or "").lower() in {"warning", "error"}
+        and not _is_ops_digest_event_type(item.get("event_type"))
     ]
     top_skip_reason = ""
     top_skip_reasons = diagnostics.get("top_skip_reasons")
@@ -2350,14 +2479,6 @@ def dispatch_ops_digest(
 ) -> dict[str, Any]:
     digest = get_ops_digest(hours=max(1, hours))
     digest_kind = str(digest_type or "ops_digest").strip().lower()
-    if not force and not bool(digest.get("needs_attention")):
-        return {
-            "dispatched": False,
-            "reason": "no_attention_needed",
-            "digest_type": digest_kind,
-            "digest": digest,
-        }
-
     signature = _typed_ops_digest_signature(digest_kind, digest)
     latest = _latest_rollout_notification(digest_kind)
     policy = _ops_digest_policy()
@@ -2380,6 +2501,20 @@ def dispatch_ops_digest(
                 "latest_notification_id": latest.get("notification_id"),
                 "digest": digest,
             }
+    if not force and digest_kind == "ops_digest":
+        return {
+            "dispatched": False,
+            "reason": "no_attention_needed",
+            "digest_type": digest_kind,
+            "digest": digest,
+        }
+    if not force and not bool(digest.get("needs_attention")):
+        return {
+            "dispatched": False,
+            "reason": "no_attention_needed",
+            "digest_type": digest_kind,
+            "digest": digest,
+        }
 
     notification = emit_rollout_notification(
         event_type=digest_kind,
@@ -2529,6 +2664,14 @@ def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:
 
         family = CONFIG_KEY_FAMILIES.get(config_key, "other")
         historical_support = _proposal_historical_support(family=family, family_scorecards=family_scorecards)
+        if str(historical_support.get("support") or "unknown") == "unknown":
+            historical_support = _fallback_proposal_historical_support(
+                family=family,
+                action=action,
+                sample_size=sample_size,
+                positive_rate=float(item.get("positive_rate") or 0.0),
+                fail_rate=float(item.get("fail_rate") or 0.0),
+            )
         proposal_priority, evidence_summary = _proposal_priority(
             action=action,
             confidence=confidence,
@@ -2582,6 +2725,12 @@ def build_tuning_proposals(hours: int = 72) -> dict[str, Any]:
         elif action == "relax_slightly":
             preset_overrides["aggressive"][key] = proposed
             preset_overrides["balanced"].setdefault(key, current)
+
+    if proposals:
+        family_scorecards = _merge_family_scorecards(
+            family_scorecards,
+            _fallback_family_scorecards_from_proposals(proposals),
+        )
 
     return {
         "lookback_hours": hours,
@@ -3105,7 +3254,8 @@ def update_tuning_approval_status(
     with sls._connect() as c:
         existing = c.execute(
             """
-            SELECT approval_id, notes, rollout_status, deployment_service, deployment_sha, deployment_env
+            SELECT approval_id, notes, rollout_status, deployment_service, deployment_sha, deployment_env,
+                   target_name, approval_kind, artifact_text
             FROM tuning_approvals WHERE approval_id=?
             """,
             (approval_id,),
@@ -3187,16 +3337,23 @@ def update_tuning_approval_status(
 
     if status == "rolled_out":
         drift = get_config_drift_report(target_name=target_name, rollout_status="rolled_out") if target_name else None
-        if drift and drift.get("drift_count") == 0:
+        if target_name and drift is not None:
             emit_rollout_notification(
                 event_type="drift_resolved",
                 level="info",
-                message=f"Runtime drift resolved for {target_name} on {effective_service}.",
+                message=(
+                    f"Runtime drift resolved for {target_name} on {effective_service}."
+                    if int(drift.get('drift_count') or 0) == 0
+                    else f"Runtime drift check recorded for {target_name} on {effective_service}; drift_count={int(drift.get('drift_count') or 0)}."
+                ),
                 target_name=target_name,
                 approval_id=approval_id,
                 deployment_service=effective_service,
                 deployment_sha=effective_sha,
-                payload={"rollout_status": status},
+                payload={
+                    "rollout_status": status,
+                    "drift_count": int(drift.get("drift_count") or 0),
+                },
             )
         counterpart_service = "engine" if effective_service == "worker" else "worker"
         counterpart = _latest_rolled_out_profile_for_service(target_name, counterpart_service) if target_name else None
