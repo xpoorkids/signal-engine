@@ -27,7 +27,7 @@ from app.services.signal_learning_service import (
     snapshot_worker,
     daily_report_worker,
 )
-from app.services.tuning_service import ops_digest_worker
+from app.services.tuning_service import ops_digest_worker, rollout_verification_worker
 
 
 def _should_send_heating_up(de: Event) -> bool:
@@ -132,6 +132,7 @@ async def run_worker() -> None:
     tasks.append(asyncio.create_task(snapshot_worker()))
     tasks.append(asyncio.create_task(daily_report_worker()))
     tasks.append(asyncio.create_task(ops_digest_worker()))
+    tasks.append(asyncio.create_task(rollout_verification_worker()))
     if ENABLE_WS:
         tasks.append(asyncio.create_task(start_helius_listeners(q)))
     if ENABLE_DEX:

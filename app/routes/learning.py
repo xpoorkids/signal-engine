@@ -17,6 +17,7 @@ from app.services.tuning_service import (
     build_tuning_proposals,
     create_tuning_approval,
     apply_rollout_verification,
+    apply_pending_rollout_verifications,
     dispatch_ops_digest,
     get_config_drift_report,
     get_latest_tuning_approval,
@@ -377,6 +378,16 @@ def learning_tuning_verification_apply(payload: dict[str, object] = Body(...)):
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="rollout_not_found")
+
+
+@router.post("/learning/tuning/verification/run")
+def learning_tuning_verification_run(payload: dict[str, object] = Body(default={})):
+    return apply_pending_rollout_verifications(
+        baseline_hours=max(1, int(payload.get("baseline_hours") or 24)),
+        post_hours=max(1, int(payload.get("post_hours") or 24)),
+        limit=max(1, int(payload.get("limit") or 20)),
+        force=bool(payload.get("force") or False),
+    )
 
 
 @router.get("/learning/tuning/notifications")

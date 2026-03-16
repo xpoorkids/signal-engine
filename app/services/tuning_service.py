@@ -728,6 +728,24 @@ def _ops_daily_summary_hours() -> int:
     return max(1, value)
 
 
+def _rollout_verification_poll_seconds() -> int:
+    raw = os.getenv("SIGNAL_ENGINE_ROLLOUT_VERIFY_POLL_SEC", "").strip()
+    try:
+        value = int(raw) if raw else 1800
+    except ValueError:
+        value = 1800
+    return max(60, value)
+
+
+def _rollout_verification_min_age_seconds() -> int:
+    raw = os.getenv("SIGNAL_ENGINE_ROLLOUT_VERIFY_MIN_AGE_SEC", "").strip()
+    try:
+        value = int(raw) if raw else 3600
+    except ValueError:
+        value = 3600
+    return max(300, value)
+
+
 def _ops_threshold_float(env_key: str, default: float) -> float:
     raw = os.getenv(env_key, "").strip()
     try:
@@ -1240,6 +1258,84 @@ def apply_rollout_verification(
         "applied_status": verification_status,
         "applied_summary": summary,
     }
+
+
+def apply_pending_rollout_verifications(
+    *,
+    baseline_hours: int = 24,
+    post_hours: int = 24,
+    limit: int = 20,
+    force: bool = False,
+) -> dict[str, Any]:
+    now_ts = int(time.time())
+    approvals = list_tuning_approvals(limit=max(1, limit * 5), rollout_status="rolled_out")
+    results: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    for approval in approvals:
+        rollout_ts = int(approval.get("rolled_out_ts") or approval.get("created_ts") or 0)
+        verification_status = str(approval.get("verification_status") or "")
+        verification_ts = int(approval.get("verification_ts") or 0)
+        age_seconds = max(0, now_ts - rollout_ts)
+
+        if not force and age_seconds < _rollout_verification_min_age_seconds():
+            skipped.append(
+                {
+                    "approval_id": approval["approval_id"],
+                    "reason": "too_fresh",
+                    "age_seconds": age_seconds,
+                }
+            )
+            continue
+        if not force and verification_status in {"validated", "degraded", "review_needed"} and verification_ts >= rollout_ts:
+            skipped.append(
+                {
+                    "approval_id": approval["approval_id"],
+                    "reason": "already_verified",
+                    "verification_status": verification_status,
+                }
+            )
+            continue
+
+        try:
+            results.append(
+                apply_rollout_verification(
+                    approval_id=approval["approval_id"],
+                    baseline_hours=baseline_hours,
+                    post_hours=post_hours,
+                )
+            )
+        except KeyError:
+            skipped.append({"approval_id": approval["approval_id"], "reason": "approval_missing"})
+
+        if len(results) >= max(1, limit):
+            break
+
+    return {
+        "applied": results,
+        "skipped": skipped,
+        "applied_count": len(results),
+        "skipped_count": len(skipped),
+    }
+
+
+async def rollout_verification_worker() -> None:
+    while True:
+        try:
+            result = apply_pending_rollout_verifications(
+                baseline_hours=24,
+                post_hours=24,
+                limit=10,
+                force=False,
+            )
+            logger.info(
+                "[rollout-verification] applied=%s skipped=%s",
+                int(result.get("applied_count") or 0),
+                int(result.get("skipped_count") or 0),
+            )
+        except Exception as exc:
+            logger.exception("[rollout-verification] worker iteration failed: %s", exc)
+        await asyncio.sleep(_rollout_verification_poll_seconds())
 
 
 def get_operator_command_center(hours: int = 24) -> dict[str, Any]:

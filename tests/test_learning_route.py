@@ -330,6 +330,15 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert verification_apply_payload["approval"]["approval_id"] == approval_id
     assert "verification_status" in verification_apply_payload["approval"]
 
+    verification_run_response = client.post(
+        "/learning/tuning/verification/run",
+        json={"baseline_hours": 24, "post_hours": 24, "limit": 10, "force": True},
+    )
+    assert verification_run_response.status_code == 200
+    verification_run_payload = verification_run_response.json()
+    assert "applied_count" in verification_run_payload
+    assert "skipped_count" in verification_run_payload
+
     notifications_response = client.get("/learning/tuning/notifications?limit=20")
     assert notifications_response.status_code == 200
     notifications_payload = notifications_response.json()

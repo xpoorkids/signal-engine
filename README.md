@@ -79,6 +79,7 @@ Features:
 - `GET /learning/tuning/verification`
 - `GET /learning/tuning/verification/dashboard`
 - `POST /learning/tuning/verification/apply`
+- `POST /learning/tuning/verification/run`
 - `GET /learning/tuning/notifications`
 - `GET /learning/tuning/notifications/dashboard`
 - `GET /learning/tuning/incidents`
@@ -120,6 +121,11 @@ Rollout verification:
 - `GET /learning/tuning/verification` compares pre- and post-rollout engine behavior for a rolled-out approval.
 - `GET /learning/tuning/verification/dashboard` renders the same verification as an operator HTML page.
 - `POST /learning/tuning/verification/apply` persists verification state back onto the approval record.
+- `POST /learning/tuning/verification/run` runs verification across recent rolled-out approvals.
+
+Rollout verification automation:
+- `SIGNAL_ENGINE_ROLLOUT_VERIFY_POLL_SEC` controls the background verification sweep cadence.
+- `SIGNAL_ENGINE_ROLLOUT_VERIFY_MIN_AGE_SEC` controls how long a rollout must age before automatic verification.
 
 ## Running Locally
 

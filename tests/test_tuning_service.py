@@ -6,6 +6,7 @@ import json
 from app.services import signal_learning_service as sls
 from app.services.tuning_service import (
     apply_rollout_verification,
+    apply_pending_rollout_verifications,
     build_tuning_profiles,
     build_tuning_proposals,
     create_tuning_approval,
@@ -35,6 +36,7 @@ from app.services.tuning_service import (
     render_tuning_env_snippet,
     render_tuning_profiles_html,
     render_tuning_proposals_html,
+    rollout_verification_worker,
     update_incident_state,
     update_tuning_approval_status,
 )
@@ -684,3 +686,29 @@ def test_rollout_verification_compares_pre_and_post_windows(tmp_path, monkeypatc
     assert applied["approval"]["approval_id"] == approval["approval_id"]
     assert applied["approval"]["verification_status"] in {"validated", "review_needed", "degraded", "pending_outcomes"}
     assert applied["approval"]["verification_summary"]
+
+    batch = apply_pending_rollout_verifications(baseline_hours=1, post_hours=2, limit=10, force=True)
+    assert batch["applied_count"] >= 1
+
+
+def test_rollout_verification_worker_runs_single_iteration(monkeypatch):
+    calls: list[str] = []
+
+    def fake_apply_pending_rollout_verifications(*, baseline_hours: int = 24, post_hours: int = 24, limit: int = 20, force: bool = False):
+        calls.append(f"{baseline_hours}:{post_hours}:{limit}:{force}")
+        return {"applied_count": 0, "skipped_count": 0, "applied": [], "skipped": []}
+
+    async def fake_sleep(_: int):
+        raise RuntimeError("stop-loop")
+
+    monkeypatch.setenv("SIGNAL_ENGINE_ROLLOUT_VERIFY_POLL_SEC", "120")
+    monkeypatch.setattr("app.services.tuning_service.apply_pending_rollout_verifications", fake_apply_pending_rollout_verifications)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    try:
+        asyncio.run(rollout_verification_worker())
+        assert False, "expected stop-loop"
+    except RuntimeError as exc:
+        assert str(exc) == "stop-loop"
+
+    assert calls == ["24:24:10:False"]
