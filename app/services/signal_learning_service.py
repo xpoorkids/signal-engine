@@ -2214,6 +2214,7 @@ def get_policy_automation_status() -> dict[str, Any]:
         "latest_run": get_latest_policy_automation_run(),
         "recent_runs": recent_runs,
         "guardrails": _policy_automation_guardrails(),
+        "regime_feedback": get_regime_action_feedback(hours=168),
         "pending_approvals": [
             item
             for item in list_policy_approvals(limit=20)
@@ -2670,12 +2671,78 @@ def execute_regime_policy_action(
     }
 
 
+def get_regime_action_feedback(*, hours: int = 168) -> dict[str, Any]:
+    config = _policy_automation_config()
+    cutoff = int(time.time()) - max(1, hours) * 3600
+    rollout_index = {str(item.get("rollout_id") or ""): item for item in list_policy_rollouts(limit=500, active_only=False)}
+    evaluations: list[dict[str, Any]] = []
+    by_regime: dict[str, dict[str, Any]] = {}
+    for event_type in ("auto_regime_action_started", "manual_regime_action"):
+        for event in list_policy_rollout_events(limit=500, event_type=event_type):
+            if int(event.get("created_ts") or 0) < cutoff:
+                continue
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            regime_key = str(payload.get("regime_scope") or "")
+            action = str(payload.get("action") or "")
+            stage_scope = str(payload.get("stage_scope") or "")
+            rollout_id = str(event.get("rollout_id") or "")
+            rollout = rollout_index.get(rollout_id) if rollout_id else None
+            rollout_status = str((rollout or {}).get("rollout_status") or "pending")
+            metrics = _canary_metrics_for_rollout(rollout or {"policy_name": event.get("policy_name"), "policy_version": event.get("policy_version"), "stage_scope": stage_scope, "regime_scope": regime_key}, hours=max(1, hours))
+            verdict = "pending"
+            if rollout_status == "promoted":
+                verdict = "correct"
+            elif rollout_status == "rolled_back":
+                verdict = "incorrect"
+            elif metrics["samples"] >= int(config["auto_promote_min_samples"]):
+                if metrics["negative_rate"] > float(config["auto_promote_max_negative_rate"]):
+                    verdict = "incorrect"
+                elif action == "canary_relax" and metrics["positive_rate"] >= float(config["auto_promote_min_positive_rate"]):
+                    verdict = "correct"
+                elif action == "canary_tighten" and metrics["negative_rate"] <= float(config["auto_promote_max_negative_rate"]):
+                    verdict = "correct"
+            evaluation = {
+                "event_id": event.get("event_id"),
+                "event_type": event_type,
+                "policy_name": event.get("policy_name"),
+                "policy_version": event.get("policy_version"),
+                "action": action,
+                "stage_scope": stage_scope,
+                "regime_key": regime_key,
+                "rollout_id": rollout_id or None,
+                "rollout_status": rollout_status,
+                "verdict": verdict,
+                "metrics": metrics,
+            }
+            evaluations.append(evaluation)
+            summary = by_regime.setdefault(
+                regime_key,
+                {
+                    "regime_key": regime_key,
+                    "stage_scope": stage_scope,
+                    "actions": {},
+                    "recommended_action": None,
+                },
+            )
+            action_summary = summary["actions"].setdefault(
+                action,
+                {"correct": 0, "incorrect": 0, "pending": 0},
+            )
+            action_summary[verdict] = int(action_summary.get(verdict) or 0) + 1
+    for summary in by_regime.values():
+        relax_score = int(summary["actions"].get("canary_relax", {}).get("correct", 0)) - int(summary["actions"].get("canary_relax", {}).get("incorrect", 0))
+        tighten_score = int(summary["actions"].get("canary_tighten", {}).get("correct", 0)) - int(summary["actions"].get("canary_tighten", {}).get("incorrect", 0))
+        summary["recommended_action"] = "canary_relax" if relax_score > tighten_score else "canary_tighten"
+    return {"hours": max(1, hours), "evaluations": evaluations, "by_regime": by_regime}
+
+
 def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> dict[str, Any]:
     config = _policy_automation_config()
     budget_remaining = max(
         0,
         int(config["max_regime_actions_per_day"]) - _recent_policy_event_count({"auto_regime_action_started"}, 86400),
     )
+    feedback = get_regime_action_feedback(hours=max(24, hours * 7))
     generated = generate_policy_candidates(hours=max(1, hours), generation_limit=int(config["generation_limit"]), replay_limit=max(25, replay_limit))
     candidates = generated.get("generated") if isinstance(generated.get("generated"), list) else []
     executed: list[dict[str, Any]] = []
@@ -2697,6 +2764,9 @@ def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> 
         negative = int(impact.get("negative_outcomes") or 0)
         stage = str(item.get("stage") or _policy_stage_from_regime_key(regime_key))
         action = "canary_relax" if positive >= negative else "canary_tighten"
+        regime_feedback = (feedback.get("by_regime") if isinstance(feedback.get("by_regime"), dict) else {}).get(regime_key)
+        if isinstance(regime_feedback, dict) and regime_feedback.get("recommended_action"):
+            action = str(regime_feedback.get("recommended_action") or action)
         cooldown_remaining = _cooldown_remaining(
             _latest_policy_event_ts(event_types={"auto_regime_action_started"}, stage_scope=stage, regime_scope=regime_key),
             int(config["regime_action_cooldown_sec"]),
@@ -2744,6 +2814,7 @@ def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> 
         budget_remaining -= 1
     return {
         "config": config,
+        "feedback": feedback,
         "generated": generated,
         "executed": executed,
         "skipped": skipped,
