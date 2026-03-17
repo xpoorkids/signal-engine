@@ -2181,6 +2181,7 @@ def _policy_automation_config() -> dict[str, Any]:
         "generation_limit": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_GENERATION_LIMIT", "6"))),
         "generation_replay_limit": max(25, int(os.getenv("SIGNAL_ENGINE_POLICY_GENERATION_REPLAY_LIMIT", "250"))),
         "generation_novelty_min": float(os.getenv("SIGNAL_ENGINE_POLICY_GENERATION_NOVELTY_MIN", "0.05")),
+        "generation_proposal_score_min": float(os.getenv("SIGNAL_ENGINE_POLICY_GENERATION_PROPOSAL_SCORE_MIN", "45.0")),
         "auto_approval_min_trace_count": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_APPROVAL_MIN_TRACE_COUNT", "1"))),
         "auto_approval_min_changed_count": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_APPROVAL_MIN_CHANGED_COUNT", "1"))),
         "auto_approval_min_change_rate": float(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_APPROVAL_MIN_CHANGE_RATE", "1.0")),
@@ -2819,6 +2820,79 @@ def get_policy_portfolio_budget(*, hours: int = 168) -> dict[str, Any]:
     }
 
 
+def get_policy_strategy_synthesis(*, hours: int = 168) -> dict[str, Any]:
+    meta_policy = get_regime_meta_policy(hours=max(1, hours))
+    feedback = get_regime_action_feedback(hours=max(1, hours))
+    recent_replays = list_policy_replays(limit=100)
+    replay_pressure: dict[str, dict[str, int]] = {}
+    for replay in recent_replays:
+        regime_key = str(replay.get("regime_key") or "")
+        if not regime_key:
+            continue
+        impact = replay.get("impact") if isinstance(replay.get("impact"), dict) else {}
+        bucket = replay_pressure.setdefault(regime_key, {"positive": 0, "negative": 0, "runs": 0})
+        bucket["positive"] += int(impact.get("positive_outcomes") or 0)
+        bucket["negative"] += int(impact.get("negative_outcomes") or 0)
+        bucket["runs"] += 1
+    by_regime: dict[str, dict[str, Any]] = {}
+    for regime_key, meta in (meta_policy.get("by_regime") if isinstance(meta_policy.get("by_regime"), dict) else {}).items():
+        pressure = replay_pressure.get(regime_key, {"positive": 0, "negative": 0, "runs": 0})
+        feedback_item = (feedback.get("by_regime") if isinstance(feedback.get("by_regime"), dict) else {}).get(regime_key, {})
+        by_regime[regime_key] = {
+            "regime_key": regime_key,
+            "stage_scope": meta.get("stage_scope"),
+            "confidence_score": meta.get("confidence_score"),
+            "aggressiveness": meta.get("aggressiveness"),
+            "recommended_action": meta.get("recommended_action"),
+            "replay_positive": int(pressure["positive"]),
+            "replay_negative": int(pressure["negative"]),
+            "replay_runs": int(pressure["runs"]),
+            "feedback_actions": (feedback_item.get("actions") if isinstance(feedback_item, dict) and isinstance(feedback_item.get("actions"), dict) else {}),
+        }
+    return {"hours": max(1, hours), "by_regime": by_regime}
+
+
+def _score_generated_candidate(
+    *,
+    stage: str,
+    regime_key: str | None,
+    replay: dict[str, Any],
+    novelty_score: float,
+    source_signal: str | None,
+    strategy: dict[str, Any],
+) -> dict[str, Any]:
+    impact = replay.get("impact") if isinstance(replay.get("impact"), dict) else {}
+    positive = int(impact.get("positive_outcomes") or 0)
+    negative = int(impact.get("negative_outcomes") or 0)
+    change_rate = float(replay.get("change_rate") or 0.0)
+    synthesis = (strategy.get("by_regime") if isinstance(strategy.get("by_regime"), dict) else {}).get(regime_key or "", {})
+    confidence = float((synthesis.get("confidence_score") if isinstance(synthesis, dict) else 50.0) or 50.0)
+    recommended_action = str((synthesis.get("recommended_action") if isinstance(synthesis, dict) else "") or "")
+    action_bias = "tighten" if "positive" not in str(source_signal or "") else "relax"
+    alignment_bonus = 0.0
+    if recommended_action:
+        if recommended_action.endswith(action_bias):
+            alignment_bonus = 8.0
+        else:
+            alignment_bonus = -6.0
+    score = (
+        35.0
+        + (change_rate * 0.35)
+        + ((positive - negative) * 10.0)
+        + (novelty_score * 25.0)
+        + (confidence * 0.25)
+        + alignment_bonus
+    )
+    score = round(max(0.0, min(100.0, score)), 2)
+    if score >= 75.0:
+        label = "prime"
+    elif score >= 55.0:
+        label = "qualified"
+    else:
+        label = "speculative"
+    return {"proposal_score": score, "strategy_label": label, "recommended_action": recommended_action or None}
+
+
 def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> dict[str, Any]:
     config = _policy_automation_config()
     budget_remaining = max(
@@ -2969,6 +3043,7 @@ def generate_policy_candidates(
     config = _policy_automation_config()
     candidate_limit = max(1, int(generation_limit or config["generation_limit"]))
     replay_trace_limit = max(25, int(replay_limit or config["generation_replay_limit"]))
+    strategy = get_policy_strategy_synthesis(hours=max(24, hours * 7))
     variants = _policy_generation_variants(hours=max(1, hours), generation_limit=candidate_limit)
     generated: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -3009,6 +3084,33 @@ def generate_policy_candidates(
         if novelty_score < float(config["generation_novelty_min"]):
             skipped.append({"stage": stage, "reason": "novelty_too_low", "novelty_score": novelty_score})
             continue
+        replay = run_policy_replay(
+            hours=max(1, hours),
+            limit=replay_trace_limit,
+            stage=stage,
+            regime_key=regime_key,
+            policy_name=generated_name,
+            policy_version=generated_version,
+            overrides=config_payload,
+        )
+        proposal = _score_generated_candidate(
+            stage=stage,
+            regime_key=regime_key,
+            replay=replay,
+            novelty_score=novelty_score,
+            source_signal=str(variant.get("source_signal") or ""),
+            strategy=strategy,
+        )
+        if float(proposal["proposal_score"]) < float(config["generation_proposal_score_min"]):
+            skipped.append(
+                {
+                    "stage": stage,
+                    "regime_key": regime_key,
+                    "reason": "proposal_score_too_low",
+                    "proposal_score": proposal["proposal_score"],
+                }
+            )
+            continue
         profile = create_policy_profile(
             policy_name=generated_name,
             policy_version=generated_version,
@@ -3019,15 +3121,6 @@ def generate_policy_candidates(
             ),
             created_by="policy-generator",
         )
-        replay = run_policy_replay(
-            hours=max(1, hours),
-            limit=replay_trace_limit,
-            stage=stage,
-            regime_key=regime_key,
-            policy_name=generated_name,
-            policy_version=generated_version,
-            overrides=config_payload,
-        )
         payload = {
             "profile": profile,
             "replay": replay,
@@ -3037,6 +3130,9 @@ def generate_policy_candidates(
             "source_signal": variant.get("source_signal"),
             "novelty_score": novelty_score,
             "deltas": deltas,
+            "proposal_score": proposal["proposal_score"],
+            "strategy_label": proposal["strategy_label"],
+            "recommended_action": proposal["recommended_action"],
         }
         generated.append(payload)
         _insert_policy_rollout_event(
@@ -3050,14 +3146,20 @@ def generate_policy_candidates(
                 "stage": stage,
                 "regime_key": regime_key,
                 "novelty_score": novelty_score,
+                "proposal_score": proposal["proposal_score"],
+                "strategy_label": proposal["strategy_label"],
                 "source_signal": variant.get("source_signal"),
                 "rationale": list(variant.get("rationale") or []),
                 "replay_run_id": replay.get("run_id"),
             },
         )
+    generated.sort(key=lambda item: float(item.get("proposal_score") or 0.0), reverse=True)
+    for index, item in enumerate(generated, start=1):
+        item["proposal_rank"] = index
     return {
         "config": config,
         "hours": max(1, hours),
+        "strategy": strategy,
         "generated": generated,
         "skipped": skipped,
     }

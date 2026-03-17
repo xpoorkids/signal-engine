@@ -1221,6 +1221,8 @@ def test_generate_policy_candidates_creates_replayed_profiles(tmp_path, monkeypa
     assert generated["generated"]
     assert any(str(item["profile"]["policy_name"]).startswith("generated_") for item in generated["generated"])
     assert any(item["source_signal"] in {"false_negatives", "false_positives", "threshold_guidance"} for item in generated["generated"])
+    assert all("proposal_score" in item for item in generated["generated"])
+    assert all("proposal_rank" in item for item in generated["generated"])
     assert any(str(item["policy_name"]).startswith("generated_") for item in profiles)
     assert any(str(item.get("shadow_policy", {}).get("policy_name") or "").startswith("generated_") for item in replays)
 
@@ -1890,6 +1892,130 @@ def test_auto_execute_regime_actions_respects_portfolio_traffic_budget(tmp_path,
     auto_result = sls.auto_execute_regime_actions(hours=10000, replay_limit=100)
 
     assert any(item["reason"] == "portfolio_traffic_exhausted" for item in auto_result["skipped"])
+
+
+def test_policy_strategy_synthesis_scores_and_ranks_candidates(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    worked_signal_id = sls.record_signal_decision(
+        token="token-synth-worked",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_gate_skip",
+        reasons=["attention<0.20"],
+        attention_score=0.19,
+        risk_score=0.22,
+        confidence_score=0.31,
+        creator_score=0.22,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="deterministic-v1",
+        features={
+            "session_bucket": "us_day",
+            "attention_score": 0.19,
+            "creator_score": 0.22,
+            "candidate_rate_limit_allowed": True,
+            "candidate_progression_ok": True,
+            "candidate_send_eligible": True,
+        },
+        ts_value=1_774_060_000,
+        source="test",
+    )
+    failed_signal_id = sls.record_signal_decision(
+        token="token-synth-failed",
+        event_type="promoted",
+        stage="promoted",
+        decision="promoted_sent",
+        action_taken="emit",
+        reasons=["dex_gate:liq<12000.0"],
+        attention_score=0.72,
+        risk_score=0.62,
+        confidence_score=0.88,
+        creator_score=0.3,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="deterministic-v1",
+        features={
+            "session_bucket": "us_day",
+            "liquidity_usd": 9000.0,
+            "age_minutes": 12.0,
+            "price_change_m5": -18.0,
+            "price_change_h1": -24.0,
+            "unique_buyers_15m": 18,
+        },
+        ts_value=1_774_060_100,
+        source="test",
+    )
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                worked_signal_id,
+                60,
+                1_774_063_600,
+                "dex",
+                18000,
+                5000,
+                3000,
+                64.0,
+                25.0,
+                60.0,
+                44,
+                20,
+                80.0,
+                2.5,
+                30.0,
+                "worked",
+                json.dumps({"outcome_label": "worked"}),
+            ),
+        )
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                failed_signal_id,
+                60,
+                1_774_063_700,
+                "dex",
+                7000,
+                2500,
+                700,
+                65.0,
+                -25.0,
+                -45.0,
+                20,
+                70,
+                -41.0,
+                -42.0,
+                -70.0,
+                "failed",
+                json.dumps({"outcome_label": "failed"}),
+            ),
+        )
+
+    synthesis = sls.get_policy_strategy_synthesis(hours=10000)
+    generated = sls.generate_policy_candidates(hours=10000, generation_limit=6, replay_limit=200)
+
+    assert synthesis["by_regime"]
+    assert generated["strategy"]["by_regime"]
+    assert generated["generated"]
+    assert float(generated["generated"][0]["proposal_score"]) >= float(generated["generated"][-1]["proposal_score"])
+    assert generated["generated"][0]["proposal_rank"] == 1
 
 
 def test_policy_automation_safety_guardrails_limit_duplicate_and_concurrent_rollouts(tmp_path, monkeypatch):
