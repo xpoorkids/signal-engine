@@ -2196,6 +2196,8 @@ def _policy_automation_config() -> dict[str, Any]:
         "max_promotions_per_day": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_MAX_PROMOTIONS_PER_DAY", "3"))),
         "max_regime_actions_per_day": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_MAX_REGIME_ACTIONS_PER_DAY", "2"))),
         "max_active_canaries_per_stage": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_MAX_ACTIVE_CANARIES_PER_STAGE", "1"))),
+        "max_total_canary_traffic_percent": max(1, min(100, int(os.getenv("SIGNAL_ENGINE_POLICY_MAX_TOTAL_CANARY_TRAFFIC_PERCENT", "35")))),
+        "max_high_risk_active_regimes": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_MAX_HIGH_RISK_ACTIVE_REGIMES", "1"))),
         "duplicate_profile_lookback_hours": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_DUPLICATE_PROFILE_LOOKBACK_HOURS", "168"))),
         "regime_action_cooldown_sec": max(0, int(os.getenv("SIGNAL_ENGINE_POLICY_REGIME_ACTION_COOLDOWN_SEC", "3600"))),
         "auto_promote_min_samples": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_PROMOTE_MIN_SAMPLES", "3"))),
@@ -2347,6 +2349,7 @@ def _policy_automation_guardrails() -> dict[str, Any]:
             "regime_actions_used": _recent_policy_event_count({"auto_regime_action_started"}, 86400),
             "regime_actions_max": int(config["max_regime_actions_per_day"]),
         },
+        "portfolio": get_policy_portfolio_budget(hours=168),
         "active_canaries_by_stage": {
             stage or "all": _active_canary_count(stage)
             for stage in {None, "candidate", "promoted"}
@@ -2794,6 +2797,28 @@ def get_regime_meta_policy(*, hours: int = 168) -> dict[str, Any]:
     return {"hours": max(1, hours), "by_regime": by_regime}
 
 
+def get_policy_portfolio_budget(*, hours: int = 168) -> dict[str, Any]:
+    config = _policy_automation_config()
+    meta_policy = get_regime_meta_policy(hours=max(1, hours))
+    active_canaries = [
+        item for item in list_policy_rollouts(limit=200, active_only=True) if str(item.get("rollout_mode") or "") == "canary"
+    ]
+    total_traffic_used = sum(int(item.get("traffic_percent") or 0) for item in active_canaries)
+    high_risk_active = 0
+    for item in active_canaries:
+        regime_key = str(item.get("regime_scope") or "")
+        meta = (meta_policy.get("by_regime") if isinstance(meta_policy.get("by_regime"), dict) else {}).get(regime_key, {})
+        if isinstance(meta, dict) and str(meta.get("aggressiveness") or "") == "conservative":
+            high_risk_active += 1
+    return {
+        "total_canary_traffic_used": total_traffic_used,
+        "total_canary_traffic_max": int(config["max_total_canary_traffic_percent"]),
+        "total_canary_traffic_remaining": max(0, int(config["max_total_canary_traffic_percent"]) - total_traffic_used),
+        "high_risk_active_regimes": high_risk_active,
+        "high_risk_active_regimes_max": int(config["max_high_risk_active_regimes"]),
+    }
+
+
 def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> dict[str, Any]:
     config = _policy_automation_config()
     budget_remaining = max(
@@ -2802,8 +2827,21 @@ def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> 
     )
     feedback = get_regime_action_feedback(hours=max(24, hours * 7))
     meta_policy = get_regime_meta_policy(hours=max(24, hours * 7))
+    portfolio = get_policy_portfolio_budget(hours=max(24, hours * 7))
     generated = generate_policy_candidates(hours=max(1, hours), generation_limit=int(config["generation_limit"]), replay_limit=max(25, replay_limit))
     candidates = generated.get("generated") if isinstance(generated.get("generated"), list) else []
+    candidates = sorted(
+        candidates,
+        key=lambda item: float(
+            (
+                (meta_policy.get("by_regime") if isinstance(meta_policy.get("by_regime"), dict) else {})
+                .get(str(item.get("regime_key") or ""), {})
+                .get("confidence_score", 0.0)
+            )
+            or 0.0
+        ),
+        reverse=True,
+    )
     executed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     seen_regimes: set[str] = set()
@@ -2827,6 +2865,31 @@ def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> 
         if isinstance(regime_feedback, dict) and regime_feedback.get("recommended_action"):
             action = str(regime_feedback.get("recommended_action") or action)
         meta = (meta_policy.get("by_regime") if isinstance(meta_policy.get("by_regime"), dict) else {}).get(regime_key, {})
+        requested_traffic = int((meta.get("traffic_percent") if isinstance(meta, dict) else None) or config["canary_traffic_percent"])
+        if requested_traffic > int(portfolio["total_canary_traffic_remaining"]):
+            skipped.append(
+                {
+                    "regime_key": regime_key,
+                    "stage": stage,
+                    "reason": "portfolio_traffic_exhausted",
+                    "requested_traffic": requested_traffic,
+                    "traffic_remaining": int(portfolio["total_canary_traffic_remaining"]),
+                }
+            )
+            continue
+        if (
+            isinstance(meta, dict)
+            and str(meta.get("aggressiveness") or "") == "conservative"
+            and int(portfolio["high_risk_active_regimes"]) >= int(portfolio["high_risk_active_regimes_max"])
+        ):
+            skipped.append(
+                {
+                    "regime_key": regime_key,
+                    "stage": stage,
+                    "reason": "portfolio_high_risk_limit_reached",
+                }
+            )
+            continue
         if isinstance(meta, dict) and meta.get("recommended_action"):
             action = str(meta.get("recommended_action") or action)
         effective_cooldown = int(float(config["regime_action_cooldown_sec"]) * float((meta.get("cooldown_multiplier") if isinstance(meta, dict) else 1.0) or 1.0))
@@ -2853,7 +2916,7 @@ def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> 
                 actor="policy-automation",
                 hours=max(1, hours),
                 replay_limit=max(25, replay_limit),
-                traffic_percent=int((meta.get("traffic_percent") if isinstance(meta, dict) else None) or config["canary_traffic_percent"]),
+                traffic_percent=requested_traffic,
             )
         except ValueError as exc:
             skipped.append({"regime_key": regime_key, "stage": stage, "reason": str(exc)})
@@ -2878,11 +2941,19 @@ def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> 
         )
         executed.append(result)
         seen_regimes.add(regime_key)
+        portfolio["total_canary_traffic_used"] = int(portfolio["total_canary_traffic_used"]) + requested_traffic
+        portfolio["total_canary_traffic_remaining"] = max(
+            0,
+            int(portfolio["total_canary_traffic_max"]) - int(portfolio["total_canary_traffic_used"]),
+        )
+        if isinstance(meta, dict) and str(meta.get("aggressiveness") or "") == "conservative":
+            portfolio["high_risk_active_regimes"] = int(portfolio["high_risk_active_regimes"]) + 1
         budget_remaining -= 1
     return {
         "config": config,
         "feedback": feedback,
         "meta_policy": meta_policy,
+        "portfolio": portfolio,
         "generated": generated,
         "executed": executed,
         "skipped": skipped,
@@ -3234,6 +3305,8 @@ def _canary_metrics_for_rollout(rollout: dict[str, Any], hours: int) -> dict[str
 
 def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
     config = _policy_automation_config()
+    meta_policy = get_regime_meta_policy(hours=max(24, hours * 7))
+    portfolio = get_policy_portfolio_budget(hours=max(24, hours * 7))
     rollouts = list_policy_rollouts(limit=200, active_only=False)
     approvals = list_policy_approvals(limit=200, approval_status="approved")
     scheduled: list[dict[str, Any]] = []
@@ -3262,6 +3335,8 @@ def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
             if replay is not None:
                 stage_scope = str(replay.get("stage") or "") or None
                 regime_scope = str(replay.get("regime_key") or "") or None
+        meta = (meta_policy.get("by_regime") if isinstance(meta_policy.get("by_regime"), dict) else {}).get(regime_scope or "", {})
+        requested_traffic = int((meta.get("traffic_percent") if isinstance(meta, dict) else None) or config["canary_traffic_percent"])
         active_stage_canaries = _active_canary_count(stage_scope, regime_scope)
         if active_stage_canaries >= int(config["max_active_canaries_per_stage"]):
             skipped.append(
@@ -3272,6 +3347,34 @@ def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
                     "stage_scope": stage_scope,
                     "regime_scope": regime_scope,
                     "active_stage_canaries": active_stage_canaries,
+                }
+            )
+            continue
+        if requested_traffic > int(portfolio["total_canary_traffic_remaining"]):
+            skipped.append(
+                {
+                    "approval_id": approval_id,
+                    "policy_name": policy_name,
+                    "reason": "portfolio_traffic_exhausted",
+                    "stage_scope": stage_scope,
+                    "regime_scope": regime_scope,
+                    "requested_traffic": requested_traffic,
+                    "traffic_remaining": int(portfolio["total_canary_traffic_remaining"]),
+                }
+            )
+            continue
+        if (
+            isinstance(meta, dict)
+            and str(meta.get("aggressiveness") or "") == "conservative"
+            and int(portfolio["high_risk_active_regimes"]) >= int(portfolio["high_risk_active_regimes_max"])
+        ):
+            skipped.append(
+                {
+                    "approval_id": approval_id,
+                    "policy_name": policy_name,
+                    "reason": "portfolio_high_risk_limit_reached",
+                    "stage_scope": stage_scope,
+                    "regime_scope": regime_scope,
                 }
             )
             continue
@@ -3299,7 +3402,7 @@ def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
             rollout_status="active",
             stage_scope=stage_scope,
             regime_scope=regime_scope,
-            traffic_percent=int(config["canary_traffic_percent"]),
+            traffic_percent=requested_traffic,
             priority=int(config["canary_priority"]),
             activated_by="policy-automation",
             notes=f"Auto-canary from approval {approval_id}",
@@ -3308,7 +3411,7 @@ def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
             approval_id,
             approval_status="rolled_out",
             approved_by="policy-automation",
-            notes=f"Auto-canary started with {int(config['canary_traffic_percent'])}% traffic",
+            notes=f"Auto-canary started with {requested_traffic}% traffic",
         )
         _insert_policy_rollout_event(
             rollout_id=str(rollout.get("rollout_id") or ""),
@@ -3320,7 +3423,7 @@ def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
             payload={
                 "stage_scope": stage_scope,
                 "regime_scope": regime_scope,
-                "traffic_percent": int(config["canary_traffic_percent"]),
+                "traffic_percent": requested_traffic,
                 "baseline_policy_name": baseline.get("policy_name"),
                 "baseline_policy_version": baseline.get("policy_version"),
             },
@@ -3328,22 +3431,29 @@ def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
         _emit_policy_notification(
             event_type="policy_canary_started",
             level="info",
-            message=f"Started canary for {policy_name}@{policy_version} on {stage_scope or 'all'} at {int(config['canary_traffic_percent'])}% traffic.",
+            message=f"Started canary for {policy_name}@{policy_version} on {stage_scope or 'all'} at {requested_traffic}% traffic.",
             target_name=policy_name,
             approval_id=approval_id,
             payload={
                 "policy_version": policy_version,
                 "stage_scope": stage_scope,
                 "regime_scope": regime_scope,
-                "traffic_percent": int(config["canary_traffic_percent"]),
+                "traffic_percent": requested_traffic,
                 "baseline_policy_name": baseline.get("policy_name"),
                 "baseline_policy_version": baseline.get("policy_version"),
             },
         )
         scheduled.append(rollout)
         rollouts.append(rollout)
+        portfolio["total_canary_traffic_used"] = int(portfolio["total_canary_traffic_used"]) + requested_traffic
+        portfolio["total_canary_traffic_remaining"] = max(
+            0,
+            int(portfolio["total_canary_traffic_max"]) - int(portfolio["total_canary_traffic_used"]),
+        )
+        if isinstance(meta, dict) and str(meta.get("aggressiveness") or "") == "conservative":
+            portfolio["high_risk_active_regimes"] = int(portfolio["high_risk_active_regimes"]) + 1
         canary_budget_remaining -= 1
-    return {"config": config, "scheduled": scheduled, "skipped": skipped}
+    return {"config": config, "portfolio": portfolio, "scheduled": scheduled, "skipped": skipped}
 
 
 def auto_promote_policy_canaries(hours: int = 24) -> dict[str, Any]:
