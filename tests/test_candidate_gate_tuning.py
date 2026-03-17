@@ -38,8 +38,8 @@ def test_candidate_gate_uses_policy_override_thresholds():
         dex_summary=None,
         attention_unavailable=False,
         gate_config={
-            "candidate_gate_attention_min": 0.16,
-            "candidate_gate_min_age_sec": 20,
+            "candidate_gate_attention_min": 0.14,
+            "candidate_gate_min_age_sec": 15,
         },
     )
 
@@ -54,5 +54,5 @@ def test_default_policy_descriptor_relaxes_candidate_gate_defaults(monkeypatch):
 
     descriptor = sls._default_policy_descriptor()
 
-    assert descriptor["candidate_gate_attention_min"] == 0.16
-    assert descriptor["candidate_gate_min_age_sec"] == 20
+    assert descriptor["candidate_gate_attention_min"] == 0.14
+    assert descriptor["candidate_gate_min_age_sec"] == 15

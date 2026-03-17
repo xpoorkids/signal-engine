@@ -593,8 +593,8 @@ def _default_policy_descriptor() -> dict[str, Any]:
         "policy_version": version,
         "candidate_attention_min": _policy_env_float("ATTENTION_CANDIDATE_THRESHOLD", 0.70),
         "candidate_creator_min": _policy_env_float("EARLY_CREATOR_MIN", 0.30),
-        "candidate_gate_attention_min": _policy_env_float("SIGNAL_ENGINE_CANDIDATE_GATE_ATTENTION_MIN", 0.16),
-        "candidate_gate_min_age_sec": _policy_env_int("SIGNAL_ENGINE_CANDIDATE_GATE_MIN_AGE_SEC", 20),
+        "candidate_gate_attention_min": _policy_env_float("SIGNAL_ENGINE_CANDIDATE_GATE_ATTENTION_MIN", 0.14),
+        "candidate_gate_min_age_sec": _policy_env_int("SIGNAL_ENGINE_CANDIDATE_GATE_MIN_AGE_SEC", 15),
         "promoted_confidence_min": _policy_env_float("SIGNAL_ENGINE_PROMOTED_CONFIDENCE_MIN", 0.80),
         "promoted_attention_min": _policy_env_float("PROMOTION_MIN_ATTENTION", 0.50),
         "promoted_risk_max": _policy_env_float("PROMOTION_MAX_RISK", 0.60),
@@ -2710,8 +2710,8 @@ def _policy_generation_variants(
             overrides={
                 "candidate_attention_min": _clamp_float(float(candidate_config.get("candidate_attention_min") or 0.70) - 0.05, 0.45, 0.90),
                 "candidate_creator_min": _clamp_float(float(candidate_config.get("candidate_creator_min") or 0.30) - 0.05, 0.05, 0.80),
-                "candidate_gate_attention_min": _clamp_float(float(candidate_config.get("candidate_gate_attention_min") or 0.16) - 0.02, 0.08, 0.35),
-                "candidate_gate_min_age_sec": _clamp_int(int(candidate_config.get("candidate_gate_min_age_sec") or 20) - 5, 5, 60),
+                "candidate_gate_attention_min": _clamp_float(float(candidate_config.get("candidate_gate_attention_min") or 0.14) - 0.02, 0.08, 0.35),
+                "candidate_gate_min_age_sec": _clamp_int(int(candidate_config.get("candidate_gate_min_age_sec") or 15) - 5, 5, 60),
             },
         )
         add_variant(
@@ -2780,7 +2780,7 @@ def _policy_generation_variants(
             policy_version="pending",
             overrides={
                 "candidate_attention_min": _clamp_float(float(candidate_config.get("candidate_attention_min") or 0.70) - 0.03, 0.45, 0.90),
-                "candidate_gate_attention_min": _clamp_float(float(candidate_config.get("candidate_gate_attention_min") or 0.16) - 0.02, 0.08, 0.35),
+                "candidate_gate_attention_min": _clamp_float(float(candidate_config.get("candidate_gate_attention_min") or 0.14) - 0.02, 0.08, 0.35),
             },
         )
         add_variant(
@@ -2824,8 +2824,8 @@ def _regime_action_overrides(stage: str, action: str, base_config: dict[str, Any
     if stage == "candidate":
         attention = float(base_config.get("candidate_attention_min") or 0.70)
         creator = float(base_config.get("candidate_creator_min") or 0.30)
-        gate_attention = float(base_config.get("candidate_gate_attention_min") or 0.16)
-        gate_age = int(base_config.get("candidate_gate_min_age_sec") or 20)
+        gate_attention = float(base_config.get("candidate_gate_attention_min") or 0.14)
+        gate_age = int(base_config.get("candidate_gate_min_age_sec") or 15)
         if action in {"tighten", "canary_tighten"}:
             return {
                 "candidate_attention_min": _clamp_float(attention + 0.03, 0.45, 0.90),
