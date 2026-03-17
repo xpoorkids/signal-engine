@@ -38,7 +38,7 @@ def score(payload: dict):
     if result.get("status") == "WATCH":
         c = result.get("candidate", {}) or {}
         append_watch_event({
-            "token": c.get("symbol") or c.get("address") or c.get("mint"),
+            "token": c.get("address") or c.get("mint") or c.get("token") or c.get("symbol"),
             "chain": c.get("chain", "sol"),
             "status": "WATCH",
             "score": result.get("score"),

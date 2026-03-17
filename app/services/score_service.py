@@ -1,6 +1,45 @@
 from datetime import datetime, timezone
 
 
+WSOL_MINT = "So11111111111111111111111111111111111111112"
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+EXCLUDED_QUOTES = {WSOL_MINT, USDC_MINT, USDT_MINT}
+
+
+def _pick_contract_address(pair: dict) -> str | None:
+    base = pair.get("baseToken") if isinstance(pair.get("baseToken"), dict) else {}
+    quote = pair.get("quoteToken") if isinstance(pair.get("quoteToken"), dict) else {}
+
+    base_addr = str(base.get("address") or "").strip()
+    quote_addr = str(quote.get("address") or "").strip()
+
+    if base_addr and quote_addr:
+        if base_addr in EXCLUDED_QUOTES and quote_addr not in EXCLUDED_QUOTES:
+            return quote_addr
+        if quote_addr in EXCLUDED_QUOTES and base_addr not in EXCLUDED_QUOTES:
+            return base_addr
+        if base_addr.endswith("pump") and not quote_addr.endswith("pump"):
+            return base_addr
+        if quote_addr.endswith("pump") and not base_addr.endswith("pump"):
+            return quote_addr
+
+    return base_addr or quote_addr or None
+
+
+def _pick_symbol(pair: dict, token_address: str | None) -> str | None:
+    base = pair.get("baseToken") if isinstance(pair.get("baseToken"), dict) else {}
+    quote = pair.get("quoteToken") if isinstance(pair.get("quoteToken"), dict) else {}
+
+    if token_address:
+        if str(base.get("address") or "").strip() == token_address:
+            return base.get("symbol")
+        if str(quote.get("address") or "").strip() == token_address:
+            return quote.get("symbol")
+
+    return base.get("symbol") or quote.get("symbol")
+
+
 def score_pairs(pairs: list[dict]) -> list[dict]:
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
     out = []
@@ -17,10 +56,13 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
             age = (now_ms - created) / 60000
 
             if age <= 0.5 and liq >= 800 and vol5m >= 20 and chg5m >= -10:
+                token = _pick_contract_address(p)
+                if not token:
+                    continue
                 out.append(
                     {
-                        "token": p["baseToken"]["address"],
-                        "symbol": p["baseToken"]["symbol"],
+                        "token": token,
+                        "symbol": _pick_symbol(p, token),
                         "reason": "aggressive_near_pass",
                         "metrics": {
                             "liquidity": round(liq, 2),
