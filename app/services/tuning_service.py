@@ -1047,10 +1047,10 @@ def render_rollout_notifications_html(limit: int = 20, *, active_only: bool = Fa
     <section class="panel">
       <h1>Rollout Notifications</h1>
       <p>Policy and rollout events emitted from the tuning lifecycle. Filtered to {"active only" if active_only else "recent history"}.</p>
-      <table>
+      <div class="table-wrap"><table>
         <thead><tr><th>Event</th><th>Level</th><th>Target</th><th>Service</th><th>Delivery</th><th>Active</th><th>Message</th></tr></thead>
         <tbody>{rows}</tbody>
-      </table>
+      </table></div>
     </section>
   </div>
 </body>
@@ -1104,10 +1104,10 @@ def render_notification_incidents_html(limit: int = 20, *, active_only: bool = F
     <section class="panel">
       <h1>Notification Incidents</h1>
       <p>Clustered notification view by event, target, and service. Filtered to {"active only" if active_only else "recent history"}.</p>
-      <table>
+      <div class="table-wrap"><table>
         <thead><tr><th>Event</th><th>Target</th><th>Service</th><th>Count</th><th>State</th><th>Active</th><th>TTA Ack</th><th>TTR</th><th>Latest Message</th></tr></thead>
         <tbody>{rows}</tbody>
-      </table>
+      </table></div>
     </section>
   </div>
 </body>
@@ -1606,13 +1606,53 @@ def render_rollout_verification_html(
     changed_families = changed_config.get("changed_config_families") if isinstance(changed_config.get("changed_config_families"), list) else []
     changed_entries = changed_config.get("changed_config_entries") if isinstance(changed_config.get("changed_config_entries"), list) else []
 
-    def metric_card(label: str, value: Any) -> str:
+    def metric_card(label: str, value: Any, tone: str = "neutral") -> str:
         return (
-            '<div class="metric-card">'
+            f'<div class="metric-card tone-{html.escape(tone)}">'
             f"<span>{html.escape(label)}</span>"
             f"<strong>{html.escape(str(value))}</strong>"
             "</div>"
         )
+
+    def panel_title(title: str, subtitle: str | None = None) -> str:
+        if subtitle:
+            return (
+                '<div class="section-head">'
+                f"<h2>{html.escape(title)}</h2>"
+                f"<p>{html.escape(subtitle)}</p>"
+                "</div>"
+            )
+        return f"<div class='section-head'><h2>{html.escape(title)}</h2></div>"
+
+    def status_tone(status: str) -> str:
+        normalized = str(status or "").lower()
+        if normalized in {"active", "ok", "healthy"}:
+            return "positive"
+        if normalized in {"gated", "quiet", "processing", "warning"}:
+            return "warning"
+        if normalized in {"blocked", "cold", "critical", "error"}:
+            return "danger"
+        return "neutral"
+
+    def pretty_number(value: Any, suffix: str = "") -> str:
+        try:
+            if isinstance(value, float):
+                return f"{value:.1f}{suffix}"
+            return f"{int(value)}{suffix}"
+        except Exception:
+            return f"{value}{suffix}"
+
+    def pill(label: str, value: Any, tone: str = "neutral") -> str:
+        return (
+            f'<div class="pill tone-{html.escape(tone)}">'
+            f"<span>{html.escape(label)}</span>"
+            f"<strong>{html.escape(str(value))}</strong>"
+            "</div>"
+        )
+
+    def code_text(value: Any, fallback: str = "n/a") -> str:
+        text = str(value or "").strip() or fallback
+        return f"<code>{html.escape(text)}</code>"
 
     changed_family_rows = "".join(
         "<tr>"
@@ -2151,6 +2191,7 @@ def render_operator_command_center_html(hours: int = 24) -> str:
     incident_state_counts = center.get("incident_state_counts") if isinstance(center.get("incident_state_counts"), dict) else {}
     policy_profiles = center.get("policy_profiles") if isinstance(center.get("policy_profiles"), list) else []
     policy_rollouts = center.get("policy_rollouts") if isinstance(center.get("policy_rollouts"), list) else []
+    active_policy_rollouts = center.get("active_policy_rollouts") if isinstance(center.get("active_policy_rollouts"), list) else []
     policy_approvals = center.get("policy_approvals") if isinstance(center.get("policy_approvals"), list) else []
     policy_events = center.get("policy_events") if isinstance(center.get("policy_events"), list) else []
     policy_guardrails = center.get("policy_guardrails") if isinstance(center.get("policy_guardrails"), dict) else {}
@@ -2164,13 +2205,54 @@ def render_operator_command_center_html(hours: int = 24) -> str:
     resolved_policies = center.get("resolved_policies") if isinstance(center.get("resolved_policies"), dict) else {}
     recommended_actions = center.get("recommended_actions") if isinstance(center.get("recommended_actions"), list) else []
 
-    def metric_card(label: str, value: Any) -> str:
+    def metric_card(label: str, value: Any, tone: str = "neutral") -> str:
         return (
-            '<div class="metric-card">'
+            f'<div class="metric-card tone-{html.escape(tone)}">'
             f"<span>{html.escape(label)}</span>"
             f"<strong>{html.escape(str(value))}</strong>"
             "</div>"
         )
+
+    def panel_title(title: str, subtitle: str | None = None) -> str:
+        subtitle_html = f"<p>{html.escape(subtitle)}</p>" if subtitle else ""
+        return (
+            '<div class="section-head">'
+            f"<h2>{html.escape(title)}</h2>"
+            f"{subtitle_html}"
+            "</div>"
+        )
+
+    def status_tone(status: Any) -> str:
+        text = str(status or "").strip().lower()
+        if text in {"ok", "healthy", "active", "aligned", "warm"}:
+            return "positive"
+        if text in {"warning", "gated", "cooling", "degraded"}:
+            return "warning"
+        if text in {"cold", "error", "failed", "rollback", "blocked"}:
+            return "danger"
+        return "neutral"
+
+    def pretty_number(value: Any, suffix: str = "") -> str:
+        if value is None or value == "":
+            return f"0{suffix}"
+        if isinstance(value, float):
+            return f"{value:.1f}{suffix}"
+        try:
+            return f"{int(value):,}{suffix}"
+        except (TypeError, ValueError):
+            return f"{html.escape(str(value))}{suffix}"
+
+    def pill(label: str, value: str, tone: str = "neutral") -> str:
+        return (
+            f'<div class="pill tone-{html.escape(tone)}">'
+            f"<span>{html.escape(label)}</span>"
+            f"<strong>{value}</strong>"
+            "</div>"
+        )
+
+    def code_text(value: Any, fallback: str = "n/a") -> str:
+        raw = fallback if value in (None, "") else str(value)
+        return f"<code>{html.escape(raw)}</code>"
 
     top_skip_rows = "".join(
         "<tr>"
@@ -2203,20 +2285,20 @@ def render_operator_command_center_html(hours: int = 24) -> str:
     ) or "<tr><td colspan='4'>No worker/engine rollout alignment data yet.</td></tr>"
 
     drift_cards = "".join(
-        '<div class="metric-card">'
+        '<div class="metric-card tone-neutral">'
         f"<span>{html.escape(name.title())} Drift</span>"
         f"<strong>{int(payload.get('drift_count') or 0)}</strong>"
         "</div>"
         for name, payload in drift.items()
-    ) or '<div class="metric-card"><span>Drift</span><strong>0</strong></div>'
+    ) or '<div class="metric-card tone-neutral"><span>Drift</span><strong>0</strong></div>'
 
     incident_cards = "".join(
-        '<div class="metric-card">'
+        '<div class="metric-card tone-neutral">'
         f"<span>{html.escape(state.title())} Incidents</span>"
         f"<strong>{int(count)}</strong>"
         "</div>"
         for state, count in incident_state_counts.items()
-    ) or '<div class="metric-card"><span>Incidents</span><strong>0</strong></div>'
+    ) or '<div class="metric-card tone-neutral"><span>Incidents</span><strong>0</strong></div>'
 
     verification_rows = "".join(
         "<tr>"
@@ -2390,6 +2472,53 @@ def render_operator_command_center_html(hours: int = 24) -> str:
     budget_state = automation_guardrails.get("budgets") if isinstance(automation_guardrails.get("budgets"), dict) else {}
     cooldown_state = automation_guardrails.get("cooldowns") if isinstance(automation_guardrails.get("cooldowns"), dict) else {}
     portfolio_state = automation_guardrails.get("portfolio") if isinstance(automation_guardrails.get("portfolio"), dict) else {}
+    lookback_hours = int(center.get("lookback_hours") or hours)
+    engine_status = str(engine_health.get("status") or "unknown")
+    engine_detail = str(engine_health.get("status_detail") or "No additional engine detail.")
+    candidate_policy_label = (
+        f"{resolved_candidate.get('policy_name', 'default')} @ "
+        f"{resolved_candidate.get('policy_version', 'default')}"
+    )
+    promoted_policy_label = (
+        f"{resolved_promoted.get('policy_name', 'default')} @ "
+        f"{resolved_promoted.get('policy_version', 'default')}"
+    )
+    best_regime_label = strongest_regimes[0].get("regime_key") if strongest_regimes else "n/a"
+    weakest_regime_label = weakest_regimes[0].get("regime_key") if weakest_regimes else "n/a"
+    latest_signal = engine_health.get("latest_signal") if isinstance(engine_health.get("latest_signal"), dict) else {}
+    latest_decision = engine_health.get("latest_decision") if isinstance(engine_health.get("latest_decision"), dict) else {}
+    lead_token = latest_signal.get("token") or latest_decision.get("token") or "n/a"
+    lead_event = latest_signal.get("event_type") or latest_decision.get("decision") or "No recent event"
+    lead_timestamp = latest_signal.get("event_ts") or latest_decision.get("decision_ts") or "n/a"
+    lead_reasons = latest_decision.get("top_skip_reasons") or []
+    lead_reason_text = ", ".join(str(item) for item in lead_reasons[:3]) if lead_reasons else "No recent skip reasons."
+    health_pills = "".join(
+        [
+            pill("DB Path", code_text(storage.get("db_path") or "unknown"), "neutral"),
+            pill("Signals", html.escape(pretty_number(storage.get("signal_count") or 0)), "positive"),
+            pill("Decisions", html.escape(pretty_number(storage.get("decision_count") or 0)), "neutral"),
+            pill("Snapshots", html.escape(pretty_number(storage.get("snapshot_count") or 0)), "neutral"),
+        ]
+    )
+    rollout_pills = "".join(
+        [
+            pill("Candidate Policy", code_text(candidate_policy_label), "neutral"),
+            pill("Promoted Policy", code_text(promoted_policy_label), "neutral"),
+            pill(
+                "Latest Replay",
+                html.escape(pretty_number(latest_policy_replay.get("changed_count") or 0, " changes")),
+                "warning",
+            ),
+            pill(
+                "Portfolio Budget",
+                html.escape(
+                    f"{pretty_number(portfolio_state.get('total_canary_traffic_used') or 0)} / "
+                    f"{pretty_number(portfolio_state.get('total_canary_traffic_max') or 0)}%"
+                ),
+                "neutral",
+            ),
+        ]
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -2399,219 +2528,381 @@ def render_operator_command_center_html(hours: int = 24) -> str:
   <title>Operator Command Center</title>
   <style>
     :root {{
-      --bg: #081119;
-      --panel: rgba(11, 24, 38, 0.9);
-      --panel-2: rgba(18, 34, 52, 0.96);
-      --line: rgba(116, 153, 186, 0.16);
-      --text: #edf5fb;
-      --muted: #8ca4b8;
-      --accent: #d6b25e;
+      --bg-0: #040b12;
+      --bg-1: #08131d;
+      --bg-2: #0b1824;
+      --panel: rgba(10, 23, 36, 0.88);
+      --panel-2: rgba(15, 31, 46, 0.96);
+      --line: rgba(110, 144, 173, 0.18);
+      --text: #edf4fb;
+      --muted: #89a0b3;
+      --subtle: #688195;
+      --accent: #82c6ff;
+      --accent-warm: #d9b36b;
+      --shadow: 0 24px 60px rgba(0, 0, 0, 0.32);
+      --radius: 24px;
     }}
     * {{ box-sizing: border-box; }}
-    body {{ margin: 0; color: var(--text); font-family: "Segoe UI", sans-serif; background: linear-gradient(180deg, #071018 0%, #09131c 100%); }}
-    .shell {{ max-width: 1440px; margin: 0 auto; padding: 24px 18px 36px; }}
-    .hero, .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 22px; padding: 20px; margin-top: 18px; }}
-    .hero {{ margin-top: 0; }}
-    .metric-grid {{ display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:16px; }}
-    .two-col {{ display:grid; grid-template-columns: 1.3fr 1fr; gap:18px; }}
-    .metric-card {{ background: var(--panel-2); border: 1px solid var(--line); border-radius: 18px; padding: 16px; display:flex; flex-direction:column; gap:8px; }}
-    .metric-card span {{ color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }}
-    .metric-card strong {{ font-size: 24px; }}
-    table {{ width:100%; border-collapse: collapse; }}
-    th, td {{ text-align:left; padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 14px; vertical-align: top; }}
-    th {{ color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .10em; }}
-    h1 {{ margin: 0 0 8px; font-size: 36px; }}
-    h2 {{ margin: 0 0 14px; font-size: 16px; letter-spacing: .10em; color: var(--muted); text-transform: uppercase; }}
-    p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
-    ul {{ margin: 0; padding-left: 18px; color: var(--text); }}
-    .accent {{ color: var(--accent); }}
+    body {{
+      margin: 0;
+      color: var(--text);
+      font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+      background:
+        radial-gradient(circle at top, rgba(32, 86, 136, 0.24), transparent 26%),
+        linear-gradient(180deg, var(--bg-0) 0%, var(--bg-1) 42%, var(--bg-2) 100%);
+      min-height: 100vh;
+    }}
+    .shell {{ max-width: 1480px; margin: 0 auto; padding: 28px 20px 44px; }}
+    .hero, .panel {{
+      background: linear-gradient(180deg, rgba(12, 26, 39, 0.94), rgba(9, 20, 31, 0.98));
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      margin-top: 18px;
+    }}
+    .hero {{
+      margin-top: 0;
+      padding: 24px 24px 22px;
+      display: grid;
+      grid-template-columns: 1.35fr 1fr;
+      gap: 18px;
+      align-items: stretch;
+    }}
+    .hero-copy {{ display: flex; flex-direction: column; gap: 12px; }}
+    .hero-kicker {{
+      display: inline-flex;
+      width: fit-content;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(130, 198, 255, 0.08);
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 11px;
+      font-weight: 700;
+    }}
+    .hero h1 {{ margin: 0; font-size: 38px; line-height: 1.05; letter-spacing: -0.03em; }}
+    .hero p {{ margin: 0; color: var(--muted); line-height: 1.6; max-width: 70ch; }}
+    .hero-highlight {{
+      background: linear-gradient(180deg, rgba(15, 31, 46, 0.96), rgba(12, 24, 36, 0.96));
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      justify-content: space-between;
+    }}
+    .hero-highlight .eyebrow {{
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 11px;
+      font-weight: 700;
+    }}
+    .hero-highlight h3 {{
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.25;
+      word-break: break-word;
+    }}
+    .hero-highlight .meta {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }}
+    .hero-highlight .meta div {{
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+    }}
+    .hero-highlight .meta span {{
+      display: block;
+      color: var(--subtle);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-bottom: 4px;
+    }}
+    .hero-highlight .meta strong {{
+      font-size: 14px;
+      line-height: 1.4;
+      word-break: break-word;
+    }}
+    .panel {{ padding: 18px; }}
+    .section-head {{
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 12px;
+      margin-bottom: 16px;
+    }}
+    .section-head h2 {{
+      margin: 0;
+      font-size: 13px;
+      letter-spacing: 0.16em;
+      color: var(--muted);
+      text-transform: uppercase;
+    }}
+    .section-head p {{
+      margin: 0;
+      color: var(--subtle);
+      font-size: 13px;
+      line-height: 1.5;
+      text-align: right;
+    }}
+    .metric-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }}
+    .two-col {{ display: grid; grid-template-columns: 1.15fr 1fr; gap: 18px; }}
+    .split-equal {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }}
+    .metric-card {{
+      background: linear-gradient(180deg, rgba(17, 33, 50, 0.98), rgba(13, 27, 41, 0.98));
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 118px;
+    }}
+    .metric-card span {{
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-weight: 700;
+    }}
+    .metric-card strong {{
+      font-size: 30px;
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+      word-break: break-word;
+    }}
+    .tone-positive {{ border-color: rgba(90, 199, 157, 0.34); }}
+    .tone-warning {{ border-color: rgba(240, 179, 93, 0.34); }}
+    .tone-danger {{ border-color: rgba(239, 124, 124, 0.34); }}
+    .pill-row {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }}
+    .pill {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.025);
+      min-height: 40px;
+      max-width: 100%;
+    }}
+    .pill span {{
+      color: var(--subtle);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.11em;
+      font-weight: 700;
+    }}
+    .pill strong {{
+      font-size: 13px;
+      font-weight: 700;
+      white-space: normal;
+      word-break: break-word;
+    }}
+    .panel-copy {{ color: var(--muted); margin: 10px 0 0; line-height: 1.55; }}
+    .panel-copy strong {{ color: var(--text); }}
+    .table-wrap {{
+      overflow-x: auto;
+      border: 1px solid rgba(255, 255, 255, 0.03);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.015);
+    }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{
+      text-align: left;
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+      line-height: 1.45;
+      vertical-align: top;
+      word-break: break-word;
+    }}
+    th {{
+      color: var(--muted);
+      text-transform: uppercase;
+      font-size: 10px;
+      letter-spacing: 0.13em;
+      font-weight: 700;
+      background: rgba(255, 255, 255, 0.02);
+    }}
+    tbody tr:last-child td {{ border-bottom: none; }}
+    tbody tr:hover {{ background: rgba(255, 255, 255, 0.02); }}
+    ul {{ margin: 0; padding-left: 20px; color: var(--text); display: grid; gap: 10px; line-height: 1.5; }}
+    li::marker {{ color: var(--accent-warm); }}
+    code {{
+      font-family: "Cascadia Code", "Consolas", monospace;
+      font-size: 12px;
+      color: #d9ebff;
+      background: rgba(255, 255, 255, 0.045);
+      padding: 2px 6px;
+      border-radius: 8px;
+      word-break: break-all;
+    }}
+    .muted-note {{ color: var(--subtle); font-size: 12px; margin-top: 10px; }}
     @media (max-width: 1100px) {{
-      .metric-grid, .two-col {{ grid-template-columns: 1fr; }}
+      .hero, .metric-grid, .two-col, .split-equal {{ grid-template-columns: 1fr; }}
+      .hero-highlight .meta {{ grid-template-columns: 1fr; }}
+      .section-head {{ flex-direction: column; align-items: start; }}
+      .section-head p {{ text-align: left; }}
     }}
   </style>
 </head>
 <body>
   <div class="shell">
     <section class="hero">
-      <h1>Operator Command Center</h1>
-      <p>Single-view ops surface for engine health, rollout state, config drift, and the latest policy notifications over the last {int(center.get("lookback_hours") or hours)} hours.</p>
-    </section>
-    <section class="panel">
-      <h2>Health Snapshot</h2>
-      <div class="metric-grid">
-        {metric_card("Engine Status", engine_health.get("status", "unknown"))}
-        {metric_card("Send Rate", f"{engine_health.get('send_rate', 0)}%")}
-        {metric_card("Skip Pressure", f"{engine_health.get('skip_pressure', 0)}%")}
-        {metric_card("Block Pressure", f"{engine_health.get('block_pressure', 0)}%")}
+      <div class="hero-copy">
+        <div class="hero-kicker">Operator Surface</div>
+        <h1>Operator Command Center</h1>
+        <p>Single view for engine health, policy drift, rollout state, automation posture, and regime behavior over the last {lookback_hours} hours.</p>
       </div>
-      <p style="margin-top:14px;"><strong>DB:</strong> {html.escape(str(storage.get("db_path") or "unknown"))} &nbsp; <strong>Signals:</strong> {int(storage.get("signal_count") or 0)} &nbsp; <strong>Decisions:</strong> {int(storage.get("decision_count") or 0)}</p>
+      <aside class="hero-highlight">
+        <div>
+          <div class="eyebrow">Latest Engine Activity</div>
+          <h3>{html.escape(str(lead_event))}</h3>
+        </div>
+        <div class="meta">
+          <div><span>Token</span><strong>{html.escape(str(lead_token))}</strong></div>
+          <div><span>Timestamp</span><strong>{html.escape(str(lead_timestamp))}</strong></div>
+          <div><span>Status Detail</span><strong>{html.escape(engine_detail)}</strong></div>
+          <div><span>Recent Reasons</span><strong>{html.escape(lead_reason_text)}</strong></div>
+        </div>
+      </aside>
     </section>
     <section class="panel">
-      <h2>Drift Snapshot</h2>
+      {panel_title("Health Snapshot", "Live engine status, pressure profile, and storage footprint.")}
       <div class="metric-grid">
-        {drift_cards}
+        {metric_card("Engine Status", engine_status, status_tone(engine_status))}
+        {metric_card("Send Rate", f"{engine_health.get('send_rate', 0)}%", "positive")}
+        {metric_card("Skip Pressure", f"{engine_health.get('skip_pressure', 0)}%", "warning")}
+        {metric_card("Block Pressure", f"{engine_health.get('block_pressure', 0)}%", "danger" if float(engine_health.get('block_pressure') or 0.0) > 0 else "neutral")}
       </div>
+      <div class="pill-row">{health_pills}</div>
     </section>
     <section class="panel">
-      <h2>Incident Snapshot</h2>
+      {panel_title("Drift Snapshot", "Policy family drift counts against runtime configuration.")}
+      <div class="metric-grid">{drift_cards}</div>
+    </section>
+    <section class="panel">
+      {panel_title("Incident Snapshot", "Current incident state across the operator surface.")}
+      <div class="metric-grid">{incident_cards}</div>
+    </section>
+    <section class="panel">
+      {panel_title("Policy Ops", "Resolved policies, replay posture, automation cadence, and portfolio budget.")}
       <div class="metric-grid">
-        {incident_cards}
+        {metric_card("Candidate Policy", candidate_policy_label)}
+        {metric_card("Promoted Policy", promoted_policy_label)}
+        {metric_card("Active Rollouts", len(active_policy_rollouts), "positive" if active_policy_rollouts else "neutral")}
+        {metric_card("Replay Changes", int(latest_policy_replay.get("changed_count") or 0), "warning" if int(latest_policy_replay.get("changed_count") or 0) > 0 else "neutral")}
       </div>
+      <div class="pill-row">{rollout_pills}</div>
+      <p class="panel-copy"><strong>Latest Replay:</strong> {replay_summary}</p>
+      <p class="panel-copy"><strong>Policy Automation:</strong> {automation_summary}</p>
+      <p class="panel-copy"><strong>Automation Budgets:</strong> approvals {int(budget_state.get('auto_approvals_used') or 0)}/{int(budget_state.get('auto_approvals_max') or 0)}, canaries {int(budget_state.get('canaries_used') or 0)}/{int(budget_state.get('canaries_max') or 0)}, promotions {int(budget_state.get('promotions_used') or 0)}/{int(budget_state.get('promotions_max') or 0)}. <strong>Cooldowns:</strong> approvals {int(cooldown_state.get('auto_approval_sec') or 0)}s, canaries {int(cooldown_state.get('canary_sec') or 0)}s, promotions {int(cooldown_state.get('promotion_sec') or 0)}s.</p>
+      <p class="panel-copy"><strong>Portfolio Budget:</strong> canary traffic {int(portfolio_state.get('total_canary_traffic_used') or 0)}/{int(portfolio_state.get('total_canary_traffic_max') or 0)}%, high-risk active regimes {int(portfolio_state.get('high_risk_active_regimes') or 0)}/{int(portfolio_state.get('high_risk_active_regimes_max') or 0)}.</p>
     </section>
     <section class="panel">
-      <h2>Policy Ops</h2>
-      <div class="metric-grid">
-        {metric_card("Candidate Policy", f"{resolved_candidate.get('policy_name', 'default')} @ {resolved_candidate.get('policy_version', 'default')}")}
-        {metric_card("Promoted Policy", f"{resolved_promoted.get('policy_name', 'default')} @ {resolved_promoted.get('policy_version', 'default')}")}
-        {metric_card("Active Rollouts", len(center.get("active_policy_rollouts") or []))}
-        {metric_card("Replay Changes", int(latest_policy_replay.get("changed_count") or 0))}
-      </div>
-      <p style="margin-top:14px;"><strong>Latest Replay:</strong> {replay_summary}</p>
-      <p style="margin-top:10px;"><strong>Policy Automation:</strong> {automation_summary}</p>
-      <p style="margin-top:10px;"><strong>Automation Budgets:</strong> approvals {int(budget_state.get('auto_approvals_used') or 0)}/{int(budget_state.get('auto_approvals_max') or 0)}, canaries {int(budget_state.get('canaries_used') or 0)}/{int(budget_state.get('canaries_max') or 0)}, promotions {int(budget_state.get('promotions_used') or 0)}/{int(budget_state.get('promotions_max') or 0)}. <strong>Cooldowns:</strong> approvals {int(cooldown_state.get('auto_approval_sec') or 0)}s, canaries {int(cooldown_state.get('canary_sec') or 0)}s, promotions {int(cooldown_state.get('promotion_sec') or 0)}s.</p>
-      <p style="margin-top:10px;"><strong>Portfolio Budget:</strong> canary traffic {int(portfolio_state.get('total_canary_traffic_used') or 0)}/{int(portfolio_state.get('total_canary_traffic_max') or 0)}%, high-risk active regimes {int(portfolio_state.get('high_risk_active_regimes') or 0)}/{int(portfolio_state.get('high_risk_active_regimes_max') or 0)}.</p>
-    </section>
-    <section class="panel">
-      <h2>Regime Intelligence</h2>
+      {panel_title("Regime Intelligence", "Observed regime coverage and best or weakest scope from recent decisions.")}
       <div class="metric-grid">
         {metric_card("Tracked Regimes", len(policy_regimes.get("regimes") or []))}
-        {metric_card("Best Regime", str((strongest_regimes[0].get('regime_key') if strongest_regimes else 'n/a')))}
-        {metric_card("Weakest Regime", str((weakest_regimes[0].get('regime_key') if weakest_regimes else 'n/a')))}
-        {metric_card("Regime Replay Scope", str(latest_policy_replay.get('regime_key') or 'global'))}
+        {metric_card("Best Regime", str(best_regime_label), "positive" if best_regime_label != "n/a" else "neutral")}
+        {metric_card("Weakest Regime", str(weakest_regime_label), "warning" if weakest_regime_label != "n/a" else "neutral")}
+        {metric_card("Replay Scope", str(latest_policy_replay.get('regime_key') or 'global'))}
       </div>
     </section>
-    <section class="two-col">
+    <section class="split-equal">
       <section class="panel">
-        <h2>Strongest Regimes</h2>
-        <table>
-          <thead><tr><th>Regime</th><th>Positive</th><th>Negative</th></tr></thead>
-          <tbody>{strongest_regime_rows}</tbody>
-        </table>
+        {panel_title("Strongest Regimes")}
+        <div class="table-wrap"><table><thead><tr><th>Regime</th><th>Positive</th><th>Negative</th></tr></thead><tbody>{strongest_regime_rows}</tbody></table></div>
       </section>
       <section class="panel">
-        <h2>Weakest Regimes</h2>
-        <table>
-          <thead><tr><th>Regime</th><th>Negative</th><th>Positive</th></tr></thead>
-          <tbody>{weakest_regime_rows}</tbody>
-        </table>
+        {panel_title("Weakest Regimes")}
+        <div class="table-wrap"><table><thead><tr><th>Regime</th><th>Negative</th><th>Positive</th></tr></thead><tbody>{weakest_regime_rows}</tbody></table></div>
       </section>
     </section>
     <section class="panel">
-      <h2>Regime Performance</h2>
-      <table>
-        <thead><tr><th>Regime</th><th>Stage</th><th>Decisions</th><th>Positive</th><th>Negative</th><th>Emits</th></tr></thead>
-        <tbody>{regime_rows}</tbody>
-      </table>
+      {panel_title("Regime Performance")}
+      <div class="table-wrap"><table><thead><tr><th>Regime</th><th>Stage</th><th>Decisions</th><th>Positive</th><th>Negative</th><th>Emits</th></tr></thead><tbody>{regime_rows}</tbody></table></div>
     </section>
     <section class="panel">
-      <h2>Regime Actions</h2>
-      <table>
-        <thead><tr><th>Action</th><th>Stage</th><th>Regime</th><th>Reason</th></tr></thead>
-        <tbody>{regime_action_rows}</tbody>
-      </table>
+      {panel_title("Regime Actions", "Suggested interventions surfaced by current regime evidence.")}
+      <div class="table-wrap"><table><thead><tr><th>Action</th><th>Stage</th><th>Regime</th><th>Reason</th></tr></thead><tbody>{regime_action_rows}</tbody></table></div>
     </section>
-    <section class="two-col">
+    <section class="split-equal">
       <section class="panel">
-        <h2>Regime Meta-Policy</h2>
-        <table>
-          <thead><tr><th>Regime</th><th>Confidence</th><th>Aggressiveness</th><th>Traffic</th><th>Cooldown</th></tr></thead>
-          <tbody>{meta_rows}</tbody>
-        </table>
+        {panel_title("Regime Meta-Policy")}
+        <div class="table-wrap"><table><thead><tr><th>Regime</th><th>Confidence</th><th>Aggressiveness</th><th>Traffic</th><th>Cooldown</th></tr></thead><tbody>{meta_rows}</tbody></table></div>
       </section>
       <section class="panel">
-        <h2>Strategy Synthesis</h2>
-        <table>
-          <thead><tr><th>Regime</th><th>Aggressiveness</th><th>Action</th><th>Runs</th><th>Positive</th><th>Negative</th></tr></thead>
-          <tbody>{strategy_rows}</tbody>
-        </table>
+        {panel_title("Strategy Synthesis")}
+        <div class="table-wrap"><table><thead><tr><th>Regime</th><th>Aggressiveness</th><th>Action</th><th>Runs</th><th>Positive</th><th>Negative</th></tr></thead><tbody>{strategy_rows}</tbody></table></div>
       </section>
     </section>
     <section class="panel">
-      <h2>Automation Runs</h2>
-      <table>
-        <thead><tr><th>Run</th><th>Status</th><th>Approvals</th><th>Canaries</th><th>Promotions</th><th>Skipped</th></tr></thead>
-        <tbody>{automation_run_rows}</tbody>
-      </table>
+      {panel_title("Automation Runs", "Recent automation cycles and how much they changed.")}
+      <div class="table-wrap"><table><thead><tr><th>Run</th><th>Status</th><th>Approvals</th><th>Canaries</th><th>Promotions</th><th>Skipped</th></tr></thead><tbody>{automation_run_rows}</tbody></table></div>
     </section>
     <section class="two-col">
       <section class="panel">
-        <h2>Recommended Actions</h2>
+        {panel_title("Recommended Actions")}
         <ul>{action_rows}</ul>
       </section>
       <section class="panel">
-        <h2>Top Skip Reasons</h2>
-        <table>
-          <thead><tr><th>Reason</th><th>Count</th></tr></thead>
-          <tbody>{top_skip_rows}</tbody>
-        </table>
+        {panel_title("Top Skip Reasons")}
+        <div class="table-wrap"><table><thead><tr><th>Reason</th><th>Count</th></tr></thead><tbody>{top_skip_rows}</tbody></table></div>
       </section>
     </section>
     <section class="two-col">
       <section class="panel">
-        <h2>Rollout Notifications</h2>
-        <table>
-          <thead><tr><th>Event</th><th>Level</th><th>Service</th><th>Message</th></tr></thead>
-          <tbody>{notification_rows}</tbody>
-        </table>
+        {panel_title("Rollout Notifications")}
+        <div class="table-wrap"><table><thead><tr><th>Event</th><th>Level</th><th>Service</th><th>Message</th></tr></thead><tbody>{notification_rows}</tbody></table></div>
       </section>
       <section class="panel">
-        <h2>Worker / Engine Alignment</h2>
-        <table>
-          <thead><tr><th>Target</th><th>Aligned</th><th>Worker SHA</th><th>Engine SHA</th></tr></thead>
-          <tbody>{alignment_rows}</tbody>
-        </table>
+        {panel_title("Worker / Engine Alignment")}
+        <div class="table-wrap"><table><thead><tr><th>Target</th><th>Aligned</th><th>Worker SHA</th><th>Engine SHA</th></tr></thead><tbody>{alignment_rows}</tbody></table></div>
       </section>
     </section>
     <section class="panel">
-      <h2>Rollout Verification</h2>
-      <table>
-        <thead><tr><th>Service</th><th>Target</th><th>Verification</th><th>SHA</th><th>Summary</th></tr></thead>
-        <tbody>{verification_rows}</tbody>
-      </table>
+      {panel_title("Rollout Verification")}
+      <div class="table-wrap"><table><thead><tr><th>Service</th><th>Target</th><th>Verification</th><th>SHA</th><th>Summary</th></tr></thead><tbody>{verification_rows}</tbody></table></div>
     </section>
     <section class="panel">
-      <h2>Policy Rollouts</h2>
-      <table>
-        <thead><tr><th>Policy</th><th>Version</th><th>Mode</th><th>Status</th><th>Stage</th><th>Regime</th><th>Traffic</th></tr></thead>
-        <tbody>{policy_rollout_rows}</tbody>
-      </table>
+      {panel_title("Policy Rollouts")}
+      <div class="table-wrap"><table><thead><tr><th>Policy</th><th>Version</th><th>Mode</th><th>Status</th><th>Stage</th><th>Regime</th><th>Traffic</th></tr></thead><tbody>{policy_rollout_rows}</tbody></table></div>
     </section>
     <section class="panel">
-      <h2>Policy Guardrails</h2>
-      <table>
-        <thead><tr><th>Policy</th><th>Version</th><th>Stage</th><th>Regime</th><th>Samples</th><th>Negative Rate</th><th>Action</th></tr></thead>
-        <tbody>{policy_guardrail_rows}</tbody>
-      </table>
+      {panel_title("Policy Guardrails")}
+      <div class="table-wrap"><table><thead><tr><th>Policy</th><th>Version</th><th>Stage</th><th>Regime</th><th>Samples</th><th>Negative Rate</th><th>Action</th></tr></thead><tbody>{policy_guardrail_rows}</tbody></table></div>
     </section>
-    <section class="two-col">
+    <section class="split-equal">
       <section class="panel">
-        <h2>Policy Approvals</h2>
-        <table>
-          <thead><tr><th>Policy</th><th>Version</th><th>Status</th><th>Source</th><th>Approved By</th></tr></thead>
-          <tbody>{policy_approval_rows}</tbody>
-        </table>
+        {panel_title("Policy Approvals")}
+        <div class="table-wrap"><table><thead><tr><th>Policy</th><th>Version</th><th>Status</th><th>Source</th><th>Approved By</th></tr></thead><tbody>{policy_approval_rows}</tbody></table></div>
       </section>
       <section class="panel">
-        <h2>Policy Events</h2>
-        <table>
-          <thead><tr><th>Event</th><th>Status</th><th>Policy</th><th>Version</th></tr></thead>
-          <tbody>{policy_event_rows}</tbody>
-        </table>
+        {panel_title("Policy Events")}
+        <div class="table-wrap"><table><thead><tr><th>Event</th><th>Status</th><th>Policy</th><th>Version</th></tr></thead><tbody>{policy_event_rows}</tbody></table></div>
       </section>
     </section>
     <section class="panel">
-      <h2>Policy Profiles</h2>
-      <table>
-        <thead><tr><th>Policy</th><th>Version</th><th>Created By</th><th>Description</th></tr></thead>
-        <tbody>{policy_profile_rows}</tbody>
-      </table>
+      {panel_title("Policy Profiles")}
+      <div class="table-wrap"><table><thead><tr><th>Policy</th><th>Version</th><th>Created By</th><th>Description</th></tr></thead><tbody>{policy_profile_rows}</tbody></table></div>
     </section>
     <section class="panel">
-      <h2>Verification Family Scorecards</h2>
-      <table>
+      {panel_title("Verification Family Scorecards")}
+      <div class="table-wrap"><table>
         <thead><tr><th>Family</th><th>Rollouts</th><th>Improved</th><th>Degraded</th><th>Avg Send Δ</th><th>Avg Post Win Rate</th></tr></thead>
         <tbody>{verification_family_rows}</tbody>
-      </table>
+      </table></div>
     </section>
   </div>
 </body>
