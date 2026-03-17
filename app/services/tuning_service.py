@@ -1917,9 +1917,35 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         max_negative_rate=60.0,
         auto_apply=False,
     )
+    policy_regimes = sls.get_policy_regime_summary(hours=lookback, limit=12)
     policy_automation_status = sls.get_policy_automation_status()
     resolved_candidate_policy = sls.resolve_live_policy("candidate")
     resolved_promoted_policy = sls.resolve_live_policy("promoted")
+    regime_rows = policy_regimes.get("regimes") if isinstance(policy_regimes.get("regimes"), list) else []
+    strongest_regimes = sorted(
+        [
+            item
+            for item in regime_rows
+            if isinstance(item, dict) and (int(item.get("decision_count") or 0) > 0)
+        ],
+        key=lambda item: (
+            int(item.get("positive_outcomes") or 0) - int(item.get("negative_outcomes") or 0),
+            int(item.get("positive_outcomes") or 0),
+        ),
+        reverse=True,
+    )[:5]
+    weakest_regimes = sorted(
+        [
+            item
+            for item in regime_rows
+            if isinstance(item, dict) and int(item.get("negative_outcomes") or 0) > 0
+        ],
+        key=lambda item: (
+            int(item.get("negative_outcomes") or 0) - int(item.get("positive_outcomes") or 0),
+            int(item.get("negative_outcomes") or 0),
+        ),
+        reverse=True,
+    )[:5]
 
     recommended_actions: list[str] = []
     rollout_actions = rollout_summary.get("recommended_actions")
@@ -2031,6 +2057,28 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         recommended_actions.insert(0, f"Runtime config drift exists for: {', '.join(unresolved_drift)}.")
     if verification_notes:
         recommended_actions.insert(0, f"Latest rollout verification: {', '.join(verification_notes)}.")
+    if weakest_regimes:
+        worst = weakest_regimes[0]
+        recommended_actions.insert(
+            0,
+            (
+                "Highest-loss regime is "
+                f"{worst.get('regime_key', 'unknown')} with "
+                f"{int(worst.get('negative_outcomes') or 0)} negative outcomes. "
+                "Prefer tighter canaries or stricter generation there."
+            ),
+        )
+    if strongest_regimes:
+        best = strongest_regimes[0]
+        recommended_actions.insert(
+            0,
+            (
+                "Highest-conviction regime is "
+                f"{best.get('regime_key', 'unknown')} with "
+                f"{int(best.get('positive_outcomes') or 0)} positive outcomes. "
+                "Prefer bounded relaxation and expansion there."
+            ),
+        )
 
     return {
         "lookback_hours": lookback,
@@ -2056,6 +2104,9 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         "policy_approvals": policy_approvals,
         "policy_events": policy_events,
         "policy_guardrails": policy_guardrails,
+        "policy_regimes": policy_regimes,
+        "strongest_regimes": strongest_regimes,
+        "weakest_regimes": weakest_regimes,
         "policy_automation": policy_automation_status,
         "resolved_policies": {
             "candidate": resolved_candidate_policy,
@@ -2081,6 +2132,9 @@ def render_operator_command_center_html(hours: int = 24) -> str:
     policy_approvals = center.get("policy_approvals") if isinstance(center.get("policy_approvals"), list) else []
     policy_events = center.get("policy_events") if isinstance(center.get("policy_events"), list) else []
     policy_guardrails = center.get("policy_guardrails") if isinstance(center.get("policy_guardrails"), dict) else {}
+    policy_regimes = center.get("policy_regimes") if isinstance(center.get("policy_regimes"), dict) else {}
+    strongest_regimes = center.get("strongest_regimes") if isinstance(center.get("strongest_regimes"), list) else []
+    weakest_regimes = center.get("weakest_regimes") if isinstance(center.get("weakest_regimes"), list) else []
     policy_automation = center.get("policy_automation") if isinstance(center.get("policy_automation"), dict) else {}
     latest_policy_replay = center.get("latest_policy_replay") if isinstance(center.get("latest_policy_replay"), dict) else {}
     resolved_policies = center.get("resolved_policies") if isinstance(center.get("resolved_policies"), dict) else {}
@@ -2183,21 +2237,50 @@ def render_operator_command_center_html(hours: int = 24) -> str:
         f"<td>{html.escape(str(item.get('rollout_mode') or 'n/a'))}</td>"
         f"<td>{html.escape(str(item.get('rollout_status') or 'n/a'))}</td>"
         f"<td>{html.escape(str(item.get('stage_scope') or 'all'))}</td>"
+        f"<td>{html.escape(str(item.get('regime_scope') or 'all'))}</td>"
         f"<td>{int(item.get('traffic_percent') or 0)}%</td>"
         "</tr>"
         for item in policy_rollouts[:8]
-    ) or "<tr><td colspan='6'>No policy rollouts recorded.</td></tr>"
+    ) or "<tr><td colspan='7'>No policy rollouts recorded.</td></tr>"
     policy_guardrail_rows = "".join(
         "<tr>"
         f"<td>{html.escape(str(item.get('policy_name') or 'unknown'))}</td>"
         f"<td>{html.escape(str(item.get('policy_version') or 'n/a'))}</td>"
         f"<td>{html.escape(str(item.get('stage_scope') or 'all'))}</td>"
+        f"<td>{html.escape(str(item.get('regime_scope') or 'all'))}</td>"
         f"<td>{int(item.get('samples') or 0)}</td>"
         f"<td>{float(item.get('negative_rate') or 0.0)}%</td>"
         f"<td>{html.escape(str(item.get('recommended_action') or 'hold'))}</td>"
         "</tr>"
         for item in (policy_guardrails.get("evaluations") or [])[:8]
-    ) or "<tr><td colspan='6'>No active canary guardrail evaluations.</td></tr>"
+    ) or "<tr><td colspan='7'>No active canary guardrail evaluations.</td></tr>"
+    regime_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('regime_key') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('stage') or 'n/a'))}</td>"
+        f"<td>{int(item.get('decision_count') or 0)}</td>"
+        f"<td>{int(item.get('positive_outcomes') or 0)}</td>"
+        f"<td>{int(item.get('negative_outcomes') or 0)}</td>"
+        f"<td>{int(item.get('emit_count') or 0)}</td>"
+        "</tr>"
+        for item in (policy_regimes.get("regimes") or [])[:8]
+    ) or "<tr><td colspan='6'>No regime performance recorded.</td></tr>"
+    strongest_regime_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('regime_key') or 'unknown'))}</td>"
+        f"<td>{int(item.get('positive_outcomes') or 0)}</td>"
+        f"<td>{int(item.get('negative_outcomes') or 0)}</td>"
+        "</tr>"
+        for item in strongest_regimes[:5]
+    ) or "<tr><td colspan='3'>No strong regimes yet.</td></tr>"
+    weakest_regime_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('regime_key') or 'unknown'))}</td>"
+        f"<td>{int(item.get('negative_outcomes') or 0)}</td>"
+        f"<td>{int(item.get('positive_outcomes') or 0)}</td>"
+        "</tr>"
+        for item in weakest_regimes[:5]
+    ) or "<tr><td colspan='3'>No weak regimes yet.</td></tr>"
     policy_approval_rows = "".join(
         "<tr>"
         f"<td>{html.escape(str(item.get('policy_name') or 'unknown'))}</td>"
@@ -2332,6 +2415,38 @@ def render_operator_command_center_html(hours: int = 24) -> str:
       <p style="margin-top:10px;"><strong>Automation Budgets:</strong> approvals {int(budget_state.get('auto_approvals_used') or 0)}/{int(budget_state.get('auto_approvals_max') or 0)}, canaries {int(budget_state.get('canaries_used') or 0)}/{int(budget_state.get('canaries_max') or 0)}, promotions {int(budget_state.get('promotions_used') or 0)}/{int(budget_state.get('promotions_max') or 0)}. <strong>Cooldowns:</strong> approvals {int(cooldown_state.get('auto_approval_sec') or 0)}s, canaries {int(cooldown_state.get('canary_sec') or 0)}s, promotions {int(cooldown_state.get('promotion_sec') or 0)}s.</p>
     </section>
     <section class="panel">
+      <h2>Regime Intelligence</h2>
+      <div class="metric-grid">
+        {metric_card("Tracked Regimes", len(policy_regimes.get("regimes") or []))}
+        {metric_card("Best Regime", str((strongest_regimes[0].get('regime_key') if strongest_regimes else 'n/a')))}
+        {metric_card("Weakest Regime", str((weakest_regimes[0].get('regime_key') if weakest_regimes else 'n/a')))}
+        {metric_card("Regime Replay Scope", str(latest_policy_replay.get('regime_key') or 'global'))}
+      </div>
+    </section>
+    <section class="two-col">
+      <section class="panel">
+        <h2>Strongest Regimes</h2>
+        <table>
+          <thead><tr><th>Regime</th><th>Positive</th><th>Negative</th></tr></thead>
+          <tbody>{strongest_regime_rows}</tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Weakest Regimes</h2>
+        <table>
+          <thead><tr><th>Regime</th><th>Negative</th><th>Positive</th></tr></thead>
+          <tbody>{weakest_regime_rows}</tbody>
+        </table>
+      </section>
+    </section>
+    <section class="panel">
+      <h2>Regime Performance</h2>
+      <table>
+        <thead><tr><th>Regime</th><th>Stage</th><th>Decisions</th><th>Positive</th><th>Negative</th><th>Emits</th></tr></thead>
+        <tbody>{regime_rows}</tbody>
+      </table>
+    </section>
+    <section class="panel">
       <h2>Automation Runs</h2>
       <table>
         <thead><tr><th>Run</th><th>Status</th><th>Approvals</th><th>Canaries</th><th>Promotions</th><th>Skipped</th></tr></thead>
@@ -2377,14 +2492,14 @@ def render_operator_command_center_html(hours: int = 24) -> str:
     <section class="panel">
       <h2>Policy Rollouts</h2>
       <table>
-        <thead><tr><th>Policy</th><th>Version</th><th>Mode</th><th>Status</th><th>Stage</th><th>Traffic</th></tr></thead>
+        <thead><tr><th>Policy</th><th>Version</th><th>Mode</th><th>Status</th><th>Stage</th><th>Regime</th><th>Traffic</th></tr></thead>
         <tbody>{policy_rollout_rows}</tbody>
       </table>
     </section>
     <section class="panel">
       <h2>Policy Guardrails</h2>
       <table>
-        <thead><tr><th>Policy</th><th>Version</th><th>Stage</th><th>Samples</th><th>Negative Rate</th><th>Action</th></tr></thead>
+        <thead><tr><th>Policy</th><th>Version</th><th>Stage</th><th>Regime</th><th>Samples</th><th>Negative Rate</th><th>Action</th></tr></thead>
         <tbody>{policy_guardrail_rows}</tbody>
       </table>
     </section>
