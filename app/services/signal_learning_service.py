@@ -2215,6 +2215,7 @@ def get_policy_automation_status() -> dict[str, Any]:
         "recent_runs": recent_runs,
         "guardrails": _policy_automation_guardrails(),
         "regime_feedback": get_regime_action_feedback(hours=168),
+        "regime_meta_policy": get_regime_meta_policy(hours=168),
         "pending_approvals": [
             item
             for item in list_policy_approvals(limit=20)
@@ -2571,6 +2572,7 @@ def execute_regime_policy_action(
     actor: str | None = None,
     hours: int = 24,
     replay_limit: int = 250,
+    traffic_percent: int | None = None,
 ) -> dict[str, Any]:
     _ensure_schema()
     regime_value = str(regime_key or "").strip()
@@ -2585,7 +2587,7 @@ def execute_regime_policy_action(
     overrides = _regime_action_overrides(stage_value, action_value, base_config)
     ts_suffix = int(time.time())
     policy_name = f"manual_{stage_value}_policy"
-    policy_version = f"{action_value}-{ts_suffix}"
+    policy_version = f"{action_value}-{ts_suffix}-{uuid.uuid4().hex[:6]}"
     profile = create_policy_profile(
         policy_name=policy_name,
         policy_version=policy_version,
@@ -2619,7 +2621,7 @@ def execute_regime_policy_action(
             rollout_status="active",
             stage_scope=stage_value,
             regime_scope=regime_value,
-            traffic_percent=int(_policy_automation_config()["canary_traffic_percent"]),
+            traffic_percent=int(traffic_percent or _policy_automation_config()["canary_traffic_percent"]),
             priority=int(_policy_automation_config()["canary_priority"]),
             activated_by=actor or "command-center",
             notes=f"Manual regime canary {action_value} for {regime_value}",
@@ -2668,6 +2670,7 @@ def execute_regime_policy_action(
         "replay": replay,
         "approval": approval,
         "rollout": rollout,
+        "traffic_percent": int(traffic_percent or _policy_automation_config()["canary_traffic_percent"]),
     }
 
 
@@ -2736,6 +2739,61 @@ def get_regime_action_feedback(*, hours: int = 168) -> dict[str, Any]:
     return {"hours": max(1, hours), "evaluations": evaluations, "by_regime": by_regime}
 
 
+def get_regime_meta_policy(*, hours: int = 168) -> dict[str, Any]:
+    config = _policy_automation_config()
+    feedback = get_regime_action_feedback(hours=max(1, hours))
+    regime_summary = get_policy_regime_summary(hours=max(24, min(hours, 168)), limit=100)
+    summaries = regime_summary.get("regimes") if isinstance(regime_summary.get("regimes"), list) else []
+    by_regime: dict[str, dict[str, Any]] = {}
+    for item in summaries:
+        if not isinstance(item, dict):
+            continue
+        regime_key = str(item.get("regime_key") or "")
+        if not regime_key:
+            continue
+        feedback_item = (feedback.get("by_regime") if isinstance(feedback.get("by_regime"), dict) else {}).get(regime_key, {})
+        positive = int(item.get("positive_outcomes") or 0)
+        negative = int(item.get("negative_outcomes") or 0)
+        decisions = int(item.get("decision_count") or 0)
+        action_map = feedback_item.get("actions") if isinstance(feedback_item, dict) and isinstance(feedback_item.get("actions"), dict) else {}
+        correct = sum(int((action_map.get(name) or {}).get("correct", 0)) for name in ("canary_relax", "canary_tighten"))
+        incorrect = sum(int((action_map.get(name) or {}).get("incorrect", 0)) for name in ("canary_relax", "canary_tighten"))
+        evidence = positive + negative + correct + incorrect
+        outcome_edge = positive - negative
+        feedback_edge = correct - incorrect
+        confidence_score = max(0.0, min(100.0, 50.0 + (outcome_edge * 8.0) + (feedback_edge * 12.0) + min(decisions, 10) * 1.5))
+        if confidence_score >= 75.0:
+            aggressiveness = "aggressive"
+            traffic_percent = min(50, max(int(config["canary_traffic_percent"]), int(config["canary_traffic_percent"]) * 2))
+            cooldown_multiplier = 0.5
+        elif confidence_score >= 55.0:
+            aggressiveness = "balanced"
+            traffic_percent = int(config["canary_traffic_percent"])
+            cooldown_multiplier = 1.0
+        else:
+            aggressiveness = "conservative"
+            traffic_percent = max(5, int(config["canary_traffic_percent"]) // 2)
+            cooldown_multiplier = 1.5
+        recommended_action = "canary_relax" if outcome_edge >= 0 else "canary_tighten"
+        if isinstance(feedback_item, dict) and feedback_item.get("recommended_action"):
+            recommended_action = str(feedback_item.get("recommended_action") or recommended_action)
+        by_regime[regime_key] = {
+            "regime_key": regime_key,
+            "stage_scope": str(item.get("stage") or ""),
+            "confidence_score": round(confidence_score, 1),
+            "aggressiveness": aggressiveness,
+            "traffic_percent": int(traffic_percent),
+            "cooldown_multiplier": float(cooldown_multiplier),
+            "recommended_action": recommended_action,
+            "evidence_count": evidence,
+            "positive_outcomes": positive,
+            "negative_outcomes": negative,
+            "correct_actions": correct,
+            "incorrect_actions": incorrect,
+        }
+    return {"hours": max(1, hours), "by_regime": by_regime}
+
+
 def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> dict[str, Any]:
     config = _policy_automation_config()
     budget_remaining = max(
@@ -2743,6 +2801,7 @@ def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> 
         int(config["max_regime_actions_per_day"]) - _recent_policy_event_count({"auto_regime_action_started"}, 86400),
     )
     feedback = get_regime_action_feedback(hours=max(24, hours * 7))
+    meta_policy = get_regime_meta_policy(hours=max(24, hours * 7))
     generated = generate_policy_candidates(hours=max(1, hours), generation_limit=int(config["generation_limit"]), replay_limit=max(25, replay_limit))
     candidates = generated.get("generated") if isinstance(generated.get("generated"), list) else []
     executed: list[dict[str, Any]] = []
@@ -2767,9 +2826,13 @@ def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> 
         regime_feedback = (feedback.get("by_regime") if isinstance(feedback.get("by_regime"), dict) else {}).get(regime_key)
         if isinstance(regime_feedback, dict) and regime_feedback.get("recommended_action"):
             action = str(regime_feedback.get("recommended_action") or action)
+        meta = (meta_policy.get("by_regime") if isinstance(meta_policy.get("by_regime"), dict) else {}).get(regime_key, {})
+        if isinstance(meta, dict) and meta.get("recommended_action"):
+            action = str(meta.get("recommended_action") or action)
+        effective_cooldown = int(float(config["regime_action_cooldown_sec"]) * float((meta.get("cooldown_multiplier") if isinstance(meta, dict) else 1.0) or 1.0))
         cooldown_remaining = _cooldown_remaining(
             _latest_policy_event_ts(event_types={"auto_regime_action_started"}, stage_scope=stage, regime_scope=regime_key),
-            int(config["regime_action_cooldown_sec"]),
+            effective_cooldown,
         )
         if cooldown_remaining > 0:
             skipped.append(
@@ -2777,6 +2840,7 @@ def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> 
                     "regime_key": regime_key,
                     "stage": stage,
                     "reason": "regime_action_cooldown_active",
+                    "aggressiveness": meta.get("aggressiveness") if isinstance(meta, dict) else None,
                     "cooldown_remaining_sec": cooldown_remaining,
                 }
             )
@@ -2789,6 +2853,7 @@ def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> 
                 actor="policy-automation",
                 hours=max(1, hours),
                 replay_limit=max(25, replay_limit),
+                traffic_percent=int((meta.get("traffic_percent") if isinstance(meta, dict) else None) or config["canary_traffic_percent"]),
             )
         except ValueError as exc:
             skipped.append({"regime_key": regime_key, "stage": stage, "reason": str(exc)})
@@ -2804,6 +2869,8 @@ def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> 
                 "action": action,
                 "stage_scope": stage,
                 "regime_scope": regime_key,
+                "aggressiveness": meta.get("aggressiveness") if isinstance(meta, dict) else None,
+                "traffic_percent": result.get("traffic_percent"),
                 "source_replay_run_id": (replay or {}).get("run_id"),
                 "positive_outcomes": positive,
                 "negative_outcomes": negative,
@@ -2815,6 +2882,7 @@ def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> 
     return {
         "config": config,
         "feedback": feedback,
+        "meta_policy": meta_policy,
         "generated": generated,
         "executed": executed,
         "skipped": skipped,

@@ -1550,6 +1550,245 @@ def test_regime_action_feedback_scores_outcomes_and_recommends_action(tmp_path, 
     assert regime_feedback["recommended_action"] == "canary_tighten"
 
 
+def test_regime_meta_policy_adapts_confidence_and_traffic(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_CANARY_TRAFFIC_PERCENT", "10")
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_CANARY_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_PROMOTION_COOLDOWN_SEC", "0")
+    sls.init()
+
+    sls.record_signal_decision(
+        token="token-meta-seed",
+        event_type="promoted",
+        stage="promoted",
+        decision="promoted_sent",
+        action_taken="emit",
+        attention_score=0.72,
+        risk_score=0.68,
+        confidence_score=0.88,
+        creator_score=0.3,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="deterministic-v1",
+        features={
+            "session_bucket": "us_day",
+            "liquidity_usd": 9000.0,
+            "age_minutes": 12.0,
+            "price_change_m5": -18.0,
+            "price_change_h1": -24.0,
+            "unique_buyers_15m": 18,
+        },
+        ts_value=1_774_010_100,
+        source="test",
+    )
+    result = sls.execute_regime_policy_action(
+        regime_key="promoted|us_day|thin|new|reversing",
+        action="canary_tighten",
+        actor="ops-user",
+        hours=10000,
+        replay_limit=100,
+        traffic_percent=20,
+    )
+    for idx in range(3):
+        signal_id = sls.record_signal_decision(
+            token=f"token-meta-{idx}",
+            event_type="promoted",
+            stage="promoted",
+            decision="promoted_sent",
+            action_taken="emit",
+            attention_score=0.84,
+            risk_score=0.20,
+            confidence_score=0.93,
+            creator_score=0.32,
+            lifecycle="dex",
+            policy_name=result["profile"]["policy_name"],
+            policy_version=result["profile"]["policy_version"],
+            features={
+                "session_bucket": "us_day",
+                "liquidity_usd": 9000.0,
+                "age_minutes": 10.0,
+                "price_change_m5": -12.0,
+                "price_change_h1": -22.0,
+                "unique_buyers_15m": 16,
+            },
+            ts_value=1_774_020_000 + idx,
+            source="test",
+        )
+        with sls._connect() as c:
+            c.execute(
+                """
+                INSERT INTO signal_snapshots (
+                    signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                    volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                    txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                    outcome_label, snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    60,
+                    1_774_023_600 + idx,
+                    "dex",
+                    26000,
+                    12000,
+                    8000,
+                    70.0,
+                    24.0,
+                    60.0,
+                    60,
+                    18,
+                    75.0,
+                    18.0,
+                    40.0,
+                    "strong_continuation",
+                    json.dumps({"outcome_label": "strong_continuation"}),
+                ),
+            )
+    sls.auto_promote_policy_canaries(hours=10000)
+    meta = sls.get_regime_meta_policy(hours=10000)
+    regime_meta = meta["by_regime"]["promoted|us_day|thin|new|reversing"]
+
+    assert regime_meta["confidence_score"] >= 55.0
+    assert regime_meta["recommended_action"] == "canary_tighten"
+    assert regime_meta["traffic_percent"] >= 10
+
+
+def test_auto_execute_regime_actions_uses_meta_policy_traffic(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_CANARY_TRAFFIC_PERCENT", "10")
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_REGIME_ACTION_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_MAX_REGIME_ACTIONS_PER_DAY", "1")
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_CANARY_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_PROMOTION_COOLDOWN_SEC", "0")
+    sls.init()
+
+    seed_id = sls.record_signal_decision(
+        token="token-auto-meta-seed",
+        event_type="promoted",
+        stage="promoted",
+        decision="promoted_sent",
+        action_taken="emit",
+        attention_score=0.72,
+        risk_score=0.68,
+        confidence_score=0.88,
+        creator_score=0.3,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="deterministic-v1",
+        features={
+            "session_bucket": "us_day",
+            "liquidity_usd": 9000.0,
+            "age_minutes": 12.0,
+            "price_change_m5": -18.0,
+            "price_change_h1": -24.0,
+            "unique_buyers_15m": 18,
+        },
+        ts_value=1_774_030_100,
+        source="test",
+    )
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                seed_id,
+                60,
+                1_774_033_600,
+                "dex",
+                7000,
+                2500,
+                700,
+                65.0,
+                -25.0,
+                -45.0,
+                20,
+                70,
+                -41.0,
+                -42.0,
+                -70.0,
+                "failed",
+                json.dumps({"outcome_label": "failed"}),
+            ),
+        )
+    prior = sls.execute_regime_policy_action(
+        regime_key="promoted|us_day|thin|new|reversing",
+        action="canary_tighten",
+        actor="ops-user",
+        hours=10000,
+        replay_limit=100,
+        traffic_percent=20,
+    )
+    for idx in range(3):
+        signal_id = sls.record_signal_decision(
+            token=f"token-auto-meta-{idx}",
+            event_type="promoted",
+            stage="promoted",
+            decision="promoted_sent",
+            action_taken="emit",
+            attention_score=0.84,
+            risk_score=0.20,
+            confidence_score=0.93,
+            creator_score=0.32,
+            lifecycle="dex",
+            policy_name=prior["profile"]["policy_name"],
+            policy_version=prior["profile"]["policy_version"],
+            features={
+                "session_bucket": "us_day",
+                "liquidity_usd": 9000.0,
+                "age_minutes": 10.0,
+                "price_change_m5": -12.0,
+                "price_change_h1": -22.0,
+                "unique_buyers_15m": 16,
+            },
+            ts_value=1_774_040_000 + idx,
+            source="test",
+        )
+        with sls._connect() as c:
+            c.execute(
+                """
+                INSERT INTO signal_snapshots (
+                    signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                    volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                    txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                    outcome_label, snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    60,
+                    1_774_043_600 + idx,
+                    "dex",
+                    26000,
+                    12000,
+                    8000,
+                    70.0,
+                    24.0,
+                    60.0,
+                    60,
+                    18,
+                    75.0,
+                    18.0,
+                    40.0,
+                    "strong_continuation",
+                    json.dumps({"outcome_label": "strong_continuation"}),
+                ),
+            )
+    sls.auto_promote_policy_canaries(hours=10000)
+    auto_result = sls.auto_execute_regime_actions(hours=10000, replay_limit=100)
+
+    assert auto_result["meta_policy"]["by_regime"]["promoted|us_day|thin|new|reversing"]["traffic_percent"] >= 10
+    assert auto_result["executed"]
+    assert int(auto_result["executed"][0]["traffic_percent"]) >= 10
+
+
 def test_policy_automation_safety_guardrails_limit_duplicate_and_concurrent_rollouts(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
