@@ -2628,3 +2628,91 @@ def test_diagnostics_summary_builds_daily_trends(tmp_path, monkeypatch):
     assert combo_trends[("us_day", "promoted")]["win_rate_delta"] == 100.0
     assert any(item["title"] == "Improving Blocker Trend" for item in recommendations)
     assert any(item["title"] == "Improving Session x Signal" for item in recommendations)
+
+
+def test_record_signal_decision_uses_remote_write_for_worker_when_configured(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_PROCESS_ROLE", "worker")
+    monkeypatch.delenv("SIGNAL_ENGINE_DB_PATH", raising=False)
+    monkeypatch.delenv("STATE_ENGINE_DB_PATH", raising=False)
+    monkeypatch.setenv("SIGNAL_ENGINE_PUBLIC_BASE_URL", "https://engine.example.com")
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_remote(endpoint: str, payload: dict[str, object]):
+        calls.append((endpoint, payload))
+        return {"signal_id": "remote-signal-1"}
+
+    monkeypatch.setattr(sls, "_post_internal_learning_write", fake_remote)
+
+    signal_id = sls.record_signal_decision(
+        token="token-remote",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_ready",
+        action_taken="emit",
+        reasons=["remote"],
+        attention_score=0.7,
+        risk_score=0.2,
+        confidence_score=0.8,
+        lifecycle="dex",
+    )
+
+    assert signal_id == "remote-signal-1"
+    assert calls
+    assert calls[0][0] == "/learning/internal/decisions"
+
+
+def test_ingest_signal_event_and_decision_persist_rows(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    signal_payload = {
+        "event": {
+            "type": "candidate",
+            "source": "test",
+            "token": "token-ingest",
+            "creator": "creator-a",
+            "confidence": 0.63,
+            "reasons": ["ingested"],
+            "ts": 1_773_800_000,
+            "extra": {
+                "lifecycle": "dex",
+                "attention_score": 0.61,
+                "risk_score": 0.22,
+                "dex_summary": {
+                    "liquidity_usd": 9000,
+                    "volume_m5": 3000,
+                },
+            },
+        },
+        "external_ref": "msg-200",
+    }
+    signal_result = sls.ingest_signal_event(signal_payload)
+    decision_result = sls.ingest_signal_decision(
+        {
+            "token": "token-ingest",
+            "event_type": "candidate",
+            "stage": "candidate",
+            "decision": "candidate_ready",
+            "action_taken": "emit",
+            "reasons": ["ingested"],
+            "features": {"attention_score": 0.61},
+            "confidence_score": 0.63,
+            "attention_score": 0.61,
+            "risk_score": 0.22,
+            "lifecycle": "dex",
+            "signal_id": signal_result["signal_id"],
+            "source": "test",
+        }
+    )
+
+    with sls._connect() as c:
+        signal_count = c.execute("SELECT COUNT(1) FROM signals WHERE token='token-ingest'").fetchone()[0]
+        decision_count = c.execute("SELECT COUNT(1) FROM signal_decisions WHERE token='token-ingest'").fetchone()[0]
+
+    assert signal_result["signal_id"]
+    assert decision_result["signal_id"] == signal_result["signal_id"]
+    assert signal_count == 1
+    assert decision_count == 1

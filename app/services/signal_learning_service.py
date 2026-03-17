@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import httpx
 import json
 import logging
 import os
@@ -32,6 +33,7 @@ REPORT_POLL_SECONDS = 600
 _SCHEMA_READY = False
 DEFAULT_POLICY_NAME = "deterministic_engine"
 DEFAULT_POLICY_VERSION = "deterministic-v1"
+_REMOTE_WRITE_TIMEOUT = 5.0
 
 
 def _connect() -> sqlite3.Connection:
@@ -40,6 +42,80 @@ def _connect() -> sqlite3.Connection:
 
 def _current_db_path() -> Path:
     return resolve_engine_db_path(DB_PATH)
+
+
+def _learning_process_role() -> str:
+    role = os.getenv("SIGNAL_ENGINE_PROCESS_ROLE", "").strip().lower()
+    return role or "unknown"
+
+
+def _learning_write_base_url() -> str:
+    explicit = os.getenv("SIGNAL_ENGINE_LEARNING_WRITE_BASE_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    fallback = os.getenv("SIGNAL_ENGINE_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if fallback:
+        return fallback
+    return ""
+
+
+def _learning_write_token() -> str:
+    return os.getenv("SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN", "").strip()
+
+
+def _learning_write_mode() -> str:
+    explicit = os.getenv("SIGNAL_ENGINE_LEARNING_WRITE_MODE", "").strip().lower()
+    if explicit in {"local", "remote", "mirror"}:
+        return explicit
+    shared_env_set = bool(os.getenv("SIGNAL_ENGINE_DB_PATH", "").strip() or os.getenv("STATE_ENGINE_DB_PATH", "").strip())
+    if _learning_process_role() == "worker" and not shared_env_set and _learning_write_base_url():
+        return "remote"
+    return "local"
+
+
+def _learning_write_config() -> dict[str, Any]:
+    db_path = _current_db_path()
+    base_url = _learning_write_base_url()
+    mode = _learning_write_mode()
+    return {
+        "mode": mode,
+        "process_role": _learning_process_role(),
+        "db_path": str(db_path),
+        "db_path_env": (
+            os.getenv("SIGNAL_ENGINE_DB_PATH", "").strip()
+            or os.getenv("STATE_ENGINE_DB_PATH", "").strip()
+        ),
+        "shared_db_env_set": bool(os.getenv("SIGNAL_ENGINE_DB_PATH", "").strip() or os.getenv("STATE_ENGINE_DB_PATH", "").strip()),
+        "remote_base_url": base_url,
+        "remote_enabled": bool(base_url and mode in {"remote", "mirror"}),
+        "remote_token_configured": bool(_learning_write_token()),
+    }
+
+
+def _internal_write_headers() -> dict[str, str]:
+    token = _learning_write_token()
+    if not token:
+        return {}
+    return {"X-Signal-Engine-Token": token}
+
+
+def _post_internal_learning_write(endpoint: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    base_url = _learning_write_base_url()
+    if not base_url:
+        return None
+    try:
+        response = httpx.post(
+            f"{base_url}{endpoint}",
+            json=payload,
+            headers=_internal_write_headers(),
+            timeout=_REMOTE_WRITE_TIMEOUT,
+        )
+        response.raise_for_status()
+        body = response.json()
+        return body if isinstance(body, dict) else None
+    except Exception:
+        logger.exception("[signal-learning] remote_write_failed endpoint=%s base_url=%s", endpoint, base_url)
+        return None
 
 
 def init() -> None:
@@ -389,6 +465,7 @@ def get_learning_storage_status() -> dict[str, Any]:
     db_path = _current_db_path()
     file_exists = db_path.exists()
     file_size_bytes = db_path.stat().st_size if file_exists else 0
+    write_config = _learning_write_config()
     with _connect() as c:
         signal_count = int(c.execute("SELECT COUNT(1) FROM signals").fetchone()[0] or 0)
         decision_count = int(c.execute("SELECT COUNT(1) FROM signal_decisions").fetchone()[0] or 0)
@@ -404,6 +481,7 @@ def get_learning_storage_status() -> dict[str, Any]:
         "signal_count": signal_count,
         "decision_count": decision_count,
         "snapshot_count": snapshot_count,
+        "write_config": write_config,
     }
 
 
@@ -1462,7 +1540,7 @@ def _ensure_signal_shell(
     return resolved_signal_id
 
 
-def record_signal_event(event, *, external_ref: str | None = None, edited: bool = False) -> str:
+def _persist_signal_event(event, *, external_ref: str | None = None, edited: bool = False) -> str:
     now = int(time.time())
     extra = event.extra if isinstance(event.extra, dict) else {}
     metrics = _extract_extra_metrics(extra)
@@ -1573,7 +1651,38 @@ def record_signal_event(event, *, external_ref: str | None = None, edited: bool 
     return signal_id
 
 
-def record_signal_decision(
+def _signal_event_payload(event, *, external_ref: str | None = None, edited: bool = False) -> dict[str, Any]:
+    extra = event.extra if isinstance(event.extra, dict) else {}
+    return {
+        "event": {
+            "type": event.type,
+            "source": event.source,
+            "token": event.token,
+            "creator": event.creator,
+            "confidence": event.confidence,
+            "reasons": list(event.reasons) if isinstance(event.reasons, list) else [],
+            "ts": event.ts,
+            "extra": extra,
+            "signature": event.signature,
+        },
+        "external_ref": external_ref,
+        "edited": edited,
+    }
+
+
+def record_signal_event(event, *, external_ref: str | None = None, edited: bool = False) -> str:
+    mode = _learning_write_mode()
+    payload = _signal_event_payload(event, external_ref=external_ref, edited=edited)
+    if mode in {"remote", "mirror"}:
+        result = _post_internal_learning_write("/learning/internal/signals", payload)
+        if result and result.get("signal_id"):
+            return str(result["signal_id"])
+        if mode == "remote":
+            logger.warning("[signal-learning] remote signal write failed; falling back to local persistence")
+    return _persist_signal_event(event, external_ref=external_ref, edited=edited)
+
+
+def _persist_signal_decision(
     *,
     token: str | None,
     event_type: str,
@@ -1670,6 +1779,180 @@ def record_signal_decision(
             ),
         )
     return resolved_signal_id
+
+
+def _signal_decision_payload(
+    *,
+    token: str | None,
+    event_type: str,
+    stage: str,
+    decision: str,
+    action_taken: str | None = None,
+    reasons: list[str] | None = None,
+    features: dict[str, Any] | None = None,
+    policy_name: str | None = None,
+    policy_version: str | None = None,
+    attention_score: float | None = None,
+    risk_score: float | None = None,
+    confidence_score: float | None = None,
+    creator_score: float | None = None,
+    lifecycle: str | None = None,
+    ts_value: float | None = None,
+    signal_id: str | None = None,
+    source: str | None = None,
+    creator: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "token": token,
+        "event_type": event_type,
+        "stage": stage,
+        "decision": decision,
+        "action_taken": action_taken,
+        "reasons": reasons or [],
+        "features": features or {},
+        "policy_name": policy_name,
+        "policy_version": policy_version,
+        "attention_score": attention_score,
+        "risk_score": risk_score,
+        "confidence_score": confidence_score,
+        "creator_score": creator_score,
+        "lifecycle": lifecycle,
+        "ts_value": ts_value,
+        "signal_id": signal_id,
+        "source": source,
+        "creator": creator,
+    }
+
+
+def record_signal_decision(
+    *,
+    token: str | None,
+    event_type: str,
+    stage: str,
+    decision: str,
+    action_taken: str | None = None,
+    reasons: list[str] | None = None,
+    features: dict[str, Any] | None = None,
+    policy_name: str | None = None,
+    policy_version: str | None = None,
+    attention_score: float | None = None,
+    risk_score: float | None = None,
+    confidence_score: float | None = None,
+    creator_score: float | None = None,
+    lifecycle: str | None = None,
+    ts_value: float | None = None,
+    signal_id: str | None = None,
+    source: str | None = None,
+    creator: str | None = None,
+) -> str | None:
+    mode = _learning_write_mode()
+    payload = _signal_decision_payload(
+        token=token,
+        event_type=event_type,
+        stage=stage,
+        decision=decision,
+        action_taken=action_taken,
+        reasons=reasons,
+        features=features,
+        policy_name=policy_name,
+        policy_version=policy_version,
+        attention_score=attention_score,
+        risk_score=risk_score,
+        confidence_score=confidence_score,
+        creator_score=creator_score,
+        lifecycle=lifecycle,
+        ts_value=ts_value,
+        signal_id=signal_id,
+        source=source,
+        creator=creator,
+    )
+    if mode in {"remote", "mirror"}:
+        result = _post_internal_learning_write("/learning/internal/decisions", payload)
+        if result and "signal_id" in result:
+            return str(result["signal_id"]) if result.get("signal_id") else None
+        if mode == "remote":
+            logger.warning("[signal-learning] remote decision write failed; falling back to local persistence")
+    return _persist_signal_decision(
+        token=token,
+        event_type=event_type,
+        stage=stage,
+        decision=decision,
+        action_taken=action_taken,
+        reasons=reasons,
+        features=features,
+        policy_name=policy_name,
+        policy_version=policy_version,
+        attention_score=attention_score,
+        risk_score=risk_score,
+        confidence_score=confidence_score,
+        creator_score=creator_score,
+        lifecycle=lifecycle,
+        ts_value=ts_value,
+        signal_id=signal_id,
+        source=source,
+        creator=creator,
+    )
+
+
+def ingest_signal_event(payload: dict[str, Any]) -> dict[str, Any]:
+    event_payload = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    if not event_payload:
+        raise ValueError("event_payload_required")
+
+    class _EventProxy:
+        def __init__(self, data: dict[str, Any]) -> None:
+            self.type = str(data.get("type") or "")
+            self.source = str(data.get("source") or "")
+            self.token = str(data.get("token") or "") or None
+            self.creator = str(data.get("creator") or "") or None
+            self.confidence = _to_float(data.get("confidence")) or 0.0
+            self.reasons = data.get("reasons") if isinstance(data.get("reasons"), list) else []
+            self.ts = float(data.get("ts") or time.time())
+            self.extra = data.get("extra") if isinstance(data.get("extra"), dict) else {}
+            self.signature = str(data.get("signature") or "") or None
+
+    event = _EventProxy(event_payload)
+    if not event.type:
+        raise ValueError("event_type_required")
+    signal_id = _persist_signal_event(
+        event,
+        external_ref=str(payload.get("external_ref") or "") or None,
+        edited=bool(payload.get("edited") or False),
+    )
+    return {"signal_id": signal_id}
+
+
+def ingest_signal_decision(payload: dict[str, Any]) -> dict[str, Any]:
+    event_type = str(payload.get("event_type") or "")
+    stage = str(payload.get("stage") or "")
+    decision = str(payload.get("decision") or "")
+    if not event_type:
+        raise ValueError("event_type_required")
+    if not stage:
+        raise ValueError("stage_required")
+    if not decision:
+        raise ValueError("decision_required")
+    signal_id = _persist_signal_decision(
+        token=str(payload.get("token") or "") or None,
+        event_type=event_type,
+        stage=stage,
+        decision=decision,
+        action_taken=str(payload.get("action_taken") or "") or None,
+        reasons=payload.get("reasons") if isinstance(payload.get("reasons"), list) else None,
+        features=payload.get("features") if isinstance(payload.get("features"), dict) else None,
+        policy_name=str(payload.get("policy_name") or "") or None,
+        policy_version=str(payload.get("policy_version") or "") or None,
+        attention_score=_to_float(payload.get("attention_score")),
+        risk_score=_to_float(payload.get("risk_score")),
+        confidence_score=_to_float(payload.get("confidence_score")),
+        creator_score=_to_float(payload.get("creator_score")),
+        lifecycle=str(payload.get("lifecycle") or "") or None,
+        ts_value=_to_float(payload.get("ts_value")),
+        signal_id=str(payload.get("signal_id") or "") or None,
+        source=str(payload.get("source") or "") or None,
+        creator=str(payload.get("creator") or "") or None,
+    )
+    return {"signal_id": signal_id}
 
 
 def get_policy_trace_summary(
@@ -4300,6 +4583,7 @@ def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
     _ensure_schema()
     summary = get_diagnostics_summary(hours=max(1, hours))
     storage = get_learning_storage_status()
+    write_config = storage.get("write_config") if isinstance(storage.get("write_config"), dict) else {}
     cutoff = int(time.time()) - max(1, hours) * 3600
     with _connect() as c:
         latest_signal_row = c.execute(
@@ -4370,6 +4654,10 @@ def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
         status_detail = "The engine is processing fresh events, but none qualified for send yet."
     if total_decisions == 0 and int(storage.get("decision_count") or 0) == 0 and int(storage.get("signal_count") or 0) == 0:
         status_detail = "No learning rows exist in the current engine DB yet. This usually means the worker has not written here or both services are not sharing the same DB path."
+        if write_config.get("process_role") == "engine" and not write_config.get("shared_db_env_set") and not write_config.get("remote_enabled"):
+            status_detail += " Engine is in local-only write mode with no shared DB path configured."
+        elif write_config.get("process_role") == "worker" and write_config.get("mode") == "remote" and not write_config.get("remote_base_url"):
+            status_detail += " Worker remote write mode is enabled but no remote base URL is configured."
 
     top_skip_reasons = summary.get("top_skip_reasons") if isinstance(summary.get("top_skip_reasons"), list) else []
     top_reasons = top_skip_reasons[:5]
@@ -4389,6 +4677,7 @@ def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
         "latest_decision": latest_decision,
         "top_skip_reasons": top_reasons,
         "storage": storage,
+        "write_config": write_config,
     }
 
 

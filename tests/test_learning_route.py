@@ -128,6 +128,88 @@ def test_learning_engine_health_routes_return_status(tmp_path, monkeypatch):
     assert "DB Path" in html_response.text
 
 
+def test_learning_engine_health_includes_write_config(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_PROCESS_ROLE", "engine")
+    monkeypatch.delenv("SIGNAL_ENGINE_DB_PATH", raising=False)
+    monkeypatch.delenv("STATE_ENGINE_DB_PATH", raising=False)
+    monkeypatch.delenv("SIGNAL_ENGINE_PUBLIC_BASE_URL", raising=False)
+    sls.init()
+
+    client = TestClient(main.app)
+    response = client.get("/learning/health?hours=24")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["write_config"]["process_role"] == "engine"
+    assert payload["write_config"]["mode"] == "local"
+
+
+def test_learning_internal_ingest_routes_persist_rows(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN", "secret-token")
+    sls.init()
+    client = TestClient(main.app)
+
+    signal_response = client.post(
+        "/learning/internal/signals",
+        headers={"X-Signal-Engine-Token": "secret-token"},
+        json={
+            "event": {
+                "type": "candidate",
+                "source": "test",
+                "token": "token-route",
+                "creator": "creator-route",
+                "confidence": 0.71,
+                "reasons": ["route"],
+                "ts": 1_773_800_100,
+                "extra": {"lifecycle": "dex", "attention_score": 0.5, "risk_score": 0.2},
+            },
+            "external_ref": "route-msg-1",
+        },
+    )
+    assert signal_response.status_code == 200
+    signal_id = signal_response.json()["signal_id"]
+
+    decision_response = client.post(
+        "/learning/internal/decisions",
+        headers={"X-Signal-Engine-Token": "secret-token"},
+        json={
+            "token": "token-route",
+            "event_type": "candidate",
+            "stage": "candidate",
+            "decision": "candidate_ready",
+            "action_taken": "emit",
+            "signal_id": signal_id,
+            "source": "test",
+        },
+    )
+    assert decision_response.status_code == 200
+    assert decision_response.json()["signal_id"] == signal_id
+
+    with sls._connect() as c:
+        assert c.execute("SELECT COUNT(1) FROM signals WHERE signal_id=?", (signal_id,)).fetchone()[0] == 1
+        assert c.execute("SELECT COUNT(1) FROM signal_decisions WHERE signal_id=?", (signal_id,)).fetchone()[0] == 1
+
+
+def test_learning_internal_ingest_rejects_bad_token(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN", "secret-token")
+    sls.init()
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/learning/internal/decisions",
+        headers={"X-Signal-Engine-Token": "wrong"},
+        json={"event_type": "candidate", "stage": "candidate", "decision": "candidate_ready"},
+    )
+
+    assert response.status_code == 403
+
+
 def test_learning_policy_routes_return_traces_and_shadow_eval(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

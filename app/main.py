@@ -9,6 +9,8 @@ from app.routes import health, scan, score, packet, watch, review, learning
 from app.services.db_service import resolve_engine_db_path
 from app.services.signal_learning_service import policy_automation_worker
 
+os.environ.setdefault("SIGNAL_ENGINE_PROCESS_ROLE", "engine")
+
 app = FastAPI(title="signal-engine")
 logger = logging.getLogger(__name__)
 _BACKGROUND_TASKS: dict[str, asyncio.Task] = {}

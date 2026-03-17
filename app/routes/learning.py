@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Body, HTTPException
+import os
+
+from fastapi import APIRouter, Body, Header, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from app.services.signal_learning_service import (
@@ -15,6 +17,8 @@ from app.services.signal_learning_service import (
     get_engine_health_digest,
     get_policy_automation_status,
     get_diagnostics_summary,
+    ingest_signal_decision,
+    ingest_signal_event,
     get_learning_digest,
     get_latest_learning_report,
     get_policy_regime_summary,
@@ -76,6 +80,12 @@ from app.services.tuning_service import (
 
 
 router = APIRouter()
+
+
+def _validate_internal_write_token(token: str | None) -> None:
+    expected = os.getenv("SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN", "").strip()
+    if expected and token != expected:
+        raise HTTPException(status_code=403, detail="forbidden")
 
 
 @router.get("/learning/report/latest")
@@ -392,6 +402,30 @@ def learning_engine_health(hours: int = 6):
 @router.get("/learning/health/dashboard")
 def learning_engine_health_dashboard(hours: int = 6):
     return HTMLResponse(content=render_engine_health_html(hours=max(1, hours)))
+
+
+@router.post("/learning/internal/signals")
+def learning_internal_signal_ingest(
+    payload: dict[str, object] = Body(...),
+    x_signal_engine_token: str | None = Header(default=None),
+):
+    _validate_internal_write_token(x_signal_engine_token)
+    try:
+        return ingest_signal_event(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/learning/internal/decisions")
+def learning_internal_decision_ingest(
+    payload: dict[str, object] = Body(...),
+    x_signal_engine_token: str | None = Header(default=None),
+):
+    _validate_internal_write_token(x_signal_engine_token)
+    try:
+        return ingest_signal_decision(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/learning/tuning/proposals")

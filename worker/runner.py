@@ -6,6 +6,7 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+os.environ.setdefault("SIGNAL_ENGINE_PROCESS_ROLE", "worker")
 
 from worker.config import (
     ENABLE_WS,
@@ -126,8 +127,15 @@ async def heartbeat_loop() -> None:
 async def run_worker() -> None:
     print(f"[worker] deploy_sha={os.getenv('RENDER_GIT_COMMIT', 'unknown')}", flush=True)
     db_path = resolve_engine_db_path()
+    learning_base_url = os.getenv("SIGNAL_ENGINE_LEARNING_WRITE_BASE_URL", "").strip() or os.getenv("SIGNAL_ENGINE_PUBLIC_BASE_URL", "").strip()
+    learning_mode = os.getenv("SIGNAL_ENGINE_LEARNING_WRITE_MODE", "").strip().lower() or "auto"
     shared_env_set = bool(os.getenv("SIGNAL_ENGINE_DB_PATH", "").strip() or os.getenv("STATE_ENGINE_DB_PATH", "").strip())
     logger.warning("[startup] worker db_path=%s shared_env=%s", db_path, "set" if shared_env_set else "unset")
+    logger.warning(
+        "[startup] worker learning_write_mode=%s remote_base_configured=%s",
+        learning_mode,
+        "yes" if learning_base_url else "no",
+    )
     if not shared_env_set:
         logger.warning(
             "[startup] SIGNAL_ENGINE_DB_PATH is unset; worker may write to a local SQLite file that is not shared with engine."
