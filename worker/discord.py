@@ -973,9 +973,9 @@ def _lifecycle_label(raw: str | None) -> str:
     if not raw:
         return "Unknown"
     if raw == "bonding_curve":
-        return "Bonding Curve"
+        return "Pump.fun Curve"
     if raw == "dex":
-        return "Dex"
+        return "Solana DEX"
     return raw.replace("_", " ").title()
 
 

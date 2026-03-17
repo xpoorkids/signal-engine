@@ -164,14 +164,14 @@ def signal_title(signal_class: str, symbol: str) -> str:
 
 def summary_blurb(attention_score: float | None, risk_score: float | None, lifecycle: str) -> str:
     if attention_score is None:
-        return "Watch-only setup: core signal quality is still incomplete."
+        return "Watch-only Solana setup: core signal quality is still incomplete."
     if lifecycle == "dex" and attention_score >= 0.80 and risk_score is not None and risk_score <= 0.20:
-        return "Early breakout confirmation with buy-side flow advantage."
+        return "Solana DEX breakout confirmation with buy-side flow advantage."
     if attention_score >= 0.70 and (risk_score is None or risk_score < 0.45):
-        return "Constructive setup with moderate risk and growing social momentum."
+        return "Constructive Solana setup with moderate risk and growing social momentum."
     if risk_score is not None and risk_score >= 0.50:
-        return "Watch-only setup: attention present, but continuation still unconfirmed."
-    return "Constructive setup developing, but continuation still needs confirmation."
+        return "Watch-only Solana setup: attention is present, but continuation is still unconfirmed."
+    return "Constructive Solana setup developing, but continuation still needs confirmation."
 
 
 def signal_color(signal_class: str, risk_score: float | None) -> str:
@@ -274,7 +274,7 @@ def build_alert_explanation(
         why_now.append(f"attention {attn.display.lower()}")
 
     if lifecycle == "dex":
-        why_now.append("dex live")
+        why_now.append("solana dex live")
     if confidence_score is not None and confidence_score >= 0.65:
         why_now.append("actionable confidence")
     elif confidence.freshness != "fresh":
@@ -298,7 +298,7 @@ def build_alert_explanation(
     if risk_score is not None and risk_score >= 0.45:
         next_steps.append("risk compression")
     if lifecycle != "dex":
-        next_steps.append("dex liquidity + pair discovery")
+        next_steps.append("solana dex liquidity + pair discovery")
     if confidence_score is not None and confidence_score < 0.65:
         next_steps.append("lift confidence into strong band")
     if not next_steps:

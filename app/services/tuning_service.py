@@ -2763,7 +2763,7 @@ def render_operator_command_center_html(hours: int = 24) -> str:
       <div class="hero-copy">
         <div class="hero-kicker">Operator Surface</div>
         <h1>Operator Command Center</h1>
-        <p>Single view for engine health, policy drift, rollout state, automation posture, and regime behavior over the last {lookback_hours} hours.</p>
+        <p>Single view for Solana engine health, policy drift, rollout state, automation posture, and regime behavior over the last {lookback_hours} hours.</p>
       </div>
       <aside class="hero-highlight">
         <div>

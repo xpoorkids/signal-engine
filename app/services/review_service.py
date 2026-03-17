@@ -471,9 +471,9 @@ def render_review_html(review: dict[str, Any]) -> str:
     title = html.escape(signal_title(signal_class, vm.symbol))
     quick_read = html.escape(summary_blurb(vm.attention_score, vm.risk_score, vm.lifecycle))
     lifecycle_label_raw = (
-        "Dex"
+        "Solana DEX"
         if vm.lifecycle == "dex"
-        else "Bonding Curve"
+        else "Pump.fun Curve"
         if vm.lifecycle == "bonding_curve"
         else vm.lifecycle.title()
     )
@@ -501,7 +501,7 @@ def render_review_html(review: dict[str, Any]) -> str:
             f"<span class=\"metric-pill\">CONF {html.escape(confidence_value)}</span>",
             f"<span class=\"metric-pill\">RISK {html.escape(risk_value)}</span>",
             f"<span class=\"metric-pill\">ATTN {html.escape(attention_value)}</span>",
-            f"<span class=\"metric-pill\">LIFE {html.escape(vm.lifecycle.upper() if vm.lifecycle else 'N/A')}</span>",
+            f"<span class=\"metric-pill\">ROUTE {html.escape(lifecycle_label_raw.upper() if lifecycle_label_raw else 'N/A')}</span>",
         ]
     )
 
@@ -526,7 +526,7 @@ def render_review_html(review: dict[str, Any]) -> str:
         ("Confidence", confidence_value, confidence_band(vm.confidence_score)),
         ("Risk", risk_value, risk_band(vm.risk_score)),
         ("Attention", attention_value, score_band(vm.attention_score)),
-        ("Lifecycle", lifecycle_label, ""),
+        ("Solana Route", lifecycle_label, ""),
         ("Tier", tier, ""),
     ]
 
