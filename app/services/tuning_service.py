@@ -1919,6 +1919,7 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
     )
     policy_regimes = sls.get_policy_regime_summary(hours=lookback, limit=12)
     policy_automation_status = sls.get_policy_automation_status()
+    policy_strategy_synthesis = sls.get_policy_strategy_synthesis(hours=max(24, lookback * 7))
     resolved_candidate_policy = sls.resolve_live_policy("candidate")
     resolved_promoted_policy = sls.resolve_live_policy("promoted")
     regime_rows = policy_regimes.get("regimes") if isinstance(policy_regimes.get("regimes"), list) else []
@@ -2128,6 +2129,7 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         "weakest_regimes": weakest_regimes,
         "regime_action_suggestions": regime_action_suggestions,
         "policy_automation": policy_automation_status,
+        "policy_strategy_synthesis": policy_strategy_synthesis,
         "resolved_policies": {
             "candidate": resolved_candidate_policy,
             "promoted": resolved_promoted_policy,
@@ -2157,6 +2159,7 @@ def render_operator_command_center_html(hours: int = 24) -> str:
     weakest_regimes = center.get("weakest_regimes") if isinstance(center.get("weakest_regimes"), list) else []
     regime_action_suggestions = center.get("regime_action_suggestions") if isinstance(center.get("regime_action_suggestions"), list) else []
     policy_automation = center.get("policy_automation") if isinstance(center.get("policy_automation"), dict) else {}
+    policy_strategy_synthesis = center.get("policy_strategy_synthesis") if isinstance(center.get("policy_strategy_synthesis"), dict) else {}
     latest_policy_replay = center.get("latest_policy_replay") if isinstance(center.get("latest_policy_replay"), dict) else {}
     resolved_policies = center.get("resolved_policies") if isinstance(center.get("resolved_policies"), dict) else {}
     recommended_actions = center.get("recommended_actions") if isinstance(center.get("recommended_actions"), list) else []
@@ -2342,6 +2345,28 @@ def render_operator_command_center_html(hours: int = 24) -> str:
     latest_automation_run = policy_automation.get("latest_run") if isinstance(policy_automation.get("latest_run"), dict) else {}
     automation_runs = policy_automation.get("recent_runs") if isinstance(policy_automation.get("recent_runs"), list) else []
     automation_guardrails = policy_automation.get("guardrails") if isinstance(policy_automation.get("guardrails"), dict) else {}
+    regime_meta_policy = policy_automation.get("regime_meta_policy") if isinstance(policy_automation.get("regime_meta_policy"), dict) else {}
+    strategy_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('regime_key') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('aggressiveness') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('recommended_action') or 'n/a'))}</td>"
+        f"<td>{int(item.get('replay_runs') or 0)}</td>"
+        f"<td>{int(item.get('replay_positive') or 0)}</td>"
+        f"<td>{int(item.get('replay_negative') or 0)}</td>"
+        "</tr>"
+        for item in list((policy_strategy_synthesis.get("by_regime") or {}).values())[:6]
+    ) or "<tr><td colspan='6'>No strategy synthesis data yet.</td></tr>"
+    meta_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('regime_key') or 'unknown'))}</td>"
+        f"<td>{float(item.get('confidence_score') or 0.0)}</td>"
+        f"<td>{html.escape(str(item.get('aggressiveness') or 'n/a'))}</td>"
+        f"<td>{int(item.get('traffic_percent') or 0)}%</td>"
+        f"<td>{float(item.get('cooldown_multiplier') or 0.0)}</td>"
+        "</tr>"
+        for item in list((regime_meta_policy.get("by_regime") or {}).values())[:6]
+    ) or "<tr><td colspan='5'>No regime meta-policy data yet.</td></tr>"
     automation_summary = "No automation runs recorded yet."
     if latest_automation_run:
         automation_summary = (
@@ -2364,6 +2389,7 @@ def render_operator_command_center_html(hours: int = 24) -> str:
     ) or "<tr><td colspan='6'>No automation history recorded.</td></tr>"
     budget_state = automation_guardrails.get("budgets") if isinstance(automation_guardrails.get("budgets"), dict) else {}
     cooldown_state = automation_guardrails.get("cooldowns") if isinstance(automation_guardrails.get("cooldowns"), dict) else {}
+    portfolio_state = automation_guardrails.get("portfolio") if isinstance(automation_guardrails.get("portfolio"), dict) else {}
 
     return f"""<!doctype html>
 <html lang="en">
@@ -2443,6 +2469,7 @@ def render_operator_command_center_html(hours: int = 24) -> str:
       <p style="margin-top:14px;"><strong>Latest Replay:</strong> {replay_summary}</p>
       <p style="margin-top:10px;"><strong>Policy Automation:</strong> {automation_summary}</p>
       <p style="margin-top:10px;"><strong>Automation Budgets:</strong> approvals {int(budget_state.get('auto_approvals_used') or 0)}/{int(budget_state.get('auto_approvals_max') or 0)}, canaries {int(budget_state.get('canaries_used') or 0)}/{int(budget_state.get('canaries_max') or 0)}, promotions {int(budget_state.get('promotions_used') or 0)}/{int(budget_state.get('promotions_max') or 0)}. <strong>Cooldowns:</strong> approvals {int(cooldown_state.get('auto_approval_sec') or 0)}s, canaries {int(cooldown_state.get('canary_sec') or 0)}s, promotions {int(cooldown_state.get('promotion_sec') or 0)}s.</p>
+      <p style="margin-top:10px;"><strong>Portfolio Budget:</strong> canary traffic {int(portfolio_state.get('total_canary_traffic_used') or 0)}/{int(portfolio_state.get('total_canary_traffic_max') or 0)}%, high-risk active regimes {int(portfolio_state.get('high_risk_active_regimes') or 0)}/{int(portfolio_state.get('high_risk_active_regimes_max') or 0)}.</p>
     </section>
     <section class="panel">
       <h2>Regime Intelligence</h2>
@@ -2482,6 +2509,22 @@ def render_operator_command_center_html(hours: int = 24) -> str:
         <thead><tr><th>Action</th><th>Stage</th><th>Regime</th><th>Reason</th></tr></thead>
         <tbody>{regime_action_rows}</tbody>
       </table>
+    </section>
+    <section class="two-col">
+      <section class="panel">
+        <h2>Regime Meta-Policy</h2>
+        <table>
+          <thead><tr><th>Regime</th><th>Confidence</th><th>Aggressiveness</th><th>Traffic</th><th>Cooldown</th></tr></thead>
+          <tbody>{meta_rows}</tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Strategy Synthesis</h2>
+        <table>
+          <thead><tr><th>Regime</th><th>Aggressiveness</th><th>Action</th><th>Runs</th><th>Positive</th><th>Negative</th></tr></thead>
+          <tbody>{strategy_rows}</tbody>
+        </table>
+      </section>
     </section>
     <section class="panel">
       <h2>Automation Runs</h2>

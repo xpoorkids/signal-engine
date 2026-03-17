@@ -1071,6 +1071,7 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "weakest_regimes" in command_center_payload
     assert "regime_action_suggestions" in command_center_payload
     assert "policy_automation" in command_center_payload
+    assert "policy_strategy_synthesis" in command_center_payload
     assert "resolved_policies" in command_center_payload
     assert all("changed_keys" in item for item in command_center_payload["rollout_verification_cards"])
 
@@ -1084,6 +1085,8 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "Strongest Regimes" in command_center_dashboard_response.text
     assert "Weakest Regimes" in command_center_dashboard_response.text
     assert "Regime Actions" in command_center_dashboard_response.text
+    assert "Regime Meta-Policy" in command_center_dashboard_response.text
+    assert "Strategy Synthesis" in command_center_dashboard_response.text
     assert "Policy Rollouts" in command_center_dashboard_response.text
     assert "Policy Guardrails" in command_center_dashboard_response.text
     assert "Policy Approvals" in command_center_dashboard_response.text
