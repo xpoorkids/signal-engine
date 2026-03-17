@@ -965,11 +965,18 @@ def test_policy_automation_cycle_auto_promotes_stable_canary(tmp_path, monkeypat
     rollouts = sls.list_policy_rollouts(limit=20, active_only=False)
     events = sls.list_policy_rollout_events(limit=20)
     approvals = sls.list_policy_approvals(limit=20)
+    latest_run = sls.get_latest_policy_automation_run()
+    runs = sls.list_policy_automation_runs(limit=5)
+    status = sls.get_policy_automation_status()
 
     assert replay["run_id"]
     assert cycle["approvals"]["created"]
     assert cycle["canaries"]["scheduled"]
     assert cycle["promotions"]["promoted"]
+    assert latest_run is not None
+    assert latest_run["run_id"] == cycle["run_id"]
+    assert runs[0]["run_id"] == cycle["run_id"]
+    assert status["latest_run"]["run_id"] == cycle["run_id"]
     assert any(item["event_type"] == "auto_approval_created" for item in events)
     assert any(item["event_type"] == "auto_canary_started" for item in events)
     assert any(item["event_type"] == "canary_promoted" for item in events)

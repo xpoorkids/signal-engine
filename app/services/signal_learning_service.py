@@ -302,6 +302,19 @@ def init() -> None:
             )
             """
         )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS policy_automation_runs (
+                run_id TEXT PRIMARY KEY,
+                created_ts INTEGER NOT NULL,
+                completed_ts INTEGER,
+                hours INTEGER NOT NULL,
+                replay_limit INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                summary_json TEXT NOT NULL
+            )
+            """
+        )
         c.execute("CREATE INDEX IF NOT EXISTS idx_signals_alert_ts ON signals(alert_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_signal_jobs_due ON signal_snapshot_jobs(status, due_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_signal ON signal_snapshots(signal_id, horizon_minutes)")
@@ -314,6 +327,7 @@ def init() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_rollouts_active ON policy_rollouts(rollout_status, priority, created_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_approvals_ts ON policy_approvals(created_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_rollout_events_ts ON policy_rollout_events(created_ts DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_policy_automation_runs_ts ON policy_automation_runs(created_ts DESC)")
         approval_cols = {row[1] for row in c.execute("PRAGMA table_info(tuning_approvals)").fetchall()}
         if "rollout_status" not in approval_cols:
             c.execute("ALTER TABLE tuning_approvals ADD COLUMN rollout_status TEXT NOT NULL DEFAULT 'pending'")
@@ -1979,6 +1993,7 @@ def get_policy_automation_status() -> dict[str, Any]:
     return {
         "config": config,
         "recent_replays": list_policy_replays(limit=min(10, int(config["replay_limit"]))),
+        "latest_run": get_latest_policy_automation_run(),
         "pending_approvals": [
             item
             for item in list_policy_approvals(limit=20)
@@ -2357,18 +2372,147 @@ def auto_promote_policy_canaries(hours: int = 24) -> dict[str, Any]:
 
 
 def run_policy_automation_cycle(hours: int = 24, replay_limit: int | None = None) -> dict[str, Any]:
-    approvals = auto_create_policy_approvals(limit=replay_limit)
-    canaries = auto_schedule_policy_canaries(hours=max(1, hours))
-    guardrails = evaluate_policy_guardrails(hours=max(1, hours), min_samples=3, max_negative_rate=60.0, auto_apply=True)
-    promotions = auto_promote_policy_canaries(hours=max(1, hours))
-    return {
-        "hours": max(1, hours),
-        "config": _policy_automation_config(),
-        "approvals": approvals,
-        "canaries": canaries,
-        "guardrails": guardrails,
-        "promotions": promotions,
-    }
+    requested_hours = max(1, hours)
+    requested_limit = max(1, int(replay_limit or _policy_automation_config()["replay_limit"]))
+    automation_run_id = uuid.uuid4().hex
+    created_ts = int(time.time())
+    with _connect() as c:
+        c.execute(
+            """
+            INSERT INTO policy_automation_runs (
+                run_id, created_ts, completed_ts, hours, replay_limit, status, summary_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                automation_run_id,
+                created_ts,
+                None,
+                requested_hours,
+                requested_limit,
+                "running",
+                _json_dumps({"run_id": automation_run_id, "status": "running"}),
+            ),
+        )
+    try:
+        approvals = auto_create_policy_approvals(limit=requested_limit)
+        canaries = auto_schedule_policy_canaries(hours=requested_hours)
+        guardrails = evaluate_policy_guardrails(hours=requested_hours, min_samples=3, max_negative_rate=60.0, auto_apply=True)
+        promotions = auto_promote_policy_canaries(hours=requested_hours)
+        summary = {
+            "run_id": automation_run_id,
+            "created_ts": created_ts,
+            "completed_ts": int(time.time()),
+            "hours": requested_hours,
+            "replay_limit": requested_limit,
+            "status": "completed",
+            "config": _policy_automation_config(),
+            "approvals": approvals,
+            "canaries": canaries,
+            "guardrails": guardrails,
+            "promotions": promotions,
+        }
+    except Exception as exc:
+        summary = {
+            "run_id": automation_run_id,
+            "created_ts": created_ts,
+            "completed_ts": int(time.time()),
+            "hours": requested_hours,
+            "replay_limit": requested_limit,
+            "status": "failed",
+            "error": str(exc),
+        }
+        with _connect() as c:
+            c.execute(
+                """
+                UPDATE policy_automation_runs
+                SET completed_ts=?, status=?, summary_json=?
+                WHERE run_id=?
+                """,
+                (
+                    int(summary["completed_ts"]),
+                    "failed",
+                    _json_dumps(summary),
+                    automation_run_id,
+                ),
+            )
+        raise
+    with _connect() as c:
+        c.execute(
+            """
+            UPDATE policy_automation_runs
+            SET completed_ts=?, status=?, summary_json=?
+            WHERE run_id=?
+            """,
+            (
+                int(summary["completed_ts"]),
+                "completed",
+                _json_dumps(summary),
+                automation_run_id,
+            ),
+        )
+    return summary
+
+
+def list_policy_automation_runs(limit: int = 20) -> list[dict[str, Any]]:
+    _ensure_schema()
+    with _connect() as c:
+        rows = c.execute(
+            """
+            SELECT summary_json
+            FROM policy_automation_runs
+            ORDER BY created_ts DESC
+            LIMIT ?
+            """,
+            (max(1, limit),),
+        ).fetchall()
+    runs: list[dict[str, Any]] = []
+    for row in rows:
+        if not row or not row[0]:
+            continue
+        try:
+            payload = json.loads(row[0] or "{}")
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            runs.append(payload)
+    return runs
+
+
+def get_latest_policy_automation_run() -> dict[str, Any] | None:
+    runs = list_policy_automation_runs(limit=1)
+    return runs[0] if runs else None
+
+
+def _policy_automation_poll_seconds() -> int:
+    return max(60, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTOMATION_POLL_SECONDS", "300")))
+
+
+async def policy_automation_worker() -> None:
+    init()
+    while True:
+        try:
+            result = run_policy_automation_cycle(
+                hours=max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTOMATION_HOURS", "24"))),
+                replay_limit=max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTOMATION_REPLAY_LIMIT", "20"))),
+            )
+            logger.info(
+                "[policy-automation] run=%s approvals=%s canaries=%s promotions=%s guardrail_rollbacks=%s",
+                str(result.get("run_id") or ""),
+                len((result.get("approvals") or {}).get("created") or []),
+                len((result.get("canaries") or {}).get("scheduled") or []),
+                len((result.get("promotions") or {}).get("promoted") or []),
+                len(
+                    [
+                        item
+                        for item in ((result.get("guardrails") or {}).get("evaluations") or [])
+                        if item.get("applied")
+                    ]
+                ),
+            )
+        except Exception as exc:
+            logger.exception("[policy-automation] worker iteration failed: %s", exc)
+        await asyncio.sleep(_policy_automation_poll_seconds())
 
 
 def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:

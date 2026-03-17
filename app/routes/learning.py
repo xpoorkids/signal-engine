@@ -15,9 +15,11 @@ from app.services.signal_learning_service import (
     get_diagnostics_summary,
     get_learning_digest,
     get_latest_learning_report,
+    get_latest_policy_automation_run,
     get_latest_policy_replay,
     get_learning_report,
     get_policy_approval,
+    list_policy_automation_runs,
     list_policy_profiles,
     list_policy_approvals,
     list_policy_rollouts,
@@ -255,6 +257,19 @@ def learning_policy_guardrails_evaluate(payload: dict[str, object] = Body(defaul
 @router.get("/learning/policy/automation/status")
 def learning_policy_automation_status():
     return get_policy_automation_status()
+
+
+@router.get("/learning/policy/automation/runs")
+def learning_policy_automation_runs(limit: int = 20):
+    return {"runs": list_policy_automation_runs(limit=max(1, limit))}
+
+
+@router.get("/learning/policy/automation/runs/latest")
+def learning_policy_automation_runs_latest():
+    latest = get_latest_policy_automation_run()
+    if latest is None:
+        raise HTTPException(status_code=404, detail="policy_automation_run_not_found")
+    return latest
 
 
 @router.post("/learning/policy/automation/approvals")

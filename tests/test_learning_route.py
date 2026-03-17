@@ -618,6 +618,15 @@ def test_learning_policy_automation_routes(tmp_path, monkeypatch):
     assert run_payload["approvals"]["created"]
     assert run_payload["canaries"]["scheduled"]
     assert run_payload["promotions"]["promoted"]
+    assert run_payload["status"] == "completed"
+
+    latest_run_response = client.get("/learning/policy/automation/runs/latest")
+    assert latest_run_response.status_code == 200
+    assert latest_run_response.json()["run_id"] == run_payload["run_id"]
+
+    runs_response = client.get("/learning/policy/automation/runs?limit=5")
+    assert runs_response.status_code == 200
+    assert runs_response.json()["runs"][0]["run_id"] == run_payload["run_id"]
 
     approvals_response = client.get("/learning/policy/approvals?limit=10")
     assert approvals_response.status_code == 200
@@ -937,6 +946,7 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "policy_approvals" in command_center_payload
     assert "policy_events" in command_center_payload
     assert "policy_guardrails" in command_center_payload
+    assert "policy_automation" in command_center_payload
     assert "resolved_policies" in command_center_payload
     assert all("changed_keys" in item for item in command_center_payload["rollout_verification_cards"])
 
@@ -953,6 +963,7 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "Incident Snapshot" in command_center_dashboard_response.text
     assert "Rollout Verification" in command_center_dashboard_response.text
     assert "Verification Family Scorecards" in command_center_dashboard_response.text
+    assert "Policy Automation:" in command_center_dashboard_response.text
     assert "Families:" in command_center_dashboard_response.text or "Keys:" in command_center_dashboard_response.text
 
     ops_digest_response = client.get("/learning/ops/digest?hours=24")

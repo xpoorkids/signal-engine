@@ -1917,6 +1917,7 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         max_negative_rate=60.0,
         auto_apply=False,
     )
+    policy_automation_status = sls.get_policy_automation_status()
     resolved_candidate_policy = sls.resolve_live_policy("candidate")
     resolved_promoted_policy = sls.resolve_live_policy("promoted")
 
@@ -1991,7 +1992,12 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
             }
         )
 
-    proposal_payload = build_tuning_proposals(hours=lookback)
+    rollout_lookbacks = [
+        int(item.get("lookback_hours") or 0)
+        for item in latest_rollouts.values()
+        if isinstance(item, dict)
+    ]
+    proposal_payload = build_tuning_proposals(hours=max([lookback] + [value for value in rollout_lookbacks if value > 0]))
     verification_family_scorecards = _merge_family_scorecards(
         verification_family_scorecards,
         proposal_payload.get("historical_family_scorecards")
@@ -2041,7 +2047,7 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         "notifications": incidents,
         "rollout_verification": verification_notes,
         "rollout_verification_cards": verification_cards,
-        "rollout_verification_family_scorecards": verification_family_scorecards[:6],
+        "rollout_verification_family_scorecards": verification_family_scorecards,
         "incident_state_counts": incident_state_counts,
         "policy_profiles": policy_profiles,
         "policy_rollouts": policy_rollouts,
@@ -2050,6 +2056,7 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         "policy_approvals": policy_approvals,
         "policy_events": policy_events,
         "policy_guardrails": policy_guardrails,
+        "policy_automation": policy_automation_status,
         "resolved_policies": {
             "candidate": resolved_candidate_policy,
             "promoted": resolved_promoted_policy,
@@ -2074,6 +2081,7 @@ def render_operator_command_center_html(hours: int = 24) -> str:
     policy_approvals = center.get("policy_approvals") if isinstance(center.get("policy_approvals"), list) else []
     policy_events = center.get("policy_events") if isinstance(center.get("policy_events"), list) else []
     policy_guardrails = center.get("policy_guardrails") if isinstance(center.get("policy_guardrails"), dict) else {}
+    policy_automation = center.get("policy_automation") if isinstance(center.get("policy_automation"), dict) else {}
     latest_policy_replay = center.get("latest_policy_replay") if isinstance(center.get("latest_policy_replay"), dict) else {}
     resolved_policies = center.get("resolved_policies") if isinstance(center.get("resolved_policies"), dict) else {}
     recommended_actions = center.get("recommended_actions") if isinstance(center.get("recommended_actions"), list) else []
@@ -2218,6 +2226,16 @@ def render_operator_command_center_html(hours: int = 24) -> str:
         "</tr>"
         for item in policy_profiles[:8]
     ) or "<tr><td colspan='4'>No policy profiles recorded.</td></tr>"
+    latest_automation_run = policy_automation.get("latest_run") if isinstance(policy_automation.get("latest_run"), dict) else {}
+    automation_summary = "No automation runs recorded yet."
+    if latest_automation_run:
+        automation_summary = (
+            f"{html.escape(str(latest_automation_run.get('status') or 'unknown'))}"
+            f" run at {html.escape(str(latest_automation_run.get('created_ts') or 'n/a'))}"
+            f" with {len(((latest_automation_run.get('approvals') or {}).get('created') or []))} approvals,"
+            f" {len(((latest_automation_run.get('canaries') or {}).get('scheduled') or []))} canaries,"
+            f" {len(((latest_automation_run.get('promotions') or {}).get('promoted') or []))} promotions."
+        )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -2295,6 +2313,7 @@ def render_operator_command_center_html(hours: int = 24) -> str:
         {metric_card("Replay Changes", int(latest_policy_replay.get("changed_count") or 0))}
       </div>
       <p style="margin-top:14px;"><strong>Latest Replay:</strong> {replay_summary}</p>
+      <p style="margin-top:10px;"><strong>Policy Automation:</strong> {automation_summary}</p>
     </section>
     <section class="two-col">
       <section class="panel">
@@ -2684,14 +2703,15 @@ def dispatch_ops_digest(
 
 
 def dispatch_policy_tiered_ops_digests() -> dict[str, Any]:
-    digest = get_ops_digest(hours=_ops_digest_default_hours())
+    digest_hours = max(48, _ops_digest_default_hours())
+    digest = get_ops_digest(hours=digest_hours)
     incident_level = str(digest.get("incident_level") or "normal")
     dispatched: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
 
     if incident_level in {"incident", "critical"}:
         result = dispatch_ops_digest(
-            hours=int(digest.get("lookback_hours") or _ops_digest_default_hours()),
+            hours=int(digest.get("lookback_hours") or digest_hours),
             force=False,
             digest_type="incident_digest",
             summary_override=f"[incident] {digest.get('summary')}",
@@ -2699,7 +2719,7 @@ def dispatch_policy_tiered_ops_digests() -> dict[str, Any]:
         (dispatched if result.get("dispatched") else skipped).append(result)
     elif incident_level == "degraded":
         result = dispatch_ops_digest(
-            hours=int(digest.get("lookback_hours") or _ops_digest_default_hours()),
+            hours=int(digest.get("lookback_hours") or digest_hours),
             force=False,
             digest_type="degraded_digest",
             summary_override=f"[degraded] {digest.get('summary')}",
