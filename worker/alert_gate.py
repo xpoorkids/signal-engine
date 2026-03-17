@@ -135,21 +135,25 @@ def admission_check_candidate(
     extra: Dict[str, Any],
     dex_summary: Optional[Dict[str, Any]],
     attention_unavailable: bool,
+    gate_config: Optional[Dict[str, Any]] = None,
 ) -> tuple[bool, List[str], str]:
     if not ENABLE_ALERT_GATE:
         return True, [], "unknown"
 
     reasons: List[str] = []
+    config = gate_config if isinstance(gate_config, dict) else {}
     metrics = extra.get("metrics") if isinstance(extra, dict) else {}
     age_min = _float_or_zero(metrics.get("age_minutes") if isinstance(metrics, dict) else 0)
     age_sec = age_min * 60.0
     age_bypass_until = _float_or_zero(extra.get("age_bypass_until") if isinstance(extra, dict) else 0)
-    if age_sec < CAND_MIN_TOKEN_AGE_SEC:
+    min_age_sec = _int_or_zero(config.get("candidate_gate_min_age_sec")) or CAND_MIN_TOKEN_AGE_SEC
+    if age_sec < float(min_age_sec):
         if not age_bypass_until or time.time() > age_bypass_until:
-            reasons.append(f"age<{CAND_MIN_TOKEN_AGE_SEC}s")
+            reasons.append(f"age<{int(min_age_sec)}s")
 
-    if not attention_unavailable and attention_score < EARLY_ATTENTION_MIN:
-        reasons.append(f"attention<{EARLY_ATTENTION_MIN:.2f}")
+    min_attention = _float_or_zero(config.get("candidate_gate_attention_min")) or EARLY_ATTENTION_MIN
+    if not attention_unavailable and attention_score < min_attention:
+        reasons.append(f"attention<{min_attention:.2f}")
 
     if risk_score >= RISK_VETO_THRESHOLD:
         reasons.append("risk_veto")

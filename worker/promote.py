@@ -695,6 +695,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 extra,
                 dex_summary,
                 attention_unavailable,
+                candidate_config,
             )
             if not ok:
                 logger.info(
