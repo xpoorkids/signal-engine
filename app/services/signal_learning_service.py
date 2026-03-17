@@ -2194,8 +2194,10 @@ def _policy_automation_config() -> dict[str, Any]:
         "max_auto_approvals_per_day": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_MAX_AUTO_APPROVALS_PER_DAY", "10"))),
         "max_canary_rollouts_per_day": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_MAX_CANARY_ROLLOUTS_PER_DAY", "4"))),
         "max_promotions_per_day": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_MAX_PROMOTIONS_PER_DAY", "3"))),
+        "max_regime_actions_per_day": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_MAX_REGIME_ACTIONS_PER_DAY", "2"))),
         "max_active_canaries_per_stage": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_MAX_ACTIVE_CANARIES_PER_STAGE", "1"))),
         "duplicate_profile_lookback_hours": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_DUPLICATE_PROFILE_LOOKBACK_HOURS", "168"))),
+        "regime_action_cooldown_sec": max(0, int(os.getenv("SIGNAL_ENGINE_POLICY_REGIME_ACTION_COOLDOWN_SEC", "3600"))),
         "auto_promote_min_samples": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_PROMOTE_MIN_SAMPLES", "3"))),
         "auto_promote_max_negative_rate": float(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_PROMOTE_MAX_NEGATIVE_RATE", "34.0")),
         "auto_promote_min_positive_rate": float(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_PROMOTE_MIN_POSITIVE_RATE", "50.0")),
@@ -2331,6 +2333,7 @@ def _policy_automation_guardrails() -> dict[str, Any]:
             "auto_approval_sec": int(config["auto_approval_cooldown_sec"]),
             "canary_sec": int(config["canary_cooldown_sec"]),
             "promotion_sec": int(config["promotion_cooldown_sec"]),
+            "regime_action_sec": int(config["regime_action_cooldown_sec"]),
         },
         "budgets": {
             "auto_approvals_used": _recent_policy_event_count({"auto_approval_created"}, 86400),
@@ -2339,6 +2342,8 @@ def _policy_automation_guardrails() -> dict[str, Any]:
             "canaries_max": int(config["max_canary_rollouts_per_day"]),
             "promotions_used": _recent_policy_event_count({"canary_promoted"}, 86400),
             "promotions_max": int(config["max_promotions_per_day"]),
+            "regime_actions_used": _recent_policy_event_count({"auto_regime_action_started"}, 86400),
+            "regime_actions_max": int(config["max_regime_actions_per_day"]),
         },
         "active_canaries_by_stage": {
             stage or "all": _active_canary_count(stage)
@@ -2662,6 +2667,86 @@ def execute_regime_policy_action(
         "replay": replay,
         "approval": approval,
         "rollout": rollout,
+    }
+
+
+def auto_execute_regime_actions(*, hours: int = 24, replay_limit: int = 250) -> dict[str, Any]:
+    config = _policy_automation_config()
+    budget_remaining = max(
+        0,
+        int(config["max_regime_actions_per_day"]) - _recent_policy_event_count({"auto_regime_action_started"}, 86400),
+    )
+    generated = generate_policy_candidates(hours=max(1, hours), generation_limit=int(config["generation_limit"]), replay_limit=max(25, replay_limit))
+    candidates = generated.get("generated") if isinstance(generated.get("generated"), list) else []
+    executed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    seen_regimes: set[str] = set()
+    for item in candidates:
+        regime_key = str(item.get("regime_key") or "").strip()
+        if not regime_key:
+            continue
+        if budget_remaining <= 0:
+            skipped.append({"regime_key": regime_key, "reason": "regime_action_budget_exhausted"})
+            continue
+        if regime_key in seen_regimes:
+            skipped.append({"regime_key": regime_key, "reason": "duplicate_regime_in_cycle"})
+            continue
+        replay = item.get("replay") if isinstance(item.get("replay"), dict) else {}
+        impact = replay.get("impact") if isinstance(replay.get("impact"), dict) else {}
+        positive = int(impact.get("positive_outcomes") or 0)
+        negative = int(impact.get("negative_outcomes") or 0)
+        stage = str(item.get("stage") or _policy_stage_from_regime_key(regime_key))
+        action = "canary_relax" if positive >= negative else "canary_tighten"
+        cooldown_remaining = _cooldown_remaining(
+            _latest_policy_event_ts(event_types={"auto_regime_action_started"}, stage_scope=stage, regime_scope=regime_key),
+            int(config["regime_action_cooldown_sec"]),
+        )
+        if cooldown_remaining > 0:
+            skipped.append(
+                {
+                    "regime_key": regime_key,
+                    "stage": stage,
+                    "reason": "regime_action_cooldown_active",
+                    "cooldown_remaining_sec": cooldown_remaining,
+                }
+            )
+            continue
+        try:
+            result = execute_regime_policy_action(
+                regime_key=regime_key,
+                action=action,
+                stage=stage,
+                actor="policy-automation",
+                hours=max(1, hours),
+                replay_limit=max(25, replay_limit),
+            )
+        except ValueError as exc:
+            skipped.append({"regime_key": regime_key, "stage": stage, "reason": str(exc)})
+            continue
+        _insert_policy_rollout_event(
+            rollout_id=str((result.get("rollout") or {}).get("rollout_id") or "") or None,
+            approval_id=str((result.get("approval") or {}).get("approval_id") or "") or None,
+            policy_name=str((result.get("profile") or {}).get("policy_name") or ""),
+            policy_version=str((result.get("profile") or {}).get("policy_version") or ""),
+            event_type="auto_regime_action_started",
+            event_status="active" if result.get("rollout") else "approved",
+            payload={
+                "action": action,
+                "stage_scope": stage,
+                "regime_scope": regime_key,
+                "source_replay_run_id": (replay or {}).get("run_id"),
+                "positive_outcomes": positive,
+                "negative_outcomes": negative,
+            },
+        )
+        executed.append(result)
+        seen_regimes.add(regime_key)
+        budget_remaining -= 1
+    return {
+        "config": config,
+        "generated": generated,
+        "executed": executed,
+        "skipped": skipped,
     }
 
 
@@ -3256,7 +3341,7 @@ def run_policy_automation_cycle(hours: int = 24, replay_limit: int | None = None
             ),
         )
     try:
-        generated = generate_policy_candidates(hours=requested_hours, generation_limit=_policy_automation_config()["generation_limit"], replay_limit=requested_limit)
+        regime_actions = auto_execute_regime_actions(hours=requested_hours, replay_limit=requested_limit)
         approvals = auto_create_policy_approvals(limit=requested_limit)
         canaries = auto_schedule_policy_canaries(hours=requested_hours)
         guardrails = evaluate_policy_guardrails(hours=requested_hours, min_samples=3, max_negative_rate=60.0, auto_apply=True)
@@ -3269,7 +3354,8 @@ def run_policy_automation_cycle(hours: int = 24, replay_limit: int | None = None
             "replay_limit": requested_limit,
             "status": "completed",
             "config": _policy_automation_config(),
-            "generated": generated,
+            "regime_actions": regime_actions,
+            "generated": regime_actions.get("generated") if isinstance(regime_actions, dict) else {},
             "approvals": approvals,
             "canaries": canaries,
             "guardrails": guardrails,
@@ -3315,6 +3401,7 @@ def run_policy_automation_cycle(hours: int = 24, replay_limit: int | None = None
             ),
         )
     skip_counts = {
+        "regime_actions": len((summary.get("regime_actions") or {}).get("skipped") or []),
         "generated": len((summary.get("generated") or {}).get("skipped") or []),
         "approvals": len((summary.get("approvals") or {}).get("skipped") or []),
         "canaries": len((summary.get("canaries") or {}).get("skipped") or []),
@@ -3325,6 +3412,7 @@ def run_policy_automation_cycle(hours: int = 24, replay_limit: int | None = None
         level="info",
         message=(
             f"Policy automation run {automation_run_id} completed: "
+            f"{len((summary.get('regime_actions') or {}).get('executed') or [])} regime actions, "
             f"{len((summary.get('generated') or {}).get('generated') or [])} generated, "
             f"{len((summary.get('approvals') or {}).get('created') or [])} approvals, "
             f"{len((summary.get('canaries') or {}).get('scheduled') or [])} canaries, "

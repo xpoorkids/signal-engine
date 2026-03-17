@@ -1376,6 +1376,78 @@ def test_regime_scoped_generation_and_automation_preserve_regime_scope(tmp_path,
     assert active["regime_scope"] == replay["regime_key"]
 
 
+def test_policy_automation_cycle_executes_auto_regime_actions(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_CANARY_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_PROMOTION_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_REGIME_ACTION_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_MAX_REGIME_ACTIONS_PER_DAY", "1")
+    sls.init()
+
+    signal_id = sls.record_signal_decision(
+        token="token-auto-regime",
+        event_type="promoted",
+        stage="promoted",
+        decision="promoted_sent",
+        action_taken="emit",
+        attention_score=0.72,
+        risk_score=0.68,
+        confidence_score=0.88,
+        creator_score=0.3,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="deterministic-v1",
+        features={
+            "session_bucket": "us_day",
+            "liquidity_usd": 9000.0,
+            "age_minutes": 12.0,
+            "price_change_m5": -18.0,
+            "price_change_h1": -24.0,
+            "unique_buyers_15m": 18,
+        },
+        ts_value=1_773_960_100,
+        source="test",
+    )
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                60,
+                1_773_963_600,
+                "dex",
+                7000,
+                2500,
+                700,
+                65.0,
+                -25.0,
+                -45.0,
+                20,
+                70,
+                -41.0,
+                -42.0,
+                -70.0,
+                "failed",
+                json.dumps({"outcome_label": "failed"}),
+            ),
+        )
+
+    cycle = sls.run_policy_automation_cycle(hours=10_000, replay_limit=100)
+    events = sls.list_policy_rollout_events(limit=50)
+
+    assert cycle["regime_actions"]["executed"]
+    assert any(item["event_type"] == "auto_regime_action_started" for item in events)
+    assert cycle["generated"]["generated"]
+
+
 def test_policy_automation_safety_guardrails_limit_duplicate_and_concurrent_rollouts(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
