@@ -1225,6 +1225,157 @@ def test_generate_policy_candidates_creates_replayed_profiles(tmp_path, monkeypa
     assert any(str(item.get("shadow_policy", {}).get("policy_name") or "").startswith("generated_") for item in replays)
 
 
+def test_regime_scoped_generation_and_automation_preserve_regime_scope(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_CANARY_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_PROMOTION_COOLDOWN_SEC", "0")
+    sls.init()
+
+    signal_id = sls.record_signal_decision(
+        token="token-regime-promoted",
+        event_type="promoted",
+        stage="promoted",
+        decision="promoted_sent",
+        action_taken="emit",
+        attention_score=0.72,
+        risk_score=0.68,
+        confidence_score=0.88,
+        creator_score=0.3,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="deterministic-v1",
+        features={
+            "session_bucket": "us_day",
+            "liquidity_usd": 9000.0,
+            "age_minutes": 12.0,
+            "price_change_m5": -18.0,
+            "price_change_h1": -24.0,
+            "unique_buyers_15m": 18,
+        },
+        ts_value=1_773_860_100,
+        source="test",
+    )
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                60,
+                1_773_863_600,
+                "dex",
+                7000,
+                2500,
+                700,
+                65.0,
+                -25.0,
+                -45.0,
+                20,
+                70,
+                -41.0,
+                -42.0,
+                -70.0,
+                "failed",
+                json.dumps({"outcome_label": "failed"}),
+            ),
+        )
+
+    generated = sls.generate_policy_candidates(hours=10_000, generation_limit=6, replay_limit=200)
+    regime_generated = next(
+        item for item in generated["generated"] if str(item.get("regime_key") or "").startswith("promoted|us_day|thin|new|reversing")
+    )
+    replay = regime_generated["replay"]
+
+    approval = sls.create_policy_approval(
+        policy_name=regime_generated["profile"]["policy_name"],
+        policy_version=regime_generated["profile"]["policy_version"],
+        source_type="replay",
+        source_ref=replay["run_id"],
+        approved_by="ops",
+    )
+    scheduled = sls.auto_schedule_policy_canaries(hours=10_000)
+    canary = next(
+        item for item in scheduled["scheduled"]
+        if item["policy_name"] == regime_generated["profile"]["policy_name"]
+        and item["policy_version"] == regime_generated["profile"]["policy_version"]
+    )
+
+    for idx in range(3):
+        canary_signal_id = sls.record_signal_decision(
+            token=f"token-regime-canary-{idx}",
+            event_type="promoted",
+            stage="promoted",
+            decision="promoted_sent",
+            action_taken="emit",
+            attention_score=0.84,
+            risk_score=0.20,
+            confidence_score=0.93,
+            creator_score=0.32,
+            lifecycle="dex",
+            policy_name=regime_generated["profile"]["policy_name"],
+            policy_version=regime_generated["profile"]["policy_version"],
+            features={
+                "session_bucket": "us_day",
+                "liquidity_usd": 9000.0,
+                "age_minutes": 10.0,
+                "price_change_m5": -12.0,
+                "price_change_h1": -22.0,
+                "unique_buyers_15m": 16,
+            },
+            ts_value=1_773_870_000 + idx,
+            source="test",
+        )
+        with sls._connect() as c:
+            c.execute(
+                """
+                INSERT INTO signal_snapshots (
+                    signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                    volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                    txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                    outcome_label, snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    canary_signal_id,
+                    60,
+                    1_773_873_600 + idx,
+                    "dex",
+                    26000,
+                    12000,
+                    8000,
+                    70.0,
+                    24.0,
+                    60.0,
+                    60,
+                    18,
+                    75.0,
+                    18.0,
+                    40.0,
+                    "strong_continuation",
+                    json.dumps({"outcome_label": "strong_continuation"}),
+                ),
+            )
+
+    promoted = sls.auto_promote_policy_canaries(hours=10_000)
+    active = next(
+        item["active_rollout"]
+        for item in promoted["promoted"]
+        if item["active_rollout"]["policy_name"] == regime_generated["profile"]["policy_name"]
+    )
+
+    assert approval["approval_status"] == "approved"
+    assert replay["regime_key"] == "promoted|us_day|thin|new|reversing"
+    assert canary["regime_scope"] == replay["regime_key"]
+    assert active["regime_scope"] == replay["regime_key"]
+
+
 def test_policy_automation_safety_guardrails_limit_duplicate_and_concurrent_rollouts(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

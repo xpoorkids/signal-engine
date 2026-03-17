@@ -985,7 +985,7 @@ def evaluate_policy_guardrails(
         with _connect() as c:
             rows = c.execute(
                 """
-                SELECT sd.decision_id, sd.signal_id, ss.outcome_label
+                SELECT sd.decision_id, sd.signal_id, ss.outcome_label, sd.features_json
                 FROM signal_decisions sd
                 LEFT JOIN signal_snapshots ss
                   ON ss.signal_id = sd.signal_id
@@ -1011,6 +1011,15 @@ def evaluate_policy_guardrails(
         positive = 0
         negative = 0
         for row in rows:
+            features: dict[str, Any] = {}
+            try:
+                features = json.loads(row[3] or "{}")
+                if not isinstance(features, dict):
+                    features = {}
+            except Exception:
+                features = {}
+            if str(rollout.get("regime_scope") or "") and str(features.get("regime_key") or "") != str(rollout.get("regime_scope") or ""):
+                continue
             outcome_label = str(row[2] or "pending")
             if outcome_label == "pending":
                 continue
@@ -1066,6 +1075,7 @@ def evaluate_policy_guardrails(
                 "policy_name": rollout["policy_name"],
                 "policy_version": rollout["policy_version"],
                 "stage_scope": rollout["stage_scope"],
+                "regime_scope": rollout.get("regime_scope"),
                 "samples": total,
                 "positive": positive,
                 "negative": negative,
@@ -1668,6 +1678,7 @@ def get_policy_trace_summary(
     limit: int = 50,
     stage: str | None = None,
     decision: str | None = None,
+    regime_key: str | None = None,
 ) -> dict[str, Any]:
     _ensure_schema()
     cutoff = int(time.time()) - max(1, hours) * 3600
@@ -1714,6 +1725,8 @@ def get_policy_trace_summary(
                 features = parsed_features
         except Exception:
             features = {}
+        if regime_key and str(features.get("regime_key") or "") != str(regime_key):
+            continue
         trace = {
             "decision_id": row[0],
             "signal_id": row[1],
@@ -1851,11 +1864,12 @@ def evaluate_shadow_policy(
     hours: int = 24,
     limit: int = 200,
     stage: str | None = None,
+    regime_key: str | None = None,
     policy_name: str | None = None,
     policy_version: str | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    summary = get_policy_trace_summary(hours=hours, limit=limit, stage=stage)
+    summary = get_policy_trace_summary(hours=hours, limit=limit, stage=stage, regime_key=regime_key)
     shadow_policy = _normalize_policy_descriptor(
         policy_name=policy_name or "shadow_policy",
         policy_version=policy_version or "shadow-v1",
@@ -1936,6 +1950,7 @@ def evaluate_shadow_policy(
         "trace_count": trace_count,
         "changed_count": changed_count,
         "change_rate": round((changed_count / trace_count) * 100.0, 1) if trace_count else 0.0,
+        "regime_key": regime_key,
         "stage_changes": stage_changes,
         "current_policy_versions": summary["policy_versions"],
         "shadow_policy": shadow_policy,
@@ -1949,15 +1964,17 @@ def run_policy_replay(
     hours: int = 24,
     limit: int = 500,
     stage: str | None = None,
+    regime_key: str | None = None,
     policy_name: str | None = None,
     policy_version: str | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    summary = get_policy_trace_summary(hours=hours, limit=limit, stage=stage)
+    summary = get_policy_trace_summary(hours=hours, limit=limit, stage=stage, regime_key=regime_key)
     shadow_summary = evaluate_shadow_policy(
         hours=hours,
         limit=limit,
         stage=stage,
+        regime_key=regime_key,
         policy_name=policy_name,
         policy_version=policy_version,
         overrides=overrides,
@@ -2016,6 +2033,7 @@ def run_policy_replay(
         "hours": max(1, hours),
         "trace_limit": max(1, limit),
         "stage": stage,
+        "regime_key": regime_key,
         "baseline_policy_name": baseline_policy_name,
         "baseline_policy_version": baseline_policy_version,
         "shadow_policy": shadow_policy,
@@ -2235,6 +2253,7 @@ def _latest_policy_event_ts(
     policy_name: str | None = None,
     policy_version: str | None = None,
     stage_scope: str | None = None,
+    regime_scope: str | None = None,
 ) -> int | None:
     if not event_types:
         return None
@@ -2263,6 +2282,8 @@ def _latest_policy_event_ts(
             continue
         if stage_scope is not None and str(payload.get("stage_scope") or "") != str(stage_scope or ""):
             continue
+        if regime_scope is not None and str(payload.get("regime_scope") or "") != str(regime_scope or ""):
+            continue
         return int(row[0] or 0) or None
     return None
 
@@ -2274,12 +2295,14 @@ def _cooldown_remaining(last_ts: int | None, cooldown_seconds: int) -> int:
     return max(0, remaining)
 
 
-def _active_canary_count(stage_scope: str | None) -> int:
+def _active_canary_count(stage_scope: str | None, regime_scope: str | None = None) -> int:
     return len(
         [
             item
             for item in list_policy_rollouts(limit=200, active_only=True)
-            if item.get("rollout_mode") == "canary" and (item.get("stage_scope") or None) == stage_scope
+            if item.get("rollout_mode") == "canary"
+            and (item.get("stage_scope") or None) == stage_scope
+            and (item.get("regime_scope") or None) == regime_scope
         ]
     )
 
@@ -2338,6 +2361,7 @@ def _policy_generation_variants(
     generation_limit: int,
 ) -> list[dict[str, Any]]:
     diagnostics = get_diagnostics_summary(hours=max(1, hours))
+    regime_summary = get_policy_regime_summary(hours=max(1, hours), limit=max(4, generation_limit * 2))
     variants: list[dict[str, Any]] = []
     seen: set[str] = set()
     base_candidate = resolve_live_policy("candidate")
@@ -2348,16 +2372,34 @@ def _policy_generation_variants(
     false_positives = diagnostics.get("false_positives") if isinstance(diagnostics.get("false_positives"), list) else []
     threshold_guidance = diagnostics.get("threshold_guidance") if isinstance(diagnostics.get("threshold_guidance"), list) else []
 
-    def add_variant(stage: str, config: dict[str, Any], rationale: list[str], source_signal: str) -> None:
+    positive_regimes = [
+        item
+        for item in (regime_summary.get("regimes") or [])
+        if isinstance(item, dict) and int(item.get("positive_outcomes") or 0) > 0
+    ]
+    negative_regimes = [
+        item
+        for item in (regime_summary.get("regimes") or [])
+        if isinstance(item, dict) and int(item.get("negative_outcomes") or 0) > 0
+    ]
+
+    def add_variant(
+        stage: str,
+        config: dict[str, Any],
+        rationale: list[str],
+        source_signal: str,
+        regime_key: str | None = None,
+    ) -> None:
         if len(variants) >= max(1, generation_limit):
             return
-        fingerprint = _policy_config_fingerprint(config)
+        fingerprint = f"{regime_key or 'global'}::{_policy_config_fingerprint(config)}"
         if fingerprint in seen:
             return
         seen.add(fingerprint)
         variants.append(
             {
                 "stage": stage,
+                "regime_key": regime_key,
                 "config": config,
                 "rationale": rationale,
                 "source_signal": source_signal,
@@ -2380,6 +2422,23 @@ def _policy_generation_variants(
             ["False negatives detected in candidate gating", "Relax early attention and creator thresholds slightly"],
             "false_negatives",
         )
+        for regime in positive_regimes:
+            if str(regime.get("stage") or "") != "candidate":
+                continue
+            regime_key = str(regime.get("regime_key") or "")
+            if not regime_key:
+                continue
+            add_variant(
+                "candidate",
+                relaxed_candidate,
+                [
+                    f"False negatives clustered in regime {regime_key}",
+                    "Relax candidate gating only for a productive regime",
+                ],
+                "regime_false_negatives",
+                regime_key=regime_key,
+            )
+            break
 
     if false_positives:
         stricter_promoted = _normalize_policy_descriptor(
@@ -2397,6 +2456,23 @@ def _policy_generation_variants(
             ["False positives detected after promotion", "Tighten risk, liquidity, and buyer requirements"],
             "false_positives",
         )
+        for regime in negative_regimes:
+            if str(regime.get("stage") or "") != "promoted":
+                continue
+            regime_key = str(regime.get("regime_key") or "")
+            if not regime_key:
+                continue
+            add_variant(
+                "promoted",
+                stricter_promoted,
+                [
+                    f"Negative outcomes concentrated in regime {regime_key}",
+                    "Tighten promoted gating only where failure pressure is concentrated",
+                ],
+                "regime_false_positives",
+                regime_key=regime_key,
+            )
+            break
 
     guidance_map = {str(item.get("reason") or ""): item for item in threshold_guidance if isinstance(item, dict)}
     attention_guidance = guidance_map.get("attention<0.20")
@@ -2448,6 +2524,7 @@ def generate_policy_candidates(
     skipped: list[dict[str, Any]] = []
     for index, variant in enumerate(variants, start=1):
         stage = str(variant.get("stage") or "candidate")
+        regime_key = str(variant.get("regime_key") or "").strip() or None
         generated_name = f"generated_{stage}_policy"
         generated_version = f"gen-{int(time.time())}-{index}"
         config_payload = dict(variant.get("config") or {})
@@ -2457,7 +2534,7 @@ def generate_policy_candidates(
             skipped.append({"stage": stage, "reason": "duplicate_profile_fingerprint", "source_signal": variant.get("source_signal")})
             continue
         novelty_score = 0.0
-        base_policy = resolve_live_policy(stage)
+        base_policy = resolve_live_policy(stage, regime_key=regime_key)
         base_config = dict(base_policy.get("config") or {})
         numeric_keys = [
             "candidate_attention_min",
@@ -2486,13 +2563,17 @@ def generate_policy_candidates(
             policy_name=generated_name,
             policy_version=generated_version,
             config=config_payload,
-            description="Auto-generated from diagnostics and replay pressure",
+            description=(
+                "Auto-generated from diagnostics and replay pressure"
+                + (f" for {regime_key}" if regime_key else "")
+            ),
             created_by="policy-generator",
         )
         replay = run_policy_replay(
             hours=max(1, hours),
             limit=replay_trace_limit,
             stage=stage,
+            regime_key=regime_key,
             policy_name=generated_name,
             policy_version=generated_version,
             overrides=config_payload,
@@ -2501,6 +2582,7 @@ def generate_policy_candidates(
             "profile": profile,
             "replay": replay,
             "stage": stage,
+            "regime_key": regime_key,
             "rationale": list(variant.get("rationale") or []),
             "source_signal": variant.get("source_signal"),
             "novelty_score": novelty_score,
@@ -2516,6 +2598,7 @@ def generate_policy_candidates(
             event_status="generated",
             payload={
                 "stage": stage,
+                "regime_key": regime_key,
                 "novelty_score": novelty_score,
                 "source_signal": variant.get("source_signal"),
                 "rationale": list(variant.get("rationale") or []),
@@ -2715,7 +2798,7 @@ def _canary_metrics_for_rollout(rollout: dict[str, Any], hours: int) -> dict[str
     with _connect() as c:
         rows = c.execute(
             """
-            SELECT ss.outcome_label
+            SELECT ss.outcome_label, sd.features_json
             FROM signal_decisions sd
             LEFT JOIN signal_snapshots ss
               ON ss.signal_id = sd.signal_id
@@ -2742,6 +2825,15 @@ def _canary_metrics_for_rollout(rollout: dict[str, Any], hours: int) -> dict[str
     negative = 0
     pending = 0
     for row in rows:
+        features: dict[str, Any] = {}
+        try:
+            features = json.loads((row[1] if len(row) > 1 else None) or "{}")
+            if not isinstance(features, dict):
+                features = {}
+        except Exception:
+            features = {}
+        if str(rollout.get("regime_scope") or "") and str(features.get("regime_key") or "") != str(rollout.get("regime_scope") or ""):
+            continue
         outcome_label = str((row[0] if row else None) or "pending")
         if outcome_label == "pending":
             pending += 1
@@ -2784,12 +2876,14 @@ def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
             skipped.append({"approval_id": approval_id, "policy_name": policy_name, "reason": "rollout_exists"})
             continue
         stage_scope = None
+        regime_scope = None
         source_ref = str(approval.get("source_ref") or "")
         if str(approval.get("source_type") or "") == "replay" and source_ref:
             replay = get_policy_replay(source_ref)
             if replay is not None:
                 stage_scope = str(replay.get("stage") or "") or None
-        active_stage_canaries = _active_canary_count(stage_scope)
+                regime_scope = str(replay.get("regime_key") or "") or None
+        active_stage_canaries = _active_canary_count(stage_scope, regime_scope)
         if active_stage_canaries >= int(config["max_active_canaries_per_stage"]):
             skipped.append(
                 {
@@ -2797,12 +2891,13 @@ def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
                     "policy_name": policy_name,
                     "reason": "stage_canary_limit_reached",
                     "stage_scope": stage_scope,
+                    "regime_scope": regime_scope,
                     "active_stage_canaries": active_stage_canaries,
                 }
             )
             continue
         cooldown_remaining = _cooldown_remaining(
-            _latest_policy_event_ts(event_types={"auto_canary_started"}, stage_scope=stage_scope),
+            _latest_policy_event_ts(event_types={"auto_canary_started"}, stage_scope=stage_scope, regime_scope=regime_scope),
             int(config["canary_cooldown_sec"]),
         )
         if cooldown_remaining > 0:
@@ -2812,17 +2907,19 @@ def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
                     "policy_name": policy_name,
                     "reason": "canary_cooldown_active",
                     "stage_scope": stage_scope,
+                    "regime_scope": regime_scope,
                     "cooldown_remaining_sec": cooldown_remaining,
                 }
             )
             continue
-        baseline = resolve_live_policy(stage_scope or "promoted")
+        baseline = resolve_live_policy(stage_scope or "promoted", regime_key=regime_scope)
         rollout = activate_policy_rollout(
             policy_name=policy_name,
             policy_version=policy_version,
             rollout_mode="canary",
             rollout_status="active",
             stage_scope=stage_scope,
+            regime_scope=regime_scope,
             traffic_percent=int(config["canary_traffic_percent"]),
             priority=int(config["canary_priority"]),
             activated_by="policy-automation",
@@ -2843,6 +2940,7 @@ def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
             event_status="active",
             payload={
                 "stage_scope": stage_scope,
+                "regime_scope": regime_scope,
                 "traffic_percent": int(config["canary_traffic_percent"]),
                 "baseline_policy_name": baseline.get("policy_name"),
                 "baseline_policy_version": baseline.get("policy_version"),
@@ -2857,6 +2955,7 @@ def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
             payload={
                 "policy_version": policy_version,
                 "stage_scope": stage_scope,
+                "regime_scope": regime_scope,
                 "traffic_percent": int(config["canary_traffic_percent"]),
                 "baseline_policy_name": baseline.get("policy_name"),
                 "baseline_policy_version": baseline.get("policy_version"),
@@ -2885,6 +2984,7 @@ def auto_promote_policy_canaries(hours: int = 24) -> dict[str, Any]:
             _latest_policy_event_ts(
                 event_types={"canary_promoted"},
                 stage_scope=str(rollout.get("stage_scope") or "") or None,
+                regime_scope=str(rollout.get("regime_scope") or "") or None,
             ),
             int(config["promotion_cooldown_sec"]),
         )
@@ -2895,6 +2995,7 @@ def auto_promote_policy_canaries(hours: int = 24) -> dict[str, Any]:
                     "reason": "promotion_cooldown_active",
                     "cooldown_remaining_sec": cooldown_remaining,
                     "stage_scope": rollout.get("stage_scope"),
+                    "regime_scope": rollout.get("regime_scope"),
                 }
             )
             continue
@@ -2908,7 +3009,10 @@ def auto_promote_policy_canaries(hours: int = 24) -> dict[str, Any]:
         if metrics["positive_rate"] < float(config["auto_promote_min_positive_rate"]):
             skipped.append({"rollout_id": rollout["rollout_id"], "reason": "positive_rate_too_low", **metrics})
             continue
-        baseline = resolve_live_policy(str(rollout.get("stage_scope") or "promoted"))
+        baseline = resolve_live_policy(
+            str(rollout.get("stage_scope") or "promoted"),
+            regime_key=str(rollout.get("regime_scope") or "") or None,
+        )
         with _connect() as c:
             c.execute(
                 "UPDATE policy_rollouts SET rollout_status='promoted' WHERE rollout_id=?",
@@ -2920,6 +3024,7 @@ def auto_promote_policy_canaries(hours: int = 24) -> dict[str, Any]:
             rollout_mode="active",
             rollout_status="active",
             stage_scope=str(rollout.get("stage_scope") or "") or None,
+            regime_scope=str(rollout.get("regime_scope") or "") or None,
             traffic_percent=100,
             priority=max(1, int(rollout.get("priority") or 1)),
             activated_by="policy-automation",
@@ -2943,6 +3048,7 @@ def auto_promote_policy_canaries(hours: int = 24) -> dict[str, Any]:
             payload={
                 "from_rollout_id": rollout["rollout_id"],
                 "stage_scope": rollout.get("stage_scope"),
+                "regime_scope": rollout.get("regime_scope"),
                 "baseline_policy_name": baseline.get("policy_name"),
                 "baseline_policy_version": baseline.get("policy_version"),
                 "metrics": metrics,
@@ -2960,6 +3066,7 @@ def auto_promote_policy_canaries(hours: int = 24) -> dict[str, Any]:
             payload={
                 "policy_version": rollout.get("policy_version"),
                 "stage_scope": rollout.get("stage_scope"),
+                "regime_scope": rollout.get("regime_scope"),
                 "metrics": metrics,
                 "baseline_policy_name": baseline.get("policy_name"),
                 "baseline_policy_version": baseline.get("policy_version"),
