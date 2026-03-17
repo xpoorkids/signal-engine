@@ -696,6 +696,112 @@ def test_policy_profiles_and_rollouts_resolve_live_policy(tmp_path, monkeypatch)
     assert default_promoted["policy_name"]
 
 
+def test_classify_policy_regime_and_persist_on_decision(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    regime = sls.classify_policy_regime(
+        {
+            "session_bucket": "us_day",
+            "liquidity_usd": 18000,
+            "age_minutes": 22,
+            "price_change_m5": 18.0,
+            "price_change_h1": 55.0,
+            "unique_buyers_15m": 44,
+        },
+        stage="candidate",
+        ts_value=1_773_600_500,
+    )
+    signal_id = sls.record_signal_decision(
+        token="token-regime",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_ready",
+        action_taken="emit",
+        features={
+            "session_bucket": "us_day",
+            "liquidity_usd": 18000,
+            "age_minutes": 22,
+            "price_change_m5": 18.0,
+            "price_change_h1": 55.0,
+            "unique_buyers_15m": 44,
+        },
+        attention_score=0.76,
+        risk_score=0.20,
+        confidence_score=0.70,
+        creator_score=0.41,
+        lifecycle="dex",
+        ts_value=1_773_600_500,
+        source="test",
+    )
+
+    with sls._connect() as c:
+        row = c.execute(
+            "SELECT features_json FROM signal_decisions WHERE signal_id=?",
+            (signal_id,),
+        ).fetchone()
+    features = json.loads(row[0] or "{}")
+
+    assert regime["regime_key"] == "candidate|us_day|mid|developing|building"
+    assert features["regime_key"] == regime["regime_key"]
+    assert features["session_regime"] == "us_day"
+    assert features["liquidity_regime"] == "mid"
+
+
+def test_regime_scoped_rollout_resolution_prefers_exact_match(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    sls.create_policy_profile(
+        policy_name="global_candidate",
+        policy_version="v1",
+        config={"candidate_creator_min": 0.40},
+        created_by="ops",
+    )
+    sls.create_policy_profile(
+        policy_name="regime_candidate",
+        policy_version="v2",
+        config={"candidate_creator_min": 0.61},
+        created_by="ops",
+    )
+    sls.activate_policy_rollout(
+        policy_name="global_candidate",
+        policy_version="v1",
+        rollout_mode="active",
+        stage_scope="candidate",
+        priority=10,
+        activated_by="ops",
+    )
+    rollout = sls.activate_policy_rollout(
+        policy_name="regime_candidate",
+        policy_version="v2",
+        rollout_mode="active",
+        stage_scope="candidate",
+        regime_scope="candidate|us_day|mid|developing|building",
+        priority=1,
+        activated_by="ops",
+    )
+
+    exact = sls.resolve_live_policy(
+        "candidate",
+        token="token-123",
+        regime_key="candidate|us_day|mid|developing|building",
+    )
+    fallback = sls.resolve_live_policy(
+        "candidate",
+        token="token-123",
+        regime_key="candidate|asia|thin|new|flat",
+    )
+    rollouts = sls.list_policy_rollouts(limit=10, active_only=False)
+
+    assert exact["policy_name"] == "regime_candidate"
+    assert exact["regime_scope"] == "candidate|us_day|mid|developing|building"
+    assert fallback["policy_name"] == "global_candidate"
+    assert any(item["rollout_id"] == rollout["rollout_id"] and item["regime_scope"] for item in rollouts)
+
+
 def test_canary_rollout_resolution_respects_token_bucket(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

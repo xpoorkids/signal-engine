@@ -59,7 +59,7 @@ from worker.creator_score import compute_creator_score
 from worker.progression import metrics_improved
 from worker.recheck import schedule_rechecks, update_stop_counters, min_liquidity_gate
 from app.services.signal_metrics import compute_confidence_score, metric_state
-from app.services.signal_learning_service import record_signal_decision, resolve_live_policy
+from app.services.signal_learning_service import classify_policy_regime, record_signal_decision, resolve_live_policy
 from app.services.state_service import (
     init as state_init,
     upsert_seen,
@@ -137,6 +137,7 @@ def _record_decision(
             "lp_drain": extra.get("lp_drain"),
             "creator_sell": extra.get("creator_sold"),
         }
+        features.update(classify_policy_regime(features, stage=stage, ts_value=e.ts))
         signal_id = record_signal_decision(
             token=e.token,
             event_type=e.type,
@@ -166,8 +167,39 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
     out: list[Event] = []
     logger.info("[PROMOTE HANDLER CALLED] type=%s token=%s", e.type, e.token)
     logger.info("[promote-enter] token=%s", e.token)
-    candidate_policy = resolve_live_policy("candidate", e.token)
-    promoted_policy = resolve_live_policy("promoted", e.token)
+    dex_summary = {}
+    attention_metrics = {}
+    if isinstance(e.extra, dict):
+        dex_summary = e.extra.get("dex_summary") if isinstance(e.extra.get("dex_summary"), dict) else {}
+        attention_metrics = e.extra.get("attention_metrics") if isinstance(e.extra.get("attention_metrics"), dict) else {}
+    candidate_regime = classify_policy_regime(
+        {
+            "session_bucket": (e.extra or {}).get("session_bucket") if isinstance(e.extra, dict) else None,
+            "liquidity_usd": dex_summary.get("liquidity_usd"),
+            "age_minutes": dex_summary.get("age_minutes"),
+            "price_change_m5": dex_summary.get("price_change_m5"),
+            "price_change_h1": dex_summary.get("price_change_h1"),
+            "unique_buyers_15m": attention_metrics.get("unique_buyers_15m"),
+            "txns_m5_buys": dex_summary.get("txns_m5_buys"),
+        },
+        stage="candidate",
+        ts_value=e.ts,
+    )
+    promoted_regime = classify_policy_regime(
+        {
+            "session_bucket": (e.extra or {}).get("session_bucket") if isinstance(e.extra, dict) else None,
+            "liquidity_usd": dex_summary.get("liquidity_usd"),
+            "age_minutes": dex_summary.get("age_minutes"),
+            "price_change_m5": dex_summary.get("price_change_m5"),
+            "price_change_h1": dex_summary.get("price_change_h1"),
+            "unique_buyers_15m": attention_metrics.get("unique_buyers_15m"),
+            "txns_m5_buys": dex_summary.get("txns_m5_buys"),
+        },
+        stage="promoted",
+        ts_value=e.ts,
+    )
+    candidate_policy = resolve_live_policy("candidate", e.token, regime_key=candidate_regime["regime_key"])
+    promoted_policy = resolve_live_policy("promoted", e.token, regime_key=promoted_regime["regime_key"])
     candidate_config = candidate_policy.get("config") if isinstance(candidate_policy.get("config"), dict) else {}
     promoted_config = promoted_policy.get("config") if isinstance(promoted_policy.get("config"), dict) else {}
     creator_min = float(candidate_config.get("candidate_creator_min") or EARLY_CREATOR_MIN)

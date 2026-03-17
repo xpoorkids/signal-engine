@@ -263,6 +263,7 @@ def init() -> None:
                 rollout_mode TEXT NOT NULL,
                 rollout_status TEXT NOT NULL DEFAULT 'active',
                 stage_scope TEXT,
+                regime_scope TEXT,
                 traffic_percent INTEGER NOT NULL DEFAULT 100,
                 priority INTEGER NOT NULL DEFAULT 100,
                 activated_by TEXT,
@@ -369,6 +370,9 @@ def init() -> None:
             c.execute("ALTER TABLE signal_decisions ADD COLUMN policy_version TEXT")
         if "features_json" not in decision_cols:
             c.execute("ALTER TABLE signal_decisions ADD COLUMN features_json TEXT")
+        rollout_cols = {row[1] for row in c.execute("PRAGMA table_info(policy_rollouts)").fetchall()}
+        if "regime_scope" not in rollout_cols:
+            c.execute("ALTER TABLE policy_rollouts ADD COLUMN regime_scope TEXT")
         c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_signal_id ON signal_decisions(signal_id)")
     _SCHEMA_READY = True
 
@@ -650,6 +654,7 @@ def activate_policy_rollout(
     rollout_mode: str = "active",
     rollout_status: str = "active",
     stage_scope: str | None = None,
+    regime_scope: str | None = None,
     traffic_percent: int = 100,
     priority: int = 100,
     activated_by: str | None = None,
@@ -677,16 +682,17 @@ def activate_policy_rollout(
                 WHERE rollout_status='active'
                   AND rollout_mode='active'
                   AND (stage_scope IS ? OR stage_scope = ?)
+                  AND (regime_scope IS ? OR regime_scope = ?)
                 """,
-                (stage_scope, stage_scope),
+                (stage_scope, stage_scope, regime_scope, regime_scope),
             )
         c.execute(
             """
             INSERT INTO policy_rollouts (
                 rollout_id, created_ts, policy_name, policy_version, rollout_mode, rollout_status,
-                stage_scope, traffic_percent, priority, activated_by, notes
+                stage_scope, regime_scope, traffic_percent, priority, activated_by, notes
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rollout_id,
@@ -696,6 +702,7 @@ def activate_policy_rollout(
                 mode,
                 rollout_status,
                 stage_scope,
+                regime_scope,
                 effective_traffic,
                 priority,
                 activated_by,
@@ -705,7 +712,7 @@ def activate_policy_rollout(
         row = c.execute(
             """
             SELECT rollout_id, created_ts, policy_name, policy_version, rollout_mode, rollout_status,
-                   stage_scope, traffic_percent, priority, activated_by, notes
+                   stage_scope, regime_scope, traffic_percent, priority, activated_by, notes
             FROM policy_rollouts
             WHERE rollout_id=?
             """,
@@ -732,6 +739,7 @@ def activate_policy_rollout(
                     {
                         "rollout_mode": mode,
                         "stage_scope": stage_scope,
+                        "regime_scope": regime_scope,
                         "traffic_percent": effective_traffic,
                         "priority": priority,
                         "activated_by": activated_by,
@@ -748,10 +756,11 @@ def activate_policy_rollout(
         "rollout_mode": row[4],
         "rollout_status": row[5],
         "stage_scope": row[6],
-        "traffic_percent": row[7],
-        "priority": row[8],
-        "activated_by": row[9],
-        "notes": row[10],
+        "regime_scope": row[7],
+        "traffic_percent": row[8],
+        "priority": row[9],
+        "activated_by": row[10],
+        "notes": row[11],
     }
 
 
@@ -1081,7 +1090,7 @@ def list_policy_rollouts(limit: int = 20, active_only: bool = False) -> list[dic
         rows = c.execute(
             f"""
             SELECT rollout_id, created_ts, policy_name, policy_version, rollout_mode, rollout_status,
-                   stage_scope, traffic_percent, priority, activated_by, notes
+                   stage_scope, regime_scope, traffic_percent, priority, activated_by, notes
             FROM policy_rollouts
             {where_sql}
             ORDER BY priority ASC, created_ts DESC
@@ -1098,23 +1107,25 @@ def list_policy_rollouts(limit: int = 20, active_only: bool = False) -> list[dic
             "rollout_mode": row[4],
             "rollout_status": row[5],
             "stage_scope": row[6],
-            "traffic_percent": row[7],
-            "priority": row[8],
-            "activated_by": row[9],
-            "notes": row[10],
+            "regime_scope": row[7],
+            "traffic_percent": row[8],
+            "priority": row[9],
+            "activated_by": row[10],
+            "notes": row[11],
         }
         for row in rows
     ]
 
 
-def resolve_live_policy(stage: str, token: str | None = None) -> dict[str, Any]:
+def resolve_live_policy(stage: str, token: str | None = None, regime_key: str | None = None) -> dict[str, Any]:
     _ensure_schema()
     stage_value = str(stage or "").strip() or None
+    regime_value = str(regime_key or "").strip() or None
     with _connect() as c:
         rows = c.execute(
             """
             SELECT r.rollout_id, r.policy_name, r.policy_version, r.rollout_mode, r.stage_scope,
-                   r.traffic_percent, r.priority, p.config_json
+                   r.regime_scope, r.traffic_percent, r.priority, p.config_json
             FROM policy_rollouts r
             JOIN policy_profiles p
               ON p.policy_name = r.policy_name
@@ -1130,8 +1141,11 @@ def resolve_live_policy(stage: str, token: str | None = None) -> dict[str, Any]:
         stage_scope = row[4]
         if stage_scope and stage_scope != stage_value:
             continue
+        rollout_regime = str(row[5] or "").strip() or None
+        if rollout_regime and rollout_regime != regime_value:
+            continue
         rollout_mode = row[3]
-        traffic_percent = int(row[5] or 0)
+        traffic_percent = int(row[6] or 0)
         if rollout_mode == "shadow":
             continue
         if fallback_active is None and rollout_mode == "active":
@@ -1150,10 +1164,11 @@ def resolve_live_policy(stage: str, token: str | None = None) -> dict[str, Any]:
             "policy_version": descriptor["policy_version"],
             "rollout_mode": "default",
             "stage_scope": stage_value,
+            "regime_scope": regime_value,
             "traffic_percent": 100,
             "config": descriptor,
         }
-    config = json.loads(row[7] or "{}")
+    config = json.loads(row[8] or "{}")
     if not isinstance(config, dict):
         config = {}
     resolved = _normalize_policy_descriptor(
@@ -1168,7 +1183,8 @@ def resolve_live_policy(stage: str, token: str | None = None) -> dict[str, Any]:
         "policy_version": row[2],
         "rollout_mode": row[3],
         "stage_scope": row[4],
-        "traffic_percent": row[5],
+        "regime_scope": row[5],
+        "traffic_percent": row[6],
         "config": resolved,
     }
 
@@ -1184,6 +1200,67 @@ def _normalize_feature_map(features: dict[str, Any] | None) -> dict[str, Any]:
         else:
             normalized[key] = str(value)
     return normalized
+
+
+def classify_policy_regime(
+    features: dict[str, Any] | None,
+    *,
+    stage: str | None = None,
+    ts_value: float | None = None,
+) -> dict[str, str]:
+    feature_map = _normalize_feature_map(features)
+    session = str(feature_map.get("session_bucket") or "").strip()
+    if not session and ts_value is not None:
+        session = str(_classify_time_features(ts_value).get("session_bucket") or "").strip()
+    if not session:
+        session = "unknown_session"
+
+    liquidity = _to_float(feature_map.get("liquidity_usd"))
+    if liquidity is None:
+        liquidity_regime = "unknown_liquidity"
+    elif liquidity < 10_000:
+        liquidity_regime = "thin"
+    elif liquidity < 50_000:
+        liquidity_regime = "mid"
+    else:
+        liquidity_regime = "deep"
+
+    age_minutes = _to_float(feature_map.get("age_minutes"))
+    if age_minutes is None:
+        age_regime = "unknown_age"
+    elif age_minutes < 15:
+        age_regime = "new"
+    elif age_minutes < 180:
+        age_regime = "developing"
+    else:
+        age_regime = "mature"
+
+    price_change_m5 = _to_float(feature_map.get("price_change_m5"))
+    price_change_h1 = _to_float(feature_map.get("price_change_h1"))
+    buyers_15m = _to_int(feature_map.get("unique_buyers_15m"))
+    if price_change_m5 is None and price_change_h1 is None:
+        momentum_regime = "unknown_momentum"
+    elif (price_change_m5 or 0.0) <= -10.0 or (price_change_h1 or 0.0) <= -20.0:
+        momentum_regime = "reversing"
+    elif (price_change_m5 or 0.0) >= 40.0 or (price_change_h1 or 0.0) >= 120.0:
+        momentum_regime = "explosive"
+    elif (price_change_m5 or 0.0) >= 10.0 or (price_change_h1 or 0.0) >= 30.0 or (buyers_15m or 0) >= 40:
+        momentum_regime = "building"
+    else:
+        momentum_regime = "flat"
+
+    stage_value = str(stage or feature_map.get("stage") or "").strip() or "unknown_stage"
+    regime_key = "|".join(
+        [stage_value, session, liquidity_regime, age_regime, momentum_regime]
+    )
+    return {
+        "stage_regime": stage_value,
+        "session_regime": session,
+        "liquidity_regime": liquidity_regime,
+        "age_regime": age_regime,
+        "momentum_regime": momentum_regime,
+        "regime_key": regime_key,
+    }
 
 
 def _derive_shadow_action(stage: str, features: dict[str, Any], policy: dict[str, Any]) -> str:
@@ -1511,6 +1588,8 @@ def record_signal_decision(
     time_features = _classify_time_features(created_ts)
     decision_id = uuid.uuid4().hex
     feature_map = _normalize_feature_map(features)
+    if "session_bucket" not in feature_map:
+        feature_map["session_bucket"] = time_features["session_bucket"]
     if attention_score is not None and "attention_score" not in feature_map:
         feature_map["attention_score"] = attention_score
     if risk_score is not None and "risk_score" not in feature_map:
@@ -1524,6 +1603,7 @@ def record_signal_decision(
     if token and "token" not in feature_map:
         feature_map["token"] = token
     feature_map["stage"] = stage
+    feature_map.update(classify_policy_regime(feature_map, stage=stage, ts_value=created_ts))
     resolved_policy = _normalize_policy_descriptor(
         policy_name=policy_name,
         policy_version=policy_version,
@@ -1668,6 +1748,102 @@ def get_policy_trace_summary(
         "policy_versions": policy_versions,
         "traces": traces,
     }
+
+
+def get_policy_regime_summary(*, hours: int = 24, limit: int = 20) -> dict[str, Any]:
+    _ensure_schema()
+    cutoff = int(time.time()) - max(1, hours) * 3600
+    with _connect() as c:
+        rows = c.execute(
+            """
+            SELECT features_json, action_taken, stage
+            FROM signal_decisions
+            WHERE created_ts >= ?
+            ORDER BY created_ts DESC
+            """,
+            (cutoff,),
+        ).fetchall()
+        outcomes = c.execute(
+            """
+            SELECT sd.features_json, sd.stage, ss.outcome_label
+            FROM signal_decisions sd
+            LEFT JOIN signal_snapshots ss
+              ON ss.signal_id = sd.signal_id
+             AND ss.horizon_minutes = (
+                SELECT MAX(horizon_minutes)
+                FROM signal_snapshots ss2
+                WHERE ss2.signal_id = sd.signal_id
+             )
+            WHERE sd.created_ts >= ?
+            """,
+            (cutoff,),
+        ).fetchall()
+
+    by_regime: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            features = json.loads(row[0] or "{}")
+        except Exception:
+            features = {}
+        if not isinstance(features, dict):
+            features = {}
+        regime_key = str(features.get("regime_key") or "unknown")
+        summary = by_regime.setdefault(
+            regime_key,
+            {
+                "regime_key": regime_key,
+                "stage": str(row[2] or features.get("stage") or ""),
+                "session_regime": str(features.get("session_regime") or ""),
+                "liquidity_regime": str(features.get("liquidity_regime") or ""),
+                "age_regime": str(features.get("age_regime") or ""),
+                "momentum_regime": str(features.get("momentum_regime") or ""),
+                "decision_count": 0,
+                "emit_count": 0,
+                "hold_count": 0,
+                "positive_outcomes": 0,
+                "negative_outcomes": 0,
+            },
+        )
+        summary["decision_count"] += 1
+        if row[1] == "emit":
+            summary["emit_count"] += 1
+        elif row[1] == "hold":
+            summary["hold_count"] += 1
+    for row in outcomes:
+        try:
+            features = json.loads(row[0] or "{}")
+        except Exception:
+            features = {}
+        if not isinstance(features, dict):
+            features = {}
+        regime_key = str(features.get("regime_key") or "unknown")
+        summary = by_regime.setdefault(
+            regime_key,
+            {
+                "regime_key": regime_key,
+                "stage": str(row[1] or features.get("stage") or ""),
+                "session_regime": str(features.get("session_regime") or ""),
+                "liquidity_regime": str(features.get("liquidity_regime") or ""),
+                "age_regime": str(features.get("age_regime") or ""),
+                "momentum_regime": str(features.get("momentum_regime") or ""),
+                "decision_count": 0,
+                "emit_count": 0,
+                "hold_count": 0,
+                "positive_outcomes": 0,
+                "negative_outcomes": 0,
+            },
+        )
+        outcome_label = str(row[2] or "pending")
+        if outcome_label in {"worked", "strong_continuation"}:
+            summary["positive_outcomes"] += 1
+        elif outcome_label in {"failed", "faded"}:
+            summary["negative_outcomes"] += 1
+    regimes = sorted(
+        by_regime.values(),
+        key=lambda item: (int(item["decision_count"]), int(item["positive_outcomes"])),
+        reverse=True,
+    )[: max(1, limit)]
+    return {"hours": max(1, hours), "regimes": regimes}
 
 
 def evaluate_shadow_policy(

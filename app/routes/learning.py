@@ -16,6 +16,7 @@ from app.services.signal_learning_service import (
     get_diagnostics_summary,
     get_learning_digest,
     get_latest_learning_report,
+    get_policy_regime_summary,
     get_latest_policy_automation_run,
     get_latest_policy_replay,
     get_learning_report,
@@ -183,6 +184,7 @@ def learning_policy_rollouts_create(payload: dict[str, object] = Body(...)):
             rollout_mode=str(payload.get("rollout_mode") or "active"),
             rollout_status=str(payload.get("rollout_status") or "active"),
             stage_scope=str(payload.get("stage_scope") or "") or None,
+            regime_scope=str(payload.get("regime_scope") or "") or None,
             traffic_percent=int(payload.get("traffic_percent") or 100),
             priority=int(payload.get("priority") or 100),
             activated_by=str(payload.get("activated_by") or "") or None,
@@ -193,8 +195,13 @@ def learning_policy_rollouts_create(payload: dict[str, object] = Body(...)):
 
 
 @router.get("/learning/policy/resolve")
-def learning_policy_resolve(stage: str, token: str | None = None):
-    return resolve_live_policy(stage=stage, token=token)
+def learning_policy_resolve(stage: str, token: str | None = None, regime_key: str | None = None):
+    return resolve_live_policy(stage=stage, token=token, regime_key=regime_key)
+
+
+@router.get("/learning/policy/regimes")
+def learning_policy_regimes(hours: int = 24, limit: int = 20):
+    return get_policy_regime_summary(hours=max(1, hours), limit=max(1, limit))
 
 
 @router.get("/learning/policy/approvals")

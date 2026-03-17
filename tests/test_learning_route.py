@@ -344,6 +344,69 @@ def test_learning_policy_profile_and_rollout_routes(tmp_path, monkeypatch):
     assert resolve_payload["config"]["candidate_creator_min"] == 0.55
 
 
+def test_learning_policy_regime_routes(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    sls.create_policy_profile(
+        policy_name="adaptive_candidate",
+        policy_version="v1",
+        created_by="ops",
+        config={"candidate_creator_min": 0.55},
+    )
+    rollout_response = TestClient(main.app).post(
+        "/learning/policy/rollouts",
+        json={
+            "policy_name": "adaptive_candidate",
+            "policy_version": "v1",
+            "rollout_mode": "active",
+            "stage_scope": "candidate",
+            "regime_scope": "candidate|us_day|mid|developing|building",
+            "priority": 5,
+            "activated_by": "ops",
+        },
+    )
+    assert rollout_response.status_code == 200
+    assert rollout_response.json()["regime_scope"] == "candidate|us_day|mid|developing|building"
+
+    sls.record_signal_decision(
+        token="token-regime-route",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_ready",
+        action_taken="emit",
+        features={
+            "session_bucket": "us_day",
+            "liquidity_usd": 18000,
+            "age_minutes": 22,
+            "price_change_m5": 18.0,
+            "price_change_h1": 55.0,
+            "unique_buyers_15m": 44,
+        },
+        attention_score=0.76,
+        risk_score=0.20,
+        confidence_score=0.70,
+        creator_score=0.41,
+        lifecycle="dex",
+        ts_value=1_773_600_500,
+        source="test",
+    )
+
+    client = TestClient(main.app)
+    resolve_response = client.get(
+        "/learning/policy/resolve?stage=candidate&token=token-123&regime_key=candidate|us_day|mid|developing|building"
+    )
+    assert resolve_response.status_code == 200
+    assert resolve_response.json()["regime_scope"] == "candidate|us_day|mid|developing|building"
+
+    regimes_response = client.get("/learning/policy/regimes?hours=10000&limit=10")
+    assert regimes_response.status_code == 200
+    payload = regimes_response.json()
+    assert payload["regimes"]
+    assert payload["regimes"][0]["regime_key"] == "candidate|us_day|mid|developing|building"
+
+
 def test_learning_policy_approval_and_guardrail_routes(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
