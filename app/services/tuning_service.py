@@ -2227,6 +2227,8 @@ def render_operator_command_center_html(hours: int = 24) -> str:
         for item in policy_profiles[:8]
     ) or "<tr><td colspan='4'>No policy profiles recorded.</td></tr>"
     latest_automation_run = policy_automation.get("latest_run") if isinstance(policy_automation.get("latest_run"), dict) else {}
+    automation_runs = policy_automation.get("recent_runs") if isinstance(policy_automation.get("recent_runs"), list) else []
+    automation_guardrails = policy_automation.get("guardrails") if isinstance(policy_automation.get("guardrails"), dict) else {}
     automation_summary = "No automation runs recorded yet."
     if latest_automation_run:
         automation_summary = (
@@ -2236,6 +2238,19 @@ def render_operator_command_center_html(hours: int = 24) -> str:
             f" {len(((latest_automation_run.get('canaries') or {}).get('scheduled') or []))} canaries,"
             f" {len(((latest_automation_run.get('promotions') or {}).get('promoted') or []))} promotions."
         )
+    automation_run_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('run_id') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('status') or 'unknown'))}</td>"
+        f"<td>{len(((item.get('approvals') or {}).get('created') or []))}</td>"
+        f"<td>{len(((item.get('canaries') or {}).get('scheduled') or []))}</td>"
+        f"<td>{len(((item.get('promotions') or {}).get('promoted') or []))}</td>"
+        f"<td>{len(((item.get('approvals') or {}).get('skipped') or [])) + len(((item.get('canaries') or {}).get('skipped') or [])) + len(((item.get('promotions') or {}).get('skipped') or []))}</td>"
+        "</tr>"
+        for item in automation_runs[:6]
+    ) or "<tr><td colspan='6'>No automation history recorded.</td></tr>"
+    budget_state = automation_guardrails.get("budgets") if isinstance(automation_guardrails.get("budgets"), dict) else {}
+    cooldown_state = automation_guardrails.get("cooldowns") if isinstance(automation_guardrails.get("cooldowns"), dict) else {}
 
     return f"""<!doctype html>
 <html lang="en">
@@ -2314,6 +2329,14 @@ def render_operator_command_center_html(hours: int = 24) -> str:
       </div>
       <p style="margin-top:14px;"><strong>Latest Replay:</strong> {replay_summary}</p>
       <p style="margin-top:10px;"><strong>Policy Automation:</strong> {automation_summary}</p>
+      <p style="margin-top:10px;"><strong>Automation Budgets:</strong> approvals {int(budget_state.get('auto_approvals_used') or 0)}/{int(budget_state.get('auto_approvals_max') or 0)}, canaries {int(budget_state.get('canaries_used') or 0)}/{int(budget_state.get('canaries_max') or 0)}, promotions {int(budget_state.get('promotions_used') or 0)}/{int(budget_state.get('promotions_max') or 0)}. <strong>Cooldowns:</strong> approvals {int(cooldown_state.get('auto_approval_sec') or 0)}s, canaries {int(cooldown_state.get('canary_sec') or 0)}s, promotions {int(cooldown_state.get('promotion_sec') or 0)}s.</p>
+    </section>
+    <section class="panel">
+      <h2>Automation Runs</h2>
+      <table>
+        <thead><tr><th>Run</th><th>Status</th><th>Approvals</th><th>Canaries</th><th>Promotions</th><th>Skipped</th></tr></thead>
+        <tbody>{automation_run_rows}</tbody>
+      </table>
     </section>
     <section class="two-col">
       <section class="panel">

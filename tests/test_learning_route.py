@@ -611,6 +611,7 @@ def test_learning_policy_automation_routes(tmp_path, monkeypatch):
     status_response = client.get("/learning/policy/automation/status")
     assert status_response.status_code == 200
     assert "config" in status_response.json()
+    assert "guardrails" in status_response.json()
 
     run_response = client.post("/learning/policy/automation/run", json={"hours": 10000, "replay_limit": 10})
     assert run_response.status_code == 200
@@ -964,6 +965,7 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "Rollout Verification" in command_center_dashboard_response.text
     assert "Verification Family Scorecards" in command_center_dashboard_response.text
     assert "Policy Automation:" in command_center_dashboard_response.text
+    assert "Automation Runs" in command_center_dashboard_response.text
     assert "Families:" in command_center_dashboard_response.text or "Keys:" in command_center_dashboard_response.text
 
     ops_digest_response = client.get("/learning/ops/digest?hours=24")

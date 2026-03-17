@@ -995,6 +995,173 @@ def test_policy_automation_cycle_auto_promotes_stable_canary(tmp_path, monkeypat
     )
 
 
+def test_policy_automation_safety_guardrails_limit_duplicate_and_concurrent_rollouts(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_MAX_AUTO_APPROVALS_PER_DAY", "1")
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_MAX_CANARY_ROLLOUTS_PER_DAY", "2")
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_MAX_ACTIVE_CANARIES_PER_STAGE", "1")
+    monkeypatch.setenv("SIGNAL_ENGINE_POLICY_CANARY_COOLDOWN_SEC", "0")
+    sls.init()
+
+    sls.create_policy_profile(
+        policy_name="dupe_policy",
+        policy_version="v1",
+        config={"promoted_risk_max": 0.40},
+        created_by="ops",
+    )
+    sls.create_policy_profile(
+        policy_name="dupe_policy",
+        policy_version="v2",
+        config={"promoted_risk_max": 0.40},
+        created_by="ops",
+    )
+    sls.create_policy_profile(
+        policy_name="other_policy",
+        policy_version="v1",
+        config={"promoted_risk_max": 0.35},
+        created_by="ops",
+    )
+
+    baseline_signal_id = sls.record_signal_decision(
+        token="token-dupe-baseline",
+        event_type="promoted",
+        stage="promoted",
+        decision="promoted_sent",
+        action_taken="emit",
+        attention_score=0.80,
+        risk_score=0.25,
+        confidence_score=0.90,
+        creator_score=0.2,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="deterministic-v1",
+        features={
+            "attention_score": 0.80,
+            "risk_score": 0.25,
+            "confidence_score": 0.90,
+            "liquidity_usd": 22000.0,
+            "txns_m5_buys": 25,
+        },
+        ts_value=1_773_840_000,
+        source="test",
+    )
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                baseline_signal_id,
+                60,
+                1_773_843_600,
+                "dex",
+                20000,
+                10500,
+                7000,
+                70.0,
+                15.0,
+                40.0,
+                42,
+                14,
+                45.0,
+                12.0,
+                28.0,
+                "worked",
+                json.dumps({"outcome_label": "worked"}),
+            ),
+        )
+
+    replay_one = sls.run_policy_replay(
+        hours=10_000,
+        stage="promoted",
+        policy_name="dupe_policy",
+        policy_version="v1",
+        overrides={"promoted_risk_max": 0.20},
+    )
+    replay_two = sls.run_policy_replay(
+        hours=10_000,
+        stage="promoted",
+        policy_name="dupe_policy",
+        policy_version="v2",
+        overrides={"promoted_risk_max": 0.20},
+    )
+    replay_three = sls.run_policy_replay(
+        hours=10_000,
+        stage="promoted",
+        policy_name="other_policy",
+        policy_version="v1",
+        overrides={"promoted_risk_max": 0.20},
+    )
+
+    approvals_result = sls.auto_create_policy_approvals(limit=10)
+    created_versions = {item["policy_version"] for item in approvals_result["created"]}
+    skipped_reasons = {item["reason"] for item in approvals_result["skipped"]}
+
+    sls.update_policy_approval_status(
+        next(item["approval_id"] for item in approvals_result["created"]),
+        approval_status="approved",
+        approved_by="ops",
+        notes="approved for canary",
+    )
+    manual_other = sls.create_policy_approval(
+        policy_name="other_policy",
+        policy_version="v1",
+        source_type="replay",
+        source_ref=replay_three["run_id"],
+        approved_by="ops",
+    )
+    sls.update_policy_approval_status(
+        manual_other["approval_id"],
+        approval_status="approved",
+        approved_by="ops",
+        notes="approved for canary",
+    )
+
+    canary_result = sls.auto_schedule_policy_canaries(hours=10_000)
+    follow_on = sls.create_policy_profile(
+        policy_name="third_policy",
+        policy_version="v1",
+        config={"promoted_risk_max": 0.30},
+        created_by="ops",
+    )
+    replay_four = sls.run_policy_replay(
+        hours=10_000,
+        stage="promoted",
+        policy_name=follow_on["policy_name"],
+        policy_version=follow_on["policy_version"],
+        overrides={"promoted_risk_max": 0.20},
+    )
+    follow_on_approval = sls.create_policy_approval(
+        policy_name=follow_on["policy_name"],
+        policy_version=follow_on["policy_version"],
+        source_type="replay",
+        source_ref=replay_four["run_id"],
+        approved_by="ops",
+    )
+    sls.update_policy_approval_status(
+        follow_on_approval["approval_id"],
+        approval_status="approved",
+        approved_by="ops",
+        notes="approved for concurrency test",
+    )
+    second_canary_result = sls.auto_schedule_policy_canaries(hours=10_000)
+    guardrails = sls.get_policy_automation_status()["guardrails"]
+
+    assert replay_one["run_id"] and replay_two["run_id"] and replay_three["run_id"]
+    assert len(created_versions) == 1
+    assert "duplicate_profile_fingerprint" in skipped_reasons or "approval_budget_exhausted" in skipped_reasons
+    assert len(canary_result["scheduled"]) == 1
+    assert any(item["reason"] == "stage_canary_limit_reached" for item in second_canary_result["skipped"])
+    assert int(guardrails["budgets"]["auto_approvals_used"]) >= 1
+    assert int(guardrails["active_canaries_by_stage"]["promoted"]) == 1
+
+
 def test_diagnostics_summary_builds_reason_quality_scorecards(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

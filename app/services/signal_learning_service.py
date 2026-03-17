@@ -543,6 +543,16 @@ def _policy_fingerprint(token: str | None) -> int:
     return sum(ord(ch) for ch in raw) % 100
 
 
+def _policy_config_fingerprint(config: dict[str, Any] | None) -> str:
+    descriptor = dict(config or {})
+    descriptor.pop("policy_name", None)
+    descriptor.pop("policy_version", None)
+    try:
+        return json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        return "{}"
+
+
 def _public_policy_profile(record: sqlite3.Row | tuple[Any, ...]) -> dict[str, Any]:
     row = record
     config_json = row[5] if isinstance(row, tuple) else row["config_json"]
@@ -1979,8 +1989,16 @@ def _policy_automation_config() -> dict[str, Any]:
         "auto_approval_min_change_rate": float(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_APPROVAL_MIN_CHANGE_RATE", "1.0")),
         "auto_approval_max_negative_rate": float(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_APPROVAL_MAX_NEGATIVE_RATE", "35.0")),
         "auto_approval_min_positive_outcomes": max(0, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_APPROVAL_MIN_POSITIVE_OUTCOMES", "0"))),
+        "auto_approval_cooldown_sec": max(0, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_APPROVAL_COOLDOWN_SEC", "1800"))),
+        "canary_cooldown_sec": max(0, int(os.getenv("SIGNAL_ENGINE_POLICY_CANARY_COOLDOWN_SEC", "1800"))),
+        "promotion_cooldown_sec": max(0, int(os.getenv("SIGNAL_ENGINE_POLICY_PROMOTION_COOLDOWN_SEC", "3600"))),
         "canary_traffic_percent": max(1, min(100, int(os.getenv("SIGNAL_ENGINE_POLICY_CANARY_TRAFFIC_PERCENT", "10")))),
         "canary_priority": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_CANARY_PRIORITY", "5"))),
+        "max_auto_approvals_per_day": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_MAX_AUTO_APPROVALS_PER_DAY", "10"))),
+        "max_canary_rollouts_per_day": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_MAX_CANARY_ROLLOUTS_PER_DAY", "4"))),
+        "max_promotions_per_day": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_MAX_PROMOTIONS_PER_DAY", "3"))),
+        "max_active_canaries_per_stage": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_MAX_ACTIVE_CANARIES_PER_STAGE", "1"))),
+        "duplicate_profile_lookback_hours": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_DUPLICATE_PROFILE_LOOKBACK_HOURS", "168"))),
         "auto_promote_min_samples": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_PROMOTE_MIN_SAMPLES", "3"))),
         "auto_promote_max_negative_rate": float(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_PROMOTE_MAX_NEGATIVE_RATE", "34.0")),
         "auto_promote_min_positive_rate": float(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_PROMOTE_MIN_POSITIVE_RATE", "50.0")),
@@ -1990,10 +2008,13 @@ def _policy_automation_config() -> dict[str, Any]:
 def get_policy_automation_status() -> dict[str, Any]:
     config = _policy_automation_config()
     active_rollouts = list_policy_rollouts(limit=50, active_only=True)
+    recent_runs = list_policy_automation_runs(limit=5)
     return {
         "config": config,
         "recent_replays": list_policy_replays(limit=min(10, int(config["replay_limit"]))),
         "latest_run": get_latest_policy_automation_run(),
+        "recent_runs": recent_runs,
+        "guardrails": _policy_automation_guardrails(),
         "pending_approvals": [
             item
             for item in list_policy_approvals(limit=20)
@@ -2009,6 +2030,119 @@ def _find_policy_profile(policy_name: str, policy_version: str) -> dict[str, Any
         if str(item.get("policy_version") or "") == str(policy_version or ""):
             return item
     return None
+
+
+def _recent_policy_event_count(event_types: set[str], window_seconds: int) -> int:
+    if not event_types:
+        return 0
+    cutoff = int(time.time()) - max(1, window_seconds)
+    placeholders = ", ".join("?" for _ in event_types)
+    with _connect() as c:
+        row = c.execute(
+            f"""
+            SELECT COUNT(1)
+            FROM policy_rollout_events
+            WHERE created_ts >= ?
+              AND event_type IN ({placeholders})
+            """,
+            (cutoff, *sorted(event_types)),
+        ).fetchone()
+    return int((row[0] if row else 0) or 0)
+
+
+def _latest_policy_event_ts(
+    *,
+    event_types: set[str],
+    policy_name: str | None = None,
+    policy_version: str | None = None,
+    stage_scope: str | None = None,
+) -> int | None:
+    if not event_types:
+        return None
+    with _connect() as c:
+        rows = c.execute(
+            f"""
+            SELECT created_ts, policy_name, policy_version, payload_json
+            FROM policy_rollout_events
+            WHERE event_type IN ({', '.join('?' for _ in event_types)})
+            ORDER BY created_ts DESC
+            LIMIT 100
+            """,
+            tuple(sorted(event_types)),
+        ).fetchall()
+    for row in rows:
+        payload: dict[str, Any] = {}
+        try:
+            payload = json.loads(row[3] or "{}")
+            if not isinstance(payload, dict):
+                payload = {}
+        except Exception:
+            payload = {}
+        if policy_name and str(row[1] or "") != policy_name:
+            continue
+        if policy_version and str(row[2] or "") != policy_version:
+            continue
+        if stage_scope is not None and str(payload.get("stage_scope") or "") != str(stage_scope or ""):
+            continue
+        return int(row[0] or 0) or None
+    return None
+
+
+def _cooldown_remaining(last_ts: int | None, cooldown_seconds: int) -> int:
+    if not last_ts or cooldown_seconds <= 0:
+        return 0
+    remaining = (int(last_ts) + int(cooldown_seconds)) - int(time.time())
+    return max(0, remaining)
+
+
+def _active_canary_count(stage_scope: str | None) -> int:
+    return len(
+        [
+            item
+            for item in list_policy_rollouts(limit=200, active_only=True)
+            if item.get("rollout_mode") == "canary" and (item.get("stage_scope") or None) == stage_scope
+        ]
+    )
+
+
+def _equivalent_profile_exists(policy_name: str, policy_version: str, lookback_hours: int) -> bool:
+    target = _find_policy_profile(policy_name, policy_version)
+    if target is None:
+        return False
+    target_fingerprint = _policy_config_fingerprint(target.get("config") if isinstance(target.get("config"), dict) else {})
+    cutoff = int(time.time()) - max(1, lookback_hours) * 3600
+    for profile in list_policy_profiles(limit=500):
+        if profile.get("policy_name") == policy_name and profile.get("policy_version") == policy_version:
+            continue
+        if int(profile.get("created_ts") or 0) < cutoff:
+            continue
+        fingerprint = _policy_config_fingerprint(profile.get("config") if isinstance(profile.get("config"), dict) else {})
+        if fingerprint == target_fingerprint:
+            return True
+    return False
+
+
+def _policy_automation_guardrails() -> dict[str, Any]:
+    config = _policy_automation_config()
+    return {
+        "cooldowns": {
+            "auto_approval_sec": int(config["auto_approval_cooldown_sec"]),
+            "canary_sec": int(config["canary_cooldown_sec"]),
+            "promotion_sec": int(config["promotion_cooldown_sec"]),
+        },
+        "budgets": {
+            "auto_approvals_used": _recent_policy_event_count({"auto_approval_created"}, 86400),
+            "auto_approvals_max": int(config["max_auto_approvals_per_day"]),
+            "canaries_used": _recent_policy_event_count({"auto_canary_started"}, 86400),
+            "canaries_max": int(config["max_canary_rollouts_per_day"]),
+            "promotions_used": _recent_policy_event_count({"canary_promoted"}, 86400),
+            "promotions_max": int(config["max_promotions_per_day"]),
+        },
+        "active_canaries_by_stage": {
+            stage or "all": _active_canary_count(stage)
+            for stage in {None, "candidate", "promoted"}
+        },
+    }
 
 
 def _insert_policy_rollout_event(
@@ -2089,6 +2223,7 @@ def auto_create_policy_approvals(limit: int | None = None) -> dict[str, Any]:
     replay_limit = max(1, int(limit or config["replay_limit"]))
     created: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    approval_budget_remaining = max(0, int(config["max_auto_approvals_per_day"]) - _recent_policy_event_count({"auto_approval_created"}, 86400))
     for replay in list_policy_replays(limit=replay_limit):
         shadow_policy = replay.get("shadow_policy") if isinstance(replay.get("shadow_policy"), dict) else {}
         policy_name = str(shadow_policy.get("policy_name") or "")
@@ -2096,11 +2231,35 @@ def auto_create_policy_approvals(limit: int | None = None) -> dict[str, Any]:
         run_id = str(replay.get("run_id") or "")
         if not policy_name or not policy_version or not run_id:
             continue
+        if approval_budget_remaining <= 0:
+            skipped.append({"run_id": run_id, "policy_name": policy_name, "reason": "approval_budget_exhausted"})
+            continue
         if _auto_approval_exists(run_id):
             skipped.append({"run_id": run_id, "policy_name": policy_name, "reason": "approval_exists"})
             continue
         if _find_policy_profile(policy_name, policy_version) is None:
             skipped.append({"run_id": run_id, "policy_name": policy_name, "reason": "profile_missing"})
+            continue
+        if _equivalent_profile_exists(policy_name, policy_version, int(config["duplicate_profile_lookback_hours"])):
+            skipped.append({"run_id": run_id, "policy_name": policy_name, "reason": "duplicate_profile_fingerprint"})
+            continue
+        cooldown_remaining = _cooldown_remaining(
+            _latest_policy_event_ts(
+                event_types={"auto_approval_created"},
+                policy_name=policy_name,
+                policy_version=policy_version,
+            ),
+            int(config["auto_approval_cooldown_sec"]),
+        )
+        if cooldown_remaining > 0:
+            skipped.append(
+                {
+                    "run_id": run_id,
+                    "policy_name": policy_name,
+                    "reason": "approval_cooldown_active",
+                    "cooldown_remaining_sec": cooldown_remaining,
+                }
+            )
             continue
         trace_count = int(replay.get("trace_count") or 0)
         changed_count = int(replay.get("changed_count") or 0)
@@ -2158,6 +2317,7 @@ def auto_create_policy_approvals(limit: int | None = None) -> dict[str, Any]:
             payload={"run_id": run_id, "policy_version": policy_version},
         )
         created.append(approval)
+        approval_budget_remaining -= 1
     return {
         "config": config,
         "created": created,
@@ -2222,10 +2382,14 @@ def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
     approvals = list_policy_approvals(limit=200, approval_status="approved")
     scheduled: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    canary_budget_remaining = max(0, int(config["max_canary_rollouts_per_day"]) - _recent_policy_event_count({"auto_canary_started"}, 86400))
     for approval in approvals:
         policy_name = str(approval.get("policy_name") or "")
         policy_version = str(approval.get("policy_version") or "")
         approval_id = str(approval.get("approval_id") or "")
+        if canary_budget_remaining <= 0:
+            skipped.append({"approval_id": approval_id, "policy_name": policy_name, "reason": "canary_budget_exhausted"})
+            continue
         if any(
             str(item.get("policy_name") or "") == policy_name
             and str(item.get("policy_version") or "") == policy_version
@@ -2240,6 +2404,33 @@ def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
             replay = get_policy_replay(source_ref)
             if replay is not None:
                 stage_scope = str(replay.get("stage") or "") or None
+        active_stage_canaries = _active_canary_count(stage_scope)
+        if active_stage_canaries >= int(config["max_active_canaries_per_stage"]):
+            skipped.append(
+                {
+                    "approval_id": approval_id,
+                    "policy_name": policy_name,
+                    "reason": "stage_canary_limit_reached",
+                    "stage_scope": stage_scope,
+                    "active_stage_canaries": active_stage_canaries,
+                }
+            )
+            continue
+        cooldown_remaining = _cooldown_remaining(
+            _latest_policy_event_ts(event_types={"auto_canary_started"}, stage_scope=stage_scope),
+            int(config["canary_cooldown_sec"]),
+        )
+        if cooldown_remaining > 0:
+            skipped.append(
+                {
+                    "approval_id": approval_id,
+                    "policy_name": policy_name,
+                    "reason": "canary_cooldown_active",
+                    "stage_scope": stage_scope,
+                    "cooldown_remaining_sec": cooldown_remaining,
+                }
+            )
+            continue
         baseline = resolve_live_policy(stage_scope or "promoted")
         rollout = activate_policy_rollout(
             policy_name=policy_name,
@@ -2288,6 +2479,7 @@ def auto_schedule_policy_canaries(hours: int = 24) -> dict[str, Any]:
         )
         scheduled.append(rollout)
         rollouts.append(rollout)
+        canary_budget_remaining -= 1
     return {"config": config, "scheduled": scheduled, "skipped": skipped}
 
 
@@ -2297,8 +2489,29 @@ def auto_promote_policy_canaries(hours: int = 24) -> dict[str, Any]:
     skipped: list[dict[str, Any]] = []
     active_rollouts = list_policy_rollouts(limit=200, active_only=True)
     approvals = list_policy_approvals(limit=200)
+    promotion_budget_remaining = max(0, int(config["max_promotions_per_day"]) - _recent_policy_event_count({"canary_promoted"}, 86400))
     for rollout in active_rollouts:
         if str(rollout.get("rollout_mode") or "") != "canary":
+            continue
+        if promotion_budget_remaining <= 0:
+            skipped.append({"rollout_id": rollout["rollout_id"], "reason": "promotion_budget_exhausted"})
+            continue
+        cooldown_remaining = _cooldown_remaining(
+            _latest_policy_event_ts(
+                event_types={"canary_promoted"},
+                stage_scope=str(rollout.get("stage_scope") or "") or None,
+            ),
+            int(config["promotion_cooldown_sec"]),
+        )
+        if cooldown_remaining > 0:
+            skipped.append(
+                {
+                    "rollout_id": rollout["rollout_id"],
+                    "reason": "promotion_cooldown_active",
+                    "cooldown_remaining_sec": cooldown_remaining,
+                    "stage_scope": rollout.get("stage_scope"),
+                }
+            )
             continue
         metrics = _canary_metrics_for_rollout(rollout, hours=max(1, hours))
         if metrics["samples"] < int(config["auto_promote_min_samples"]):
@@ -2368,6 +2581,7 @@ def auto_promote_policy_canaries(hours: int = 24) -> dict[str, Any]:
             },
         )
         promoted.append({"canary_rollout_id": rollout["rollout_id"], "active_rollout": active, "metrics": metrics})
+        promotion_budget_remaining -= 1
     return {"config": config, "promoted": promoted, "skipped": skipped}
 
 
@@ -2451,6 +2665,31 @@ def run_policy_automation_cycle(hours: int = 24, replay_limit: int | None = None
                 automation_run_id,
             ),
         )
+    skip_counts = {
+        "approvals": len((summary.get("approvals") or {}).get("skipped") or []),
+        "canaries": len((summary.get("canaries") or {}).get("skipped") or []),
+        "promotions": len((summary.get("promotions") or {}).get("skipped") or []),
+    }
+    _emit_policy_notification(
+        event_type="policy_automation_summary",
+        level="info",
+        message=(
+            f"Policy automation run {automation_run_id} completed: "
+            f"{len((summary.get('approvals') or {}).get('created') or [])} approvals, "
+            f"{len((summary.get('canaries') or {}).get('scheduled') or [])} canaries, "
+            f"{len((summary.get('promotions') or {}).get('promoted') or [])} promotions."
+        ),
+        target_name="policy-automation",
+        payload={
+            "run_id": automation_run_id,
+            "hours": requested_hours,
+            "replay_limit": requested_limit,
+            "skip_counts": skip_counts,
+            "guardrail_rollbacks": len(
+                [item for item in ((summary.get("guardrails") or {}).get("evaluations") or []) if item.get("applied")]
+            ),
+        },
+    )
     return summary
 
 
