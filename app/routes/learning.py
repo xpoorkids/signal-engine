@@ -10,6 +10,7 @@ from app.services.signal_learning_service import (
     create_policy_profile,
     evaluate_shadow_policy,
     evaluate_policy_guardrails,
+    generate_policy_candidates,
     get_engine_health_digest,
     get_policy_automation_status,
     get_diagnostics_summary,
@@ -275,6 +276,15 @@ def learning_policy_automation_runs_latest():
 @router.post("/learning/policy/automation/approvals")
 def learning_policy_automation_approvals(payload: dict[str, object] = Body(default={})):
     return auto_create_policy_approvals(limit=int(payload.get("limit") or 20))
+
+
+@router.post("/learning/policy/automation/generate")
+def learning_policy_automation_generate(payload: dict[str, object] = Body(default={})):
+    return generate_policy_candidates(
+        hours=max(1, int(payload.get("hours") or 24)),
+        generation_limit=int(payload.get("generation_limit") or 6),
+        replay_limit=int(payload.get("replay_limit") or 250),
+    )
 
 
 @router.post("/learning/policy/automation/canaries")

@@ -970,6 +970,7 @@ def test_policy_automation_cycle_auto_promotes_stable_canary(tmp_path, monkeypat
     status = sls.get_policy_automation_status()
 
     assert replay["run_id"]
+    assert "generated" in cycle
     assert cycle["approvals"]["created"]
     assert cycle["canaries"]["scheduled"]
     assert cycle["promotions"]["promoted"]
@@ -993,6 +994,129 @@ def test_policy_automation_cycle_auto_promotes_stable_canary(tmp_path, monkeypat
         and item["approval_status"] == "rolled_out"
         for item in approvals
     )
+
+
+def test_generate_policy_candidates_creates_replayed_profiles(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    missed_signal_id = sls.record_signal_decision(
+        token="token-missed",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_gate_skip",
+        reasons=["attention<0.20"],
+        attention_score=0.19,
+        risk_score=0.22,
+        confidence_score=0.31,
+        creator_score=0.22,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="deterministic-v1",
+        features={
+            "attention_score": 0.19,
+            "creator_score": 0.22,
+            "candidate_rate_limit_allowed": True,
+            "candidate_progression_ok": True,
+            "candidate_send_eligible": True,
+        },
+        ts_value=1_773_850_000,
+        source="test",
+    )
+    failed_signal_id = sls.record_signal_decision(
+        token="token-failed",
+        event_type="promoted",
+        stage="promoted",
+        decision="promoted_sent",
+        action_taken="emit",
+        reasons=["dex_gate:liq<12000.0"],
+        attention_score=0.72,
+        risk_score=0.62,
+        confidence_score=0.88,
+        creator_score=0.3,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="deterministic-v1",
+        features={
+            "attention_score": 0.72,
+            "risk_score": 0.62,
+            "confidence_score": 0.88,
+            "liquidity_usd": 9000.0,
+            "unique_buyers_15m": 18,
+        },
+        ts_value=1_773_850_100,
+        source="test",
+    )
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                missed_signal_id,
+                60,
+                1_773_853_600,
+                "dex",
+                18000,
+                5000,
+                3000,
+                64.0,
+                25.0,
+                60.0,
+                44,
+                20,
+                80.0,
+                2.5,
+                30.0,
+                "worked",
+                json.dumps({"outcome_label": "worked"}),
+            ),
+        )
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                failed_signal_id,
+                60,
+                1_773_853_700,
+                "dex",
+                7000,
+                2500,
+                700,
+                65.0,
+                -25.0,
+                -45.0,
+                20,
+                70,
+                -41.0,
+                -42.0,
+                -70.0,
+                "failed",
+                json.dumps({"outcome_label": "failed"}),
+            ),
+        )
+
+    generated = sls.generate_policy_candidates(hours=10_000, generation_limit=4, replay_limit=200)
+    profiles = sls.list_policy_profiles(limit=20)
+    replays = sls.list_policy_replays(limit=20)
+
+    assert generated["generated"]
+    assert any(str(item["profile"]["policy_name"]).startswith("generated_") for item in generated["generated"])
+    assert any(item["source_signal"] in {"false_negatives", "false_positives", "threshold_guidance"} for item in generated["generated"])
+    assert any(str(item["policy_name"]).startswith("generated_") for item in profiles)
+    assert any(str(item.get("shadow_policy", {}).get("policy_name") or "").startswith("generated_") for item in replays)
 
 
 def test_policy_automation_safety_guardrails_limit_duplicate_and_concurrent_rollouts(tmp_path, monkeypatch):

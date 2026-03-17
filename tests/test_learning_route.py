@@ -616,10 +616,18 @@ def test_learning_policy_automation_routes(tmp_path, monkeypatch):
     run_response = client.post("/learning/policy/automation/run", json={"hours": 10000, "replay_limit": 10})
     assert run_response.status_code == 200
     run_payload = run_response.json()
+    assert "generated" in run_payload
     assert run_payload["approvals"]["created"]
     assert run_payload["canaries"]["scheduled"]
     assert run_payload["promotions"]["promoted"]
     assert run_payload["status"] == "completed"
+
+    generation_response = client.post(
+        "/learning/policy/automation/generate",
+        json={"hours": 10000, "generation_limit": 4, "replay_limit": 200},
+    )
+    assert generation_response.status_code == 200
+    assert "generated" in generation_response.json()
 
     latest_run_response = client.get("/learning/policy/automation/runs/latest")
     assert latest_run_response.status_code == 200

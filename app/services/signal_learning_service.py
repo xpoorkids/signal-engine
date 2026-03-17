@@ -1984,6 +1984,9 @@ def list_policy_replays(limit: int = 20) -> list[dict[str, Any]]:
 def _policy_automation_config() -> dict[str, Any]:
     return {
         "replay_limit": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTOMATION_REPLAY_LIMIT", "20"))),
+        "generation_limit": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_GENERATION_LIMIT", "6"))),
+        "generation_replay_limit": max(25, int(os.getenv("SIGNAL_ENGINE_POLICY_GENERATION_REPLAY_LIMIT", "250"))),
+        "generation_novelty_min": float(os.getenv("SIGNAL_ENGINE_POLICY_GENERATION_NOVELTY_MIN", "0.05")),
         "auto_approval_min_trace_count": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_APPROVAL_MIN_TRACE_COUNT", "1"))),
         "auto_approval_min_changed_count": max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_APPROVAL_MIN_CHANGED_COUNT", "1"))),
         "auto_approval_min_change_rate": float(os.getenv("SIGNAL_ENGINE_POLICY_AUTO_APPROVAL_MIN_CHANGE_RATE", "1.0")),
@@ -2142,6 +2145,212 @@ def _policy_automation_guardrails() -> dict[str, Any]:
             stage or "all": _active_canary_count(stage)
             for stage in {None, "candidate", "promoted"}
         },
+    }
+
+
+def _clamp_float(value: float, lower: float, upper: float, *, digits: int = 2) -> float:
+    return round(min(max(value, lower), upper), digits)
+
+
+def _clamp_int(value: int, lower: int, upper: int) -> int:
+    return int(min(max(int(value), lower), upper))
+
+
+def _policy_generation_variants(
+    *,
+    hours: int,
+    generation_limit: int,
+) -> list[dict[str, Any]]:
+    diagnostics = get_diagnostics_summary(hours=max(1, hours))
+    variants: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    base_candidate = resolve_live_policy("candidate")
+    base_promoted = resolve_live_policy("promoted")
+    candidate_config = dict(base_candidate.get("config") or {})
+    promoted_config = dict(base_promoted.get("config") or {})
+    false_negatives = diagnostics.get("false_negatives") if isinstance(diagnostics.get("false_negatives"), list) else []
+    false_positives = diagnostics.get("false_positives") if isinstance(diagnostics.get("false_positives"), list) else []
+    threshold_guidance = diagnostics.get("threshold_guidance") if isinstance(diagnostics.get("threshold_guidance"), list) else []
+
+    def add_variant(stage: str, config: dict[str, Any], rationale: list[str], source_signal: str) -> None:
+        if len(variants) >= max(1, generation_limit):
+            return
+        fingerprint = _policy_config_fingerprint(config)
+        if fingerprint in seen:
+            return
+        seen.add(fingerprint)
+        variants.append(
+            {
+                "stage": stage,
+                "config": config,
+                "rationale": rationale,
+                "source_signal": source_signal,
+                "config_fingerprint": fingerprint,
+            }
+        )
+
+    if false_negatives:
+        relaxed_candidate = _normalize_policy_descriptor(
+            policy_name="generated_candidate_policy",
+            policy_version="pending",
+            overrides={
+                "candidate_attention_min": _clamp_float(float(candidate_config.get("candidate_attention_min") or 0.70) - 0.05, 0.45, 0.90),
+                "candidate_creator_min": _clamp_float(float(candidate_config.get("candidate_creator_min") or 0.30) - 0.05, 0.05, 0.80),
+            },
+        )
+        add_variant(
+            "candidate",
+            relaxed_candidate,
+            ["False negatives detected in candidate gating", "Relax early attention and creator thresholds slightly"],
+            "false_negatives",
+        )
+
+    if false_positives:
+        stricter_promoted = _normalize_policy_descriptor(
+            policy_name="generated_promoted_policy",
+            policy_version="pending",
+            overrides={
+                "promoted_risk_max": _clamp_float(float(promoted_config.get("promoted_risk_max") or 0.60) - 0.05, 0.20, 0.80),
+                "promoted_liquidity_min": _clamp_float(float(promoted_config.get("promoted_liquidity_min") or 15000.0) + 2500.0, 5000.0, 100000.0, digits=1),
+                "promoted_buyers_15m_min": _clamp_int(int(promoted_config.get("promoted_buyers_15m_min") or 30) + 5, 5, 200),
+            },
+        )
+        add_variant(
+            "promoted",
+            stricter_promoted,
+            ["False positives detected after promotion", "Tighten risk, liquidity, and buyer requirements"],
+            "false_positives",
+        )
+
+    guidance_map = {str(item.get("reason") or ""): item for item in threshold_guidance if isinstance(item, dict)}
+    attention_guidance = guidance_map.get("attention<0.20")
+    if attention_guidance and str(attention_guidance.get("action") or "") == "relax_slightly":
+        relaxed_attention = _normalize_policy_descriptor(
+            policy_name="generated_candidate_policy",
+            policy_version="pending",
+            overrides={
+                "candidate_attention_min": _clamp_float(float(candidate_config.get("candidate_attention_min") or 0.70) - 0.03, 0.45, 0.90),
+            },
+        )
+        add_variant(
+            "candidate",
+            relaxed_attention,
+            ["Historical guidance supports slight relaxation of candidate attention threshold"],
+            "threshold_guidance",
+        )
+
+    liq_guidance = guidance_map.get("dex_gate:liq<12000.0")
+    if liq_guidance and str(liq_guidance.get("action") or "") == "tighten":
+        tighter_liquidity = _normalize_policy_descriptor(
+            policy_name="generated_promoted_policy",
+            policy_version="pending",
+            overrides={
+                "promoted_liquidity_min": _clamp_float(float(promoted_config.get("promoted_liquidity_min") or 15000.0) + 2000.0, 5000.0, 100000.0, digits=1),
+            },
+        )
+        add_variant(
+            "promoted",
+            tighter_liquidity,
+            ["Historical guidance supports tighter promoted liquidity floor"],
+            "threshold_guidance",
+        )
+
+    return variants[: max(1, generation_limit)]
+
+
+def generate_policy_candidates(
+    *,
+    hours: int = 24,
+    generation_limit: int | None = None,
+    replay_limit: int | None = None,
+) -> dict[str, Any]:
+    config = _policy_automation_config()
+    candidate_limit = max(1, int(generation_limit or config["generation_limit"]))
+    replay_trace_limit = max(25, int(replay_limit or config["generation_replay_limit"]))
+    variants = _policy_generation_variants(hours=max(1, hours), generation_limit=candidate_limit)
+    generated: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for index, variant in enumerate(variants, start=1):
+        stage = str(variant.get("stage") or "candidate")
+        generated_name = f"generated_{stage}_policy"
+        generated_version = f"gen-{int(time.time())}-{index}"
+        config_payload = dict(variant.get("config") or {})
+        config_payload["policy_name"] = generated_name
+        config_payload["policy_version"] = generated_version
+        if _equivalent_profile_exists(generated_name, generated_version, int(config["duplicate_profile_lookback_hours"])):
+            skipped.append({"stage": stage, "reason": "duplicate_profile_fingerprint", "source_signal": variant.get("source_signal")})
+            continue
+        novelty_score = 0.0
+        base_policy = resolve_live_policy(stage)
+        base_config = dict(base_policy.get("config") or {})
+        numeric_keys = [
+            "candidate_attention_min",
+            "candidate_creator_min",
+            "promoted_confidence_min",
+            "promoted_attention_min",
+            "promoted_risk_max",
+            "promoted_liquidity_min",
+            "promoted_buyers_15m_min",
+        ]
+        deltas: dict[str, float] = {}
+        for key in numeric_keys:
+            base_value = _to_float(base_config.get(key))
+            generated_value = _to_float(config_payload.get(key))
+            if base_value is None or generated_value is None:
+                continue
+            delta = abs(generated_value - base_value)
+            normalized = delta / max(abs(base_value), 1.0)
+            deltas[key] = round(delta, 4)
+            novelty_score += normalized
+        novelty_score = round(novelty_score, 4)
+        if novelty_score < float(config["generation_novelty_min"]):
+            skipped.append({"stage": stage, "reason": "novelty_too_low", "novelty_score": novelty_score})
+            continue
+        profile = create_policy_profile(
+            policy_name=generated_name,
+            policy_version=generated_version,
+            config=config_payload,
+            description="Auto-generated from diagnostics and replay pressure",
+            created_by="policy-generator",
+        )
+        replay = run_policy_replay(
+            hours=max(1, hours),
+            limit=replay_trace_limit,
+            stage=stage,
+            policy_name=generated_name,
+            policy_version=generated_version,
+            overrides=config_payload,
+        )
+        payload = {
+            "profile": profile,
+            "replay": replay,
+            "stage": stage,
+            "rationale": list(variant.get("rationale") or []),
+            "source_signal": variant.get("source_signal"),
+            "novelty_score": novelty_score,
+            "deltas": deltas,
+        }
+        generated.append(payload)
+        _insert_policy_rollout_event(
+            rollout_id=None,
+            approval_id=None,
+            policy_name=generated_name,
+            policy_version=generated_version,
+            event_type="policy_candidate_generated",
+            event_status="generated",
+            payload={
+                "stage": stage,
+                "novelty_score": novelty_score,
+                "source_signal": variant.get("source_signal"),
+                "rationale": list(variant.get("rationale") or []),
+                "replay_run_id": replay.get("run_id"),
+            },
+        )
+    return {
+        "config": config,
+        "hours": max(1, hours),
+        "generated": generated,
+        "skipped": skipped,
     }
 
 
@@ -2609,6 +2818,7 @@ def run_policy_automation_cycle(hours: int = 24, replay_limit: int | None = None
             ),
         )
     try:
+        generated = generate_policy_candidates(hours=requested_hours, generation_limit=_policy_automation_config()["generation_limit"], replay_limit=requested_limit)
         approvals = auto_create_policy_approvals(limit=requested_limit)
         canaries = auto_schedule_policy_canaries(hours=requested_hours)
         guardrails = evaluate_policy_guardrails(hours=requested_hours, min_samples=3, max_negative_rate=60.0, auto_apply=True)
@@ -2621,6 +2831,7 @@ def run_policy_automation_cycle(hours: int = 24, replay_limit: int | None = None
             "replay_limit": requested_limit,
             "status": "completed",
             "config": _policy_automation_config(),
+            "generated": generated,
             "approvals": approvals,
             "canaries": canaries,
             "guardrails": guardrails,
@@ -2666,6 +2877,7 @@ def run_policy_automation_cycle(hours: int = 24, replay_limit: int | None = None
             ),
         )
     skip_counts = {
+        "generated": len((summary.get("generated") or {}).get("skipped") or []),
         "approvals": len((summary.get("approvals") or {}).get("skipped") or []),
         "canaries": len((summary.get("canaries") or {}).get("skipped") or []),
         "promotions": len((summary.get("promotions") or {}).get("skipped") or []),
@@ -2675,6 +2887,7 @@ def run_policy_automation_cycle(hours: int = 24, replay_limit: int | None = None
         level="info",
         message=(
             f"Policy automation run {automation_run_id} completed: "
+            f"{len((summary.get('generated') or {}).get('generated') or [])} generated, "
             f"{len((summary.get('approvals') or {}).get('created') or [])} approvals, "
             f"{len((summary.get('canaries') or {}).get('scheduled') or [])} canaries, "
             f"{len((summary.get('promotions') or {}).get('promoted') or [])} promotions."
