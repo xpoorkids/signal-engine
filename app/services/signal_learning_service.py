@@ -2510,6 +2510,161 @@ def _policy_generation_variants(
     return variants[: max(1, generation_limit)]
 
 
+def _policy_stage_from_regime_key(regime_key: str | None, stage: str | None = None) -> str:
+    if stage:
+        stage_value = str(stage or "").strip()
+        if stage_value:
+            return stage_value
+    raw = str(regime_key or "").strip()
+    if raw and "|" in raw:
+        return raw.split("|", 1)[0] or "candidate"
+    return raw or "candidate"
+
+
+def _regime_action_overrides(stage: str, action: str, base_config: dict[str, Any]) -> dict[str, Any]:
+    if stage == "candidate":
+        attention = float(base_config.get("candidate_attention_min") or 0.70)
+        creator = float(base_config.get("candidate_creator_min") or 0.30)
+        if action in {"tighten", "canary_tighten"}:
+            return {
+                "candidate_attention_min": _clamp_float(attention + 0.03, 0.45, 0.90),
+                "candidate_creator_min": _clamp_float(creator + 0.03, 0.05, 0.80),
+            }
+        return {
+            "candidate_attention_min": _clamp_float(attention - 0.03, 0.45, 0.90),
+            "candidate_creator_min": _clamp_float(creator - 0.03, 0.05, 0.80),
+        }
+
+    confidence = float(base_config.get("promoted_confidence_min") or 0.80)
+    attention = float(base_config.get("promoted_attention_min") or 0.50)
+    risk = float(base_config.get("promoted_risk_max") or 0.60)
+    liquidity = float(base_config.get("promoted_liquidity_min") or 15000.0)
+    buyers = int(base_config.get("promoted_buyers_15m_min") or 30)
+    if action in {"tighten", "canary_tighten"}:
+        return {
+            "promoted_confidence_min": _clamp_float(confidence + 0.02, 0.50, 0.99),
+            "promoted_attention_min": _clamp_float(attention + 0.03, 0.20, 0.95),
+            "promoted_risk_max": _clamp_float(risk - 0.04, 0.20, 0.80),
+            "promoted_liquidity_min": _clamp_float(liquidity + 2500.0, 5000.0, 100000.0, digits=1),
+            "promoted_buyers_15m_min": _clamp_int(buyers + 4, 5, 200),
+        }
+    return {
+        "promoted_confidence_min": _clamp_float(confidence - 0.02, 0.50, 0.99),
+        "promoted_attention_min": _clamp_float(attention - 0.03, 0.20, 0.95),
+        "promoted_risk_max": _clamp_float(risk + 0.04, 0.20, 0.80),
+        "promoted_liquidity_min": _clamp_float(liquidity - 2500.0, 5000.0, 100000.0, digits=1),
+        "promoted_buyers_15m_min": _clamp_int(buyers - 4, 5, 200),
+    }
+
+
+def execute_regime_policy_action(
+    *,
+    regime_key: str,
+    action: str,
+    stage: str | None = None,
+    actor: str | None = None,
+    hours: int = 24,
+    replay_limit: int = 250,
+) -> dict[str, Any]:
+    _ensure_schema()
+    regime_value = str(regime_key or "").strip()
+    if not regime_value:
+        raise ValueError("regime_key_required")
+    action_value = str(action or "").strip()
+    if action_value not in {"tighten", "relax", "canary_tighten", "canary_relax"}:
+        raise ValueError("invalid_regime_action")
+    stage_value = _policy_stage_from_regime_key(regime_value, stage)
+    base_policy = resolve_live_policy(stage_value, regime_key=regime_value)
+    base_config = dict(base_policy.get("config") or {})
+    overrides = _regime_action_overrides(stage_value, action_value, base_config)
+    ts_suffix = int(time.time())
+    policy_name = f"manual_{stage_value}_policy"
+    policy_version = f"{action_value}-{ts_suffix}"
+    profile = create_policy_profile(
+        policy_name=policy_name,
+        policy_version=policy_version,
+        config=overrides,
+        description=f"Manual regime action {action_value} for {regime_value}",
+        created_by=actor or "command-center",
+    )
+    replay = run_policy_replay(
+        hours=max(1, hours),
+        limit=max(25, replay_limit),
+        stage=stage_value,
+        regime_key=regime_value,
+        policy_name=policy_name,
+        policy_version=policy_version,
+        overrides=overrides,
+    )
+    approval = create_policy_approval(
+        policy_name=policy_name,
+        policy_version=policy_version,
+        source_type="replay",
+        source_ref=str(replay.get("run_id") or ""),
+        notes=f"Manual regime action {action_value} for {regime_value}",
+        approved_by=actor or "command-center",
+    )
+    rollout = None
+    if action_value.startswith("canary_"):
+        rollout = activate_policy_rollout(
+            policy_name=policy_name,
+            policy_version=policy_version,
+            rollout_mode="canary",
+            rollout_status="active",
+            stage_scope=stage_value,
+            regime_scope=regime_value,
+            traffic_percent=int(_policy_automation_config()["canary_traffic_percent"]),
+            priority=int(_policy_automation_config()["canary_priority"]),
+            activated_by=actor or "command-center",
+            notes=f"Manual regime canary {action_value} for {regime_value}",
+        )
+        update_policy_approval_status(
+            str(approval.get("approval_id") or ""),
+            approval_status="rolled_out",
+            approved_by=actor or "command-center",
+            notes=f"Manual regime canary launched for {regime_value}",
+        )
+        approval = get_policy_approval(str(approval.get("approval_id") or "")) or approval
+    _insert_policy_rollout_event(
+        rollout_id=str((rollout or {}).get("rollout_id") or "") or None,
+        approval_id=str(approval.get("approval_id") or "") or None,
+        policy_name=policy_name,
+        policy_version=policy_version,
+        event_type="manual_regime_action",
+        event_status="active" if rollout else "approved",
+        payload={
+            "action": action_value,
+            "stage_scope": stage_value,
+            "regime_scope": regime_value,
+            "actor": actor,
+            "replay_run_id": replay.get("run_id"),
+        },
+    )
+    _emit_policy_notification(
+        event_type="policy_regime_action",
+        level="info",
+        message=f"{action_value} applied for {regime_value} via command center.",
+        target_name=policy_name,
+        approval_id=str(approval.get("approval_id") or "") or None,
+        payload={
+            "action": action_value,
+            "stage_scope": stage_value,
+            "regime_scope": regime_value,
+            "policy_version": policy_version,
+            "rollout_id": (rollout or {}).get("rollout_id"),
+        },
+    )
+    return {
+        "action": action_value,
+        "stage": stage_value,
+        "regime_key": regime_value,
+        "profile": profile,
+        "replay": replay,
+        "approval": approval,
+        "rollout": rollout,
+    }
+
+
 def generate_policy_candidates(
     *,
     hours: int = 24,

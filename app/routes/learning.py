@@ -10,6 +10,7 @@ from app.services.signal_learning_service import (
     create_policy_profile,
     evaluate_shadow_policy,
     evaluate_policy_guardrails,
+    execute_regime_policy_action,
     generate_policy_candidates,
     get_engine_health_digest,
     get_policy_automation_status,
@@ -714,6 +715,21 @@ def learning_tuning_notification_state(notification_id: str, payload: dict[str, 
 @router.get("/learning/command-center")
 def learning_command_center(hours: int = 24):
     return get_operator_command_center(hours=max(1, hours))
+
+
+@router.post("/learning/command-center/regime-action")
+def learning_command_center_regime_action(payload: dict[str, object] = Body(...)):
+    try:
+        return execute_regime_policy_action(
+            regime_key=str(payload.get("regime_key") or ""),
+            action=str(payload.get("action") or ""),
+            stage=str(payload.get("stage") or "") or None,
+            actor=str(payload.get("actor") or "") or None,
+            hours=max(1, int(payload.get("hours") or 24)),
+            replay_limit=max(25, int(payload.get("replay_limit") or 250)),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/learning/command-center/dashboard")

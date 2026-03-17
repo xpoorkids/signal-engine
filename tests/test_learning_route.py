@@ -407,6 +407,54 @@ def test_learning_policy_regime_routes(tmp_path, monkeypatch):
     assert payload["regimes"][0]["regime_key"] == "candidate|us_day|mid|developing|building"
 
 
+def test_learning_command_center_regime_action_route(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    sls.record_signal_decision(
+        token="token-regime-action",
+        event_type="promoted",
+        stage="promoted",
+        decision="promoted_sent",
+        action_taken="emit",
+        features={
+            "session_bucket": "us_day",
+            "liquidity_usd": 9000.0,
+            "age_minutes": 12.0,
+            "price_change_m5": -18.0,
+            "price_change_h1": -24.0,
+            "unique_buyers_15m": 18,
+        },
+        attention_score=0.72,
+        risk_score=0.68,
+        confidence_score=0.88,
+        creator_score=0.3,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="deterministic-v1",
+        ts_value=1_773_860_100,
+        source="test",
+    )
+
+    client = TestClient(main.app)
+    action_response = client.post(
+        "/learning/command-center/regime-action",
+        json={
+            "regime_key": "promoted|us_day|thin|new|reversing",
+            "action": "canary_tighten",
+            "actor": "ops-user",
+            "hours": 10000,
+            "replay_limit": 100,
+        },
+    )
+    assert action_response.status_code == 200
+    payload = action_response.json()
+    assert payload["regime_key"] == "promoted|us_day|thin|new|reversing"
+    assert payload["approval"]["approval_status"] == "rolled_out"
+    assert payload["rollout"]["regime_scope"] == "promoted|us_day|thin|new|reversing"
+
+
 def test_learning_policy_approval_and_guardrail_routes(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
@@ -1021,6 +1069,7 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "policy_regimes" in command_center_payload
     assert "strongest_regimes" in command_center_payload
     assert "weakest_regimes" in command_center_payload
+    assert "regime_action_suggestions" in command_center_payload
     assert "policy_automation" in command_center_payload
     assert "resolved_policies" in command_center_payload
     assert all("changed_keys" in item for item in command_center_payload["rollout_verification_cards"])
@@ -1034,6 +1083,7 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     assert "Regime Performance" in command_center_dashboard_response.text
     assert "Strongest Regimes" in command_center_dashboard_response.text
     assert "Weakest Regimes" in command_center_dashboard_response.text
+    assert "Regime Actions" in command_center_dashboard_response.text
     assert "Policy Rollouts" in command_center_dashboard_response.text
     assert "Policy Guardrails" in command_center_dashboard_response.text
     assert "Policy Approvals" in command_center_dashboard_response.text

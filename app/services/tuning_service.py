@@ -2079,6 +2079,25 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
                 "Prefer bounded relaxation and expansion there."
             ),
         )
+    regime_action_suggestions = []
+    for item in strongest_regimes[:3]:
+        regime_action_suggestions.append(
+            {
+                "action": "canary_relax",
+                "stage": str(item.get("stage") or ""),
+                "regime_key": str(item.get("regime_key") or ""),
+                "reason": "Expand in a regime with positive outcome concentration.",
+            }
+        )
+    for item in weakest_regimes[:3]:
+        regime_action_suggestions.append(
+            {
+                "action": "canary_tighten",
+                "stage": str(item.get("stage") or ""),
+                "regime_key": str(item.get("regime_key") or ""),
+                "reason": "Constrain a regime with negative outcome concentration.",
+            }
+        )
 
     return {
         "lookback_hours": lookback,
@@ -2107,6 +2126,7 @@ def get_operator_command_center(hours: int = 24) -> dict[str, Any]:
         "policy_regimes": policy_regimes,
         "strongest_regimes": strongest_regimes,
         "weakest_regimes": weakest_regimes,
+        "regime_action_suggestions": regime_action_suggestions,
         "policy_automation": policy_automation_status,
         "resolved_policies": {
             "candidate": resolved_candidate_policy,
@@ -2135,6 +2155,7 @@ def render_operator_command_center_html(hours: int = 24) -> str:
     policy_regimes = center.get("policy_regimes") if isinstance(center.get("policy_regimes"), dict) else {}
     strongest_regimes = center.get("strongest_regimes") if isinstance(center.get("strongest_regimes"), list) else []
     weakest_regimes = center.get("weakest_regimes") if isinstance(center.get("weakest_regimes"), list) else []
+    regime_action_suggestions = center.get("regime_action_suggestions") if isinstance(center.get("regime_action_suggestions"), list) else []
     policy_automation = center.get("policy_automation") if isinstance(center.get("policy_automation"), dict) else {}
     latest_policy_replay = center.get("latest_policy_replay") if isinstance(center.get("latest_policy_replay"), dict) else {}
     resolved_policies = center.get("resolved_policies") if isinstance(center.get("resolved_policies"), dict) else {}
@@ -2281,6 +2302,15 @@ def render_operator_command_center_html(hours: int = 24) -> str:
         "</tr>"
         for item in weakest_regimes[:5]
     ) or "<tr><td colspan='3'>No weak regimes yet.</td></tr>"
+    regime_action_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('action') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('stage') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('regime_key') or 'n/a'))}</td>"
+        f"<td>{html.escape(str(item.get('reason') or ''))}</td>"
+        "</tr>"
+        for item in regime_action_suggestions[:6]
+    ) or "<tr><td colspan='4'>No regime action suggestions yet.</td></tr>"
     policy_approval_rows = "".join(
         "<tr>"
         f"<td>{html.escape(str(item.get('policy_name') or 'unknown'))}</td>"
@@ -2444,6 +2474,13 @@ def render_operator_command_center_html(hours: int = 24) -> str:
       <table>
         <thead><tr><th>Regime</th><th>Stage</th><th>Decisions</th><th>Positive</th><th>Negative</th><th>Emits</th></tr></thead>
         <tbody>{regime_rows}</tbody>
+      </table>
+    </section>
+    <section class="panel">
+      <h2>Regime Actions</h2>
+      <table>
+        <thead><tr><th>Action</th><th>Stage</th><th>Regime</th><th>Reason</th></tr></thead>
+        <tbody>{regime_action_rows}</tbody>
       </table>
     </section>
     <section class="panel">
