@@ -5,6 +5,8 @@ from typing import Literal
 
 
 STATE_ENTRY_RECORDED = "entry_recorded"
+STATE_QUOTE_VALIDATED = "quote_validated"
+STATE_SUBMIT_INTENT_RECORDED = "submit_intent_recorded"
 STATE_MONITORING = "monitoring"
 STATE_EXIT_TRIGGERED = "exit_triggered"
 STATE_CLOSED = "closed"
@@ -15,6 +17,8 @@ TERMINAL_STATES = {STATE_CLOSED, STATE_QUOTE_EXPIRED}
 
 TransitionReason = Literal[
     "entry_recorded",
+    "quote_validated",
+    "submit_intent_recorded",
     "mark_to_market",
     "take_profit",
     "stop_loss",
@@ -53,6 +57,60 @@ class ExecutionTransitionPlan:
 
 def initial_execution_state() -> str:
     return STATE_ENTRY_RECORDED
+
+
+def plan_shadow_entry_transition(
+    current_state: str | None,
+    *,
+    quote_expired: bool = False,
+) -> ExecutionTransitionPlan:
+    state = str(current_state or STATE_ENTRY_RECORDED)
+    transitions: list[ExecutionTransition] = []
+
+    if quote_expired:
+        transitions.append(
+            ExecutionTransition(
+                from_state=state,
+                to_state=STATE_QUOTE_EXPIRED,
+                reason="quote_expired",
+                terminal=True,
+            )
+        )
+        return ExecutionTransitionPlan(
+            current_state=state,
+            next_state=STATE_QUOTE_EXPIRED,
+            terminal=True,
+            transitions=transitions,
+        )
+
+    if state == STATE_ENTRY_RECORDED:
+        transitions.append(
+            ExecutionTransition(
+                from_state=STATE_ENTRY_RECORDED,
+                to_state=STATE_QUOTE_VALIDATED,
+                reason="quote_validated",
+                terminal=False,
+            )
+        )
+        state = STATE_QUOTE_VALIDATED
+
+    if state == STATE_QUOTE_VALIDATED:
+        transitions.append(
+            ExecutionTransition(
+                from_state=STATE_QUOTE_VALIDATED,
+                to_state=STATE_SUBMIT_INTENT_RECORDED,
+                reason="submit_intent_recorded",
+                terminal=False,
+            )
+        )
+        state = STATE_SUBMIT_INTENT_RECORDED
+
+    return ExecutionTransitionPlan(
+        current_state=str(current_state or STATE_ENTRY_RECORDED),
+        next_state=state,
+        terminal=state in TERMINAL_STATES,
+        transitions=transitions,
+    )
 
 
 def plan_shadow_monitor_transition(

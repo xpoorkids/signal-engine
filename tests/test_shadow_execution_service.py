@@ -41,18 +41,28 @@ def test_open_shadow_position_persists_validated_trade(tmp_path, monkeypatch):
 
     with ses._connect() as c:
         row = c.execute(
-            "SELECT token, signal_id, status, execution_state, intended_size_usd, position_size_tokens, entry_fee_usd, latest_net_pnl_usd FROM shadow_positions WHERE position_id=?",
+            "SELECT token, signal_id, status, execution_state, submission_intent_ts, quote_expires_ts, intended_size_usd, position_size_tokens, entry_fee_usd, latest_net_pnl_usd FROM shadow_positions WHERE position_id=?",
             (position_id,),
         ).fetchone()
+        transitions = c.execute(
+            "SELECT from_state, to_state, transition_reason FROM shadow_execution_transitions WHERE position_id=? ORDER BY transition_id ASC",
+            (position_id,),
+        ).fetchall()
     assert row is not None
     assert row[0] == "token-1"
     assert row[1] == "sig-1"
     assert row[2] == "open"
-    assert row[3] == ses.STATE_ENTRY_RECORDED
-    assert row[4] == 100.0
-    assert row[5] == 180.0
-    assert row[6] > 0
-    assert row[7] < 0
+    assert row[3] == ses.STATE_SUBMIT_INTENT_RECORDED
+    assert row[4] == 2_000_000_000
+    assert row[5] == 2_000_000_015
+    assert row[6] == 100.0
+    assert row[7] == 180.0
+    assert row[8] > 0
+    assert row[9] < 0
+    assert [(item[0], item[1], item[2]) for item in transitions] == [
+        (ses.STATE_ENTRY_RECORDED, "quote_validated", "quote_validated"),
+        ("quote_validated", ses.STATE_SUBMIT_INTENT_RECORDED, "submit_intent_recorded"),
+    ]
 
 
 def test_open_shadow_position_skips_expired_validation(tmp_path, monkeypatch):
@@ -93,6 +103,59 @@ def test_open_shadow_position_skips_expired_validation(tmp_path, monkeypatch):
         row = c.execute("SELECT COUNT(*) FROM shadow_positions").fetchone()
     assert row is not None
     assert row[0] == 0
+
+
+def test_refresh_open_position_closes_expired_submit_intent(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(ses, "DB_PATH", db_path)
+    monkeypatch.setattr(ses, "_SCHEMA_READY", False)
+    monkeypatch.setattr(ses.time, "time", lambda: 2_000_000_000)
+    ses.init()
+
+    event = Event(
+        type="promoted",
+        source="test",
+        token="token-1",
+        extra={
+            "_signal_id": "sig-expire-intent",
+            "dex_summary": {"price_usd": 0.5, "liquidity_usd": 50000.0},
+            "trade_validation": {
+                "approved": True,
+                "validated_ts": 2_000_000_000,
+                "quote_expires_ts": 2_000_000_010,
+                "intended_size_usd": 100.0,
+                "pair_address": "pair-1",
+                "dex_id": "raydium",
+                "buy_quote": {
+                    "expected_output_tokens": 180.0,
+                    "execution_price_usd": 0.555,
+                    "slippage_bps": 120.0,
+                },
+                "sell_quote": {"slippage_bps": 140.0},
+            },
+        },
+    )
+    position_id = ses.open_shadow_position(event)
+    monkeypatch.setattr(ses.time, "time", lambda: 2_000_000_050)
+
+    positions = ses._fetch_open_positions(limit=10)
+    assert len(positions) == 1
+    asyncio.run(ses.refresh_open_position(positions[0]))
+
+    with ses._connect() as c:
+        row = c.execute(
+            "SELECT status, execution_state, exit_reason FROM shadow_positions WHERE position_id=?",
+            (position_id,),
+        ).fetchone()
+        transitions = c.execute(
+            "SELECT from_state, to_state, transition_reason FROM shadow_execution_transitions WHERE position_id=? ORDER BY transition_id ASC",
+            (position_id,),
+        ).fetchall()
+    assert row is not None
+    assert row[0] == "closed"
+    assert row[1] == ses.STATE_QUOTE_EXPIRED
+    assert row[2] == "quote_expired"
+    assert tuple(transitions[-1]) == (ses.STATE_SUBMIT_INTENT_RECORDED, ses.STATE_QUOTE_EXPIRED, "quote_expired")
 
 
 def test_refresh_open_position_closes_take_profit(tmp_path, monkeypatch):
@@ -165,7 +228,9 @@ def test_refresh_open_position_closes_take_profit(tmp_path, monkeypatch):
     assert row[5] > 0
     assert transitions is not None
     assert [(item[0], item[1], item[2]) for item in transitions] == [
-        (ses.STATE_ENTRY_RECORDED, "monitoring", "mark_to_market"),
+        (ses.STATE_ENTRY_RECORDED, "quote_validated", "quote_validated"),
+        ("quote_validated", ses.STATE_SUBMIT_INTENT_RECORDED, "submit_intent_recorded"),
+        (ses.STATE_SUBMIT_INTENT_RECORDED, "monitoring", "mark_to_market"),
         ("monitoring", "exit_triggered", "take_profit"),
         ("exit_triggered", ses.STATE_CLOSED, "take_profit"),
     ]

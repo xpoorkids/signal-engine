@@ -26,6 +26,9 @@ from worker.execution_lifecycle import (
     STATE_CLOSED,
     STATE_ENTRY_RECORDED,
     STATE_MONITOR_ERROR,
+    STATE_QUOTE_EXPIRED,
+    STATE_SUBMIT_INTENT_RECORDED,
+    plan_shadow_entry_transition,
     plan_shadow_monitor_transition,
 )
 
@@ -44,6 +47,8 @@ class ShadowPosition:
     status: str
     execution_state: str
     opened_ts: int
+    submission_intent_ts: int | None
+    quote_expires_ts: int | None
     intended_size_usd: float
     position_size_tokens: float
     pair_address: str | None
@@ -190,6 +195,8 @@ def init() -> None:
                 status TEXT NOT NULL,
                 execution_state TEXT NOT NULL DEFAULT 'entry_recorded',
                 opened_ts INTEGER NOT NULL,
+                submission_intent_ts INTEGER,
+                quote_expires_ts INTEGER,
                 updated_ts INTEGER NOT NULL,
                 closed_ts INTEGER,
                 intended_size_usd REAL NOT NULL,
@@ -259,6 +266,8 @@ def init() -> None:
             """
         )
         _ensure_column(c, "shadow_positions", "execution_state", "TEXT NOT NULL DEFAULT 'entry_recorded'")
+        _ensure_column(c, "shadow_positions", "submission_intent_ts", "INTEGER")
+        _ensure_column(c, "shadow_positions", "quote_expires_ts", "INTEGER")
         _ensure_column(c, "shadow_positions", "entry_fee_usd", "REAL NOT NULL DEFAULT 0")
         _ensure_column(c, "shadow_positions", "latest_net_exit_value_usd", "REAL")
         _ensure_column(c, "shadow_positions", "latest_net_pnl_pct", "REAL")
@@ -302,6 +311,7 @@ def open_shadow_position(event) -> str | None:
         return None
 
     buy_quote = validation.get("buy_quote") if isinstance(validation.get("buy_quote"), dict) else {}
+    entry_plan = plan_shadow_entry_transition(STATE_ENTRY_RECORDED)
     signal_id = str(extra.get("_signal_id") or "").strip() or None
     position_size_tokens = float(buy_quote.get("expected_output_tokens") or 0.0)
     entry_exec_price = float(buy_quote.get("execution_price_usd") or 0.0)
@@ -324,8 +334,10 @@ def open_shadow_position(event) -> str | None:
             token=str(event.token or ""),
             source_event_type=str(event.type or ""),
             status="open",
-            execution_state=STATE_ENTRY_RECORDED,
+            execution_state=entry_plan.next_state,
             opened_ts=now,
+            submission_intent_ts=now,
+            quote_expires_ts=quote_expires_ts or None,
             intended_size_usd=float(validation.get("intended_size_usd") or 0.0),
             position_size_tokens=position_size_tokens,
             pair_address=str(validation.get("pair_address") or "") or None,
@@ -345,13 +357,14 @@ def open_shadow_position(event) -> str | None:
             """
             INSERT INTO shadow_positions (
                 position_id, signal_id, token, source_event_type, status, execution_state, opened_ts, updated_ts,
+                submission_intent_ts, quote_expires_ts,
                 intended_size_usd, position_size_tokens, pair_address, dex_id,
                 entry_mid_price_usd, entry_exec_price_usd, entry_fee_usd, expected_buy_slippage_bps,
                 expected_sell_slippage_bps, take_profit_pct, stop_loss_pct, max_hold_minutes,
                 latest_price_usd, latest_liquidity_usd, latest_exit_value_usd, latest_pnl_pct,
                 latest_pnl_usd, latest_net_exit_value_usd, latest_net_pnl_pct, latest_net_pnl_usd, latest_exit_fee_usd,
                 peak_pnl_pct, trough_pnl_pct, validation_json, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position_id,
@@ -362,6 +375,8 @@ def open_shadow_position(event) -> str | None:
                 position.execution_state,
                 now,
                 now,
+                position.submission_intent_ts,
+                position.quote_expires_ts,
                 position.intended_size_usd,
                 position.position_size_tokens,
                 position.pair_address,
@@ -413,8 +428,14 @@ def open_shadow_position(event) -> str | None:
                 _json_dumps(payload),
             ),
         )
+    _record_transitions(
+        position_id=position_id,
+        observed_ts=now,
+        plan=entry_plan.as_dict(),
+        payload=payload,
+    )
     logger.info(
-        "[shadow-exec-open] token=%s position_id=%s signal_id=%s size_usd=%.2f entry_exec=%.8f qty=%.8f pair=%s entry_fee_usd=%.4f state=%s",
+        "[shadow-exec-open] token=%s position_id=%s signal_id=%s size_usd=%.2f entry_exec=%.8f qty=%.8f pair=%s entry_fee_usd=%.4f state=%s quote_expires_ts=%s",
         event.token,
         position_id,
         signal_id or "",
@@ -424,6 +445,7 @@ def open_shadow_position(event) -> str | None:
         validation.get("pair_address") or "",
         entry_fee_usd,
         position.execution_state,
+        position.quote_expires_ts or 0,
     )
     return position_id
 
@@ -442,7 +464,7 @@ def _fetch_open_positions(limit: int = 25) -> list[ShadowPosition]:
         rows = c.execute(
             """
             SELECT position_id, signal_id, token, source_event_type, status, opened_ts,
-                   execution_state, intended_size_usd, position_size_tokens, pair_address, dex_id,
+                   execution_state, submission_intent_ts, quote_expires_ts, intended_size_usd, position_size_tokens, pair_address, dex_id,
                    entry_mid_price_usd, entry_exec_price_usd, expected_buy_slippage_bps,
                    expected_sell_slippage_bps, take_profit_pct, stop_loss_pct, max_hold_minutes, entry_fee_usd, payload_json
             FROM shadow_positions
@@ -470,6 +492,8 @@ def _fetch_open_positions(limit: int = 25) -> list[ShadowPosition]:
                 status=str(row["status"]),
                 execution_state=str(row["execution_state"] or STATE_ENTRY_RECORDED),
                 opened_ts=int(row["opened_ts"]),
+                submission_intent_ts=int(row["submission_intent_ts"]) if row["submission_intent_ts"] is not None else None,
+                quote_expires_ts=int(row["quote_expires_ts"]) if row["quote_expires_ts"] is not None else None,
                 intended_size_usd=float(row["intended_size_usd"] or 0.0),
                 position_size_tokens=float(row["position_size_tokens"] or 0.0),
                 pair_address=str(row["pair_address"]) if row["pair_address"] is not None else None,
@@ -562,6 +586,41 @@ async def refresh_open_position(position: ShadowPosition) -> None:
     token = position.token
     position_id = position.position_id
     if not token or not position_id:
+        return
+    now = int(time.time())
+    if position.quote_expires_ts and now > position.quote_expires_ts and position.execution_state in {STATE_SUBMIT_INTENT_RECORDED, STATE_ENTRY_RECORDED}:
+        plan = plan_shadow_monitor_transition(position.execution_state, exit_reason=None, quote_expired=True)
+        payload = {
+            "token": token,
+            "position_id": position_id,
+            "execution": plan.as_dict(),
+            "reason": "quote_expired_before_monitoring",
+        }
+        with _connect() as c:
+            c.execute(
+                """
+                UPDATE shadow_positions
+                SET status='closed', execution_state=?, updated_ts=?, closed_ts=?, exit_reason=?, payload_json=?
+                WHERE position_id=?
+                """,
+                (
+                    STATE_QUOTE_EXPIRED,
+                    now,
+                    now,
+                    "quote_expired",
+                    _json_dumps(payload),
+                    position_id,
+                ),
+            )
+        _record_transitions(position_id=position_id, observed_ts=now, plan=plan.as_dict(), payload=payload)
+        logger.warning(
+            "[shadow-exec-close] token=%s position_id=%s reason=quote_expired_before_monitoring state=%s expired_ts=%s now_ts=%s",
+            token,
+            position_id,
+            position.execution_state,
+            position.quote_expires_ts,
+            now,
+        )
         return
     best_pair, dex_summary = await _fetch_market_snapshot(token)
     if not best_pair or not dex_summary:
