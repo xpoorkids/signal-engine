@@ -196,6 +196,8 @@ def summarize_pair(pair: Dict[str, Any]) -> Dict[str, Any]:
         "dex_id": pair.get("dexId"),
         "base_token_address": (pair.get("baseToken") or {}).get("address") if isinstance(pair.get("baseToken"), dict) else None,
         "quote_token_address": (pair.get("quoteToken") or {}).get("address") if isinstance(pair.get("quoteToken"), dict) else None,
+        "pair_created_at_ms": created,
+        "snapshot_ts": int(time.time()),
         "price_usd": pair.get("priceUsd"),
         "liquidity_usd": liq,
         "volume_m5": vol.get("m5"),

@@ -188,6 +188,16 @@ def open_shadow_position(event) -> str | None:
     if not validation or not validation.get("approved"):
         logger.info("[shadow-exec-skip] token=%s reason=validation_not_approved", event.token)
         return None
+    now = int(time.time())
+    quote_expires_ts = int(validation.get("quote_expires_ts") or 0)
+    if quote_expires_ts and now > quote_expires_ts:
+        logger.warning(
+            "[shadow-exec-skip] token=%s reason=validation_quote_expired expired_ts=%s now_ts=%s",
+            event.token,
+            quote_expires_ts,
+            now,
+        )
+        return None
 
     buy_quote = validation.get("buy_quote") if isinstance(validation.get("buy_quote"), dict) else {}
     signal_id = str(extra.get("_signal_id") or "").strip() or None
@@ -205,7 +215,6 @@ def open_shadow_position(event) -> str | None:
                 return str(existing[0])
 
         position_id = uuid.uuid4().hex
-        now = int(time.time())
         position = ShadowPosition(
             position_id=position_id,
             signal_id=signal_id,
@@ -429,6 +438,10 @@ async def refresh_open_position(position: ShadowPosition) -> None:
     payload = {
         "token": token,
         "position_id": position_id,
+        "market_data": {
+            "snapshot_ts": dex_summary.get("snapshot_ts"),
+            "age_sec": 0.0 if dex_summary.get("snapshot_ts") else None,
+        },
         "price_usd": dex_summary.get("price_usd"),
         "liquidity_usd": dex_summary.get("liquidity_usd"),
         "exit_value_usd": exit_value_usd,

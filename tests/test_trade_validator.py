@@ -33,10 +33,11 @@ def test_quote_simulation_round_trip_exists():
 
 
 def test_validate_trade_approves_clean_setup():
+    snapshot_ts = 2_000_000_000
     result = validate_trade(
         token="token-1",
         best_pair=_pair(),
-        dex_summary={"liquidity_usd": 50000.0},
+        dex_summary={"liquidity_usd": 50000.0, "snapshot_ts": snapshot_ts},
         risk_score=0.20,
         wallet_risk={"top_holder_pct": 0.04},
         mint_authority=False,
@@ -47,6 +48,8 @@ def test_validate_trade_approves_clean_setup():
 
     assert result["approved"] is True
     assert result["reasons"] == []
+    assert result["quote_expires_ts"] > result["validated_ts"]
+    assert result["market_data"]["snapshot_ts"] == snapshot_ts
     assert result["buy_quote"]["slippage_bps"] < 250
     assert result["sell_quote"]["slippage_bps"] < 350
 
@@ -70,3 +73,21 @@ def test_validate_trade_rejects_on_authority_and_sell_slippage():
     assert "wallet_holder_concentration" in reasons
     assert "top_holder_concentration" in reasons
     assert "liquidity_below_threshold" in reasons or "buy_slippage_too_high" in reasons or "sell_slippage_too_high" in reasons
+
+
+def test_validate_trade_rejects_stale_market_data(monkeypatch):
+    monkeypatch.setattr("worker.trade_validator.time.time", lambda: 1000.0)
+    result = validate_trade(
+        token="token-1",
+        best_pair=_pair(),
+        dex_summary={"liquidity_usd": 50000.0, "snapshot_ts": 900},
+        risk_score=0.20,
+        wallet_risk={"top_holder_pct": 0.04},
+        mint_authority=False,
+        freeze_authority=False,
+        top_holder_ratio=0.10,
+        intended_size_usd=100.0,
+    )
+
+    assert result["approved"] is False
+    assert "market_data_stale" in result["reasons"]

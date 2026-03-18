@@ -10,6 +10,7 @@ def test_open_shadow_position_persists_validated_trade(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(ses, "DB_PATH", db_path)
     monkeypatch.setattr(ses, "_SCHEMA_READY", False)
+    monkeypatch.setattr(ses.time, "time", lambda: 2_000_000_000)
     ses.init()
 
     event = Event(
@@ -21,6 +22,8 @@ def test_open_shadow_position_persists_validated_trade(tmp_path, monkeypatch):
             "dex_summary": {"price_usd": 0.5, "liquidity_usd": 50000.0},
             "trade_validation": {
                 "approved": True,
+                "validated_ts": 2_000_000_000,
+                "quote_expires_ts": 2_000_000_015,
                 "intended_size_usd": 100.0,
                 "pair_address": "pair-1",
                 "dex_id": "raydium",
@@ -49,10 +52,51 @@ def test_open_shadow_position_persists_validated_trade(tmp_path, monkeypatch):
     assert row[4] == 180.0
 
 
+def test_open_shadow_position_skips_expired_validation(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(ses, "DB_PATH", db_path)
+    monkeypatch.setattr(ses, "_SCHEMA_READY", False)
+    monkeypatch.setattr(ses.time, "time", lambda: 2_000_000_100)
+    ses.init()
+
+    event = Event(
+        type="promoted",
+        source="test",
+        token="token-1",
+        extra={
+            "_signal_id": "sig-expired",
+            "dex_summary": {"price_usd": 0.5, "liquidity_usd": 50000.0},
+            "trade_validation": {
+                "approved": True,
+                "validated_ts": 2_000_000_000,
+                "quote_expires_ts": 2_000_000_050,
+                "intended_size_usd": 100.0,
+                "pair_address": "pair-1",
+                "dex_id": "raydium",
+                "buy_quote": {
+                    "expected_output_tokens": 180.0,
+                    "execution_price_usd": 0.555,
+                    "slippage_bps": 120.0,
+                },
+                "sell_quote": {"slippage_bps": 140.0},
+            },
+        },
+    )
+
+    position_id = ses.open_shadow_position(event)
+
+    assert position_id is None
+    with ses._connect() as c:
+        row = c.execute("SELECT COUNT(*) FROM shadow_positions").fetchone()
+    assert row is not None
+    assert row[0] == 0
+
+
 def test_refresh_open_position_closes_take_profit(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(ses, "DB_PATH", db_path)
     monkeypatch.setattr(ses, "_SCHEMA_READY", False)
+    monkeypatch.setattr(ses.time, "time", lambda: 2_000_000_000)
     ses.init()
 
     event = Event(
@@ -64,6 +108,8 @@ def test_refresh_open_position_closes_take_profit(tmp_path, monkeypatch):
             "dex_summary": {"price_usd": 0.5, "liquidity_usd": 50000.0},
             "trade_validation": {
                 "approved": True,
+                "validated_ts": 2_000_000_000,
+                "quote_expires_ts": 2_000_000_015,
                 "intended_size_usd": 100.0,
                 "pair_address": "pair-1",
                 "dex_id": "raydium",

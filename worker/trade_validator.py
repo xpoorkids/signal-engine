@@ -2,15 +2,18 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import logging
+import time
 from typing import Any
 
 from worker.config import (
+    TRADE_VALIDATION_MAX_MARKET_DATA_AGE_SEC,
     TRADE_VALIDATION_MAX_BUY_SLIPPAGE_BPS,
     TRADE_VALIDATION_MAX_RISK,
     TRADE_VALIDATION_MAX_SELL_SLIPPAGE_BPS,
     TRADE_VALIDATION_MAX_TOP_HOLDER_PCT,
     TRADE_VALIDATION_MAX_WALLET_TOP_HOLDER_PCT,
     TRADE_VALIDATION_MIN_LIQ_USD,
+    TRADE_VALIDATION_QUOTE_TTL_SEC,
     TRADE_VALIDATION_SIZE_USD,
 )
 
@@ -77,6 +80,8 @@ class ValidationResult:
     token: str
     policy_name: str
     policy_version: str
+    validated_ts: int
+    quote_expires_ts: int
     intended_size_usd: float
     market_target: str
     pair_address: str | None
@@ -84,6 +89,7 @@ class ValidationResult:
     reasons: list[str]
     warnings: list[str]
     checks: list[dict[str, Any]]
+    market_data: dict[str, Any]
     buy_quote: dict[str, Any] | None
     sell_quote: dict[str, Any] | None
     risk_summary: dict[str, Any]
@@ -94,6 +100,25 @@ class ValidationResult:
 
 # Backward-compatible alias while the integration migrates to the shorter name.
 TradeValidationResult = ValidationResult
+
+
+def _snapshot_ts(dex_summary: dict[str, Any] | None) -> int | None:
+    if not isinstance(dex_summary, dict):
+        return None
+    try:
+        value = dex_summary.get("snapshot_ts")
+        if value in (None, ""):
+            return None
+        return int(float(value))
+    except Exception:
+        return None
+
+
+def _market_data_age_seconds(dex_summary: dict[str, Any] | None, now_ts: int) -> float | None:
+    snapshot_ts = _snapshot_ts(dex_summary)
+    if snapshot_ts is None:
+        return None
+    return max(0.0, float(now_ts - snapshot_ts))
 
 
 def build_pair_context(best_pair: dict[str, Any] | None, token: str) -> PairContext | None:
@@ -185,6 +210,7 @@ def validate_trade(
     top_holder_ratio: float | None,
     intended_size_usd: float | None = None,
 ) -> dict[str, Any]:
+    now_ts = int(time.time())
     size_usd = float(intended_size_usd or TRADE_VALIDATION_SIZE_USD)
     logger.info("[trade-validator-start] token=%s size_usd=%.2f has_dex=%s", token, size_usd, 1 if dex_summary else 0)
     reasons: list[str] = []
@@ -193,6 +219,20 @@ def validate_trade(
     market_target = "dex" if dex_summary else "unknown"
     ctx = build_pair_context(best_pair, token)
     liq_usd = _to_float((dex_summary or {}).get("liquidity_usd"))
+    market_data_age_sec = _market_data_age_seconds(dex_summary, now_ts)
+
+    market_data_fresh = market_data_age_sec is not None and market_data_age_sec <= TRADE_VALIDATION_MAX_MARKET_DATA_AGE_SEC
+    checks.append(
+        ValidationCheck(
+            "market_data_age_sec",
+            market_data_fresh,
+            None if market_data_age_sec is None else round(market_data_age_sec, 3),
+            TRADE_VALIDATION_MAX_MARKET_DATA_AGE_SEC,
+            None if market_data_fresh else "market_data_stale",
+        )
+    )
+    if not market_data_fresh:
+        reasons.append("market_data_stale")
 
     if ctx is None:
         reasons.extend(["buy_route_missing", "sell_route_missing"])
@@ -273,6 +313,8 @@ def validate_trade(
         token=token,
         policy_name=POLICY_NAME,
         policy_version=POLICY_VERSION,
+        validated_ts=now_ts,
+        quote_expires_ts=now_ts + max(1, int(TRADE_VALIDATION_QUOTE_TTL_SEC)),
         intended_size_usd=size_usd,
         market_target=market_target,
         pair_address=ctx.pair_address if ctx else None,
@@ -280,6 +322,12 @@ def validate_trade(
         reasons=sorted(set(reasons)),
         warnings=sorted(set(warnings)),
         checks=[item.as_dict() for item in checks],
+        market_data={
+            "snapshot_ts": _snapshot_ts(dex_summary),
+            "age_sec": None if market_data_age_sec is None else round(market_data_age_sec, 3),
+            "max_age_sec": TRADE_VALIDATION_MAX_MARKET_DATA_AGE_SEC,
+            "quote_ttl_sec": max(1, int(TRADE_VALIDATION_QUOTE_TTL_SEC)),
+        },
         buy_quote=buy_quote_payload,
         sell_quote=sell_quote_payload,
         risk_summary={
