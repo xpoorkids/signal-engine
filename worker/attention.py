@@ -1,3 +1,125 @@
+"""
+Attention scoring for token-level early signal strength.
+
+Purpose
+-------
+- Computes the attention score consumed by `worker.promote` for candidate,
+  heating-up, and promotion decisions.
+- Aggregates local buyer activity, DexScreener/Birdeye/PumpPortal signals,
+  tracked-wallet overlap, narrative hits, and optional X/Twitter momentum into
+  one bounded score plus human-readable reasons and raw metrics.
+- This file does not decide alert routing on its own; it provides the attention
+  evidence that later gates and promotion rules act on.
+
+Runtime data flow
+-----------------
+Inputs:
+- A normalized `Event` with token and optional metadata in `extra`.
+- Runtime state from `EngineState` and token state (`worker.token_state`),
+  especially recent buyer/burst history.
+- External APIs:
+  - DexScreener orders/boosts
+  - Birdeye trending
+  - PumpPortal websocket trade stream
+  - X signal fetcher when the token has enough other evidence to justify the
+    call
+
+Transformations:
+1. Read local buyer breadth and burst metrics from state.
+2. Add optional external attention features if enabled and available.
+3. Add tracked-wallet, KOL, and narrative signals.
+4. Conditionally query X only when earlier evidence suggests the call is worth
+   the latency/cost.
+5. Apply acceleration boost and anti-wash suppression.
+6. Clamp the final score into `[0.0, 1.0]`.
+
+Outputs:
+- `compute_attention()` returns:
+  - `attention_score`
+  - `reasons`
+  - `metrics`
+- `register_buyer()` updates short-lived token-local rolling windows used by
+  later attention computations.
+
+Key logic
+---------
+- Local breadth and burst are the base of the score:
+  - 5m unique buyers
+  - 15m unique buyers
+  - 60s burst count
+- `register_buyer()` also updates anti-wash and acceleration state:
+  - concentrated repeat buying in 30s can suppress the final score
+  - rapid unique-buyer growth in 10s adds a boost
+- DexScreener boosts contribute when orders/boosts are present.
+- Birdeye and PumpPortal are optional enrichment paths.
+- X is intentionally gated by `should_query_x`; this avoids calling X for every
+  token and keeps the hot path cheaper.
+- Missing external sources are surfaced in `reasons` as
+  `source_unavailable:*`; they do not by themselves force the score to zero.
+
+Failure modes
+-------------
+- External source timeout/failure:
+  - The score falls back to local/stateful features and adds
+    `source_unavailable:*` reasons.
+  - This can lower confidence without fully suppressing a valid token.
+- Missing buyer state:
+  - If upstream ingestion never registered buyers, local breadth/burst terms
+    stay at zero and the token may fail candidate or sniper thresholds.
+- Wash-like traffic:
+  - Heavy concentration from one wallet can reduce the score via the
+    anti-wash multiplier.
+- PumpPortal tracker task not running:
+  - PumpPortal contribution remains zero even if enabled.
+
+Logging and observability
+-------------------------
+Primary trace points:
+- `[burst-weight]`
+- `[anti-wash]`
+- `[acceleration]`
+- `[attention-components]`
+
+How to debug an unexpectedly weak attention score:
+1. Confirm buyers are being registered with `[burst-weight]`.
+2. Inspect `[anti-wash]` and `[acceleration]` for suppression/boost effects.
+3. Check whether `source_unavailable:*` reasons were added.
+4. Compare the returned metrics in `Event.extra["metrics"]` downstream in
+   `worker.promote`.
+
+Dependencies and config
+-----------------------
+Internal dependencies:
+- `worker.token_state`
+- `worker.x_signal`
+- `app.services.state_service`
+
+External dependencies:
+- DexScreener HTTP API
+- Birdeye HTTP API
+- PumpPortal websocket API
+
+Important config inputs:
+- `ENABLE_PUMPORTAL`
+- `ENABLE_BIRDEYE`
+- `ENABLE_X_SIGNAL`
+- `BIRDEYE_API_KEY`
+- `TRACKED_SMART_WALLETS`
+- `KOL_WALLETS`
+- `NARRATIVE_KEYWORDS`
+
+Gotchas
+-------
+- Attention is intentionally composite and non-linear; a token can have strong
+  local flow but still miss attention thresholds if breadth is narrow or wash
+  suppression applies.
+- `register_buyer()` and `compute_attention()` are coupled through shared
+  rolling token state. If ingestion misses buyer registration, the score will
+  understate real market activity.
+- X enrichment is conditional, so absence of X metrics often means the query
+  was never attempted, not that the token had zero discussion.
+"""
+
 import asyncio
 import json
 import time
@@ -76,6 +198,10 @@ def burst_weight_from_sol(sol: float) -> int:
 
 
 def register_buyer(mint: str, buyer: str, sol_spent: float | None = None) -> int:
+    """
+    Update short-window buyer state used by attention, acceleration, and
+    anti-wash scoring.
+    """
     if not mint or not buyer:
         return 1
     sol_val = float(sol_spent or 0.0)
@@ -325,6 +451,8 @@ def _birdeye_trending(token: str) -> Optional[Dict[str, Any]]:
 
 def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
     """
+    Compute the token's composite attention score for downstream routing.
+
     Returns:
       attention_score: float in [0, 1]
       reasons: human-readable list of strings

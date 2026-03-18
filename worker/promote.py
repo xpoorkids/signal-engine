@@ -1,3 +1,218 @@
+"""
+Critical scoring and routing path for the live Signal Engine.
+
+Purpose
+-------
+- `process_event()` is the main decision function that turns a raw `Event` into
+  zero or more higher-level engine events.
+- It sits between ingestion (`worker.helius_listener`, scanner/recheck events)
+  and delivery (`worker.runner`).
+- This module does not publish to Discord directly. It returns derived
+  `Event` objects such as `candidate`, `heating_up`, and `promoted`; the runner
+  owns cooldown checks, delivery attempts, and persistence after confirmed
+  transport success.
+
+Runtime data flow
+-----------------
+Input:
+- `worker.events.Event` from WS/log ingestion, scanner/recheck, or engine
+  scheduled follow-up.
+- Common event types that reach this file:
+  - `token_resolved`
+  - `trade_buy`
+  - `recheck`
+  - early event types such as `early_logs_initialize_mint` and
+    `early_tx_pump_observed`
+
+Transformations:
+1. Token state is updated with `bump_token()`.
+2. Metadata, creator score, buyer registration, attention, DEX enrichment,
+   forensic risk, wallet risk, and elite score are computed.
+3. Hard-fail checks run before candidate/promotion logic:
+   - mint/freeze authority
+   - liquidity/lock/drop checks
+   - risk veto
+   - momentum decay blacklist
+4. Sniper/heating logic runs before candidate emission.
+5. Candidate gating runs only if `ENABLE_ATTENTION_CANDIDATE` is enabled.
+6. Confidence is recomputed from attention/risk/creator/liquidity and then
+   promotion checks run.
+
+Output:
+- Returns `list[Event]`.
+- Possible derived outputs:
+  - original early event only, when token is unresolved
+  - `heating_up`
+  - `candidate`
+  - `promoted`
+  - empty list when the signal is blocked or blacklisted
+
+Key routing and precedence rules
+--------------------------------
+1. Early unresolved events:
+- If the event type starts with `early` and `e.token` is missing, the function
+  mutates confidence/reasons and returns `[e]`.
+- No candidate or promotion path is executed in this branch.
+
+2. Hard-fail path:
+- Authority checks and liquidity safety checks can set `hard_fail`.
+- If `hard_fail` remains true after liquidity bypass handling, the function
+  returns `out` immediately. This blocks candidate, heating_up, and promoted
+  outputs.
+
+3. Sniper/heating precedence:
+- `sniper_conditions_met` is evaluated before candidate gating.
+- When met, a `heating_up` event is appended to `out` immediately with
+  `sniper_route` added to reasons.
+- Candidate gating still runs afterward. Sniper does not bypass candidate
+  evaluation, and candidate failure does not remove the already-appended
+  `heating_up` event.
+- Delivery still depends on `worker.runner` cooldown and heating quality checks.
+
+4. Candidate behavior:
+- Candidate emission is attention-driven and treated as watchlist output, not
+  promotion.
+- `admission_check_candidate()` decides whether the token is even eligible to
+  be considered, based on:
+  - age gate / age bypass
+  - attention minimum
+  - risk veto
+  - DEX gate if a pair exists
+  - token tradeability verification
+  - pump.fun / bonding-curve verification on non-DEX path
+- After gate pass, send eligibility is determined separately by
+  `_candidate_send_eligible()`, rate limits, and progression state.
+- A candidate can be:
+  - fully skipped (`candidate_gate_skip`, `candidate_rate_limited`,
+    `candidate_not_eligible`)
+  - buffered (`candidate_buffered`)
+  - emitted (`candidate_ready`)
+- `candidate_event_extra` is only created inside the candidate-pass branch, so
+  any gate failure prevents a `candidate` event from being returned.
+
+5. Promotion behavior:
+- Promotion is evaluated after confidence is recomputed.
+- Promotion requires all of the following at runtime:
+  - confidence >= policy threshold
+  - confirmed DEX pool (`dex_summary` must exist)
+  - minimum liquidity
+  - minimum 15m buyer count
+  - minimum attention
+  - risk below promoted max
+  - no LP drain
+  - no creator sell flag
+  - two confirmation passes via `update_promo_confirm()`
+  - `evaluate_alert_gate("promoted", dex_summary)` pass
+- If any condition fails, promotion returns early with a recorded diagnostic
+  decision and no `promoted` event is emitted.
+
+Failure modes and live-debug implications
+-----------------------------------------
+- Missing token:
+  - Early events with no token never reach candidate/promotion logic.
+  - Trace via `[promote-skip] reason=token_unresolved`.
+
+- Blacklist / decay:
+  - Momentum collapse inside the decay window sets `blacklist_until` and
+    returns immediately.
+  - Trace via `[momentum-fail]` and later `[blacklist-skip]`.
+
+- Liquidity unknown:
+  - Unknown liquidity normally becomes a hard fail unless the balanced-mode
+    bypass is satisfied (`unique_10s >= 2`, `burst_10s >= 6`, `elite_score >= 8`).
+  - This can silently suppress signals if upstream liquidity enrichment is weak.
+
+- Candidate drop after sniper success:
+  - This is expected. `heating_up` can exist without `candidate`.
+  - Check `[discord-sniper]` first, then candidate logs to see whether the
+    watchlist path was blocked separately.
+
+- Promotion blocked after candidate/heating:
+  - Also expected. Promotion has stricter runtime conditions than candidate.
+  - Inspect `[promotion-block]`, `[promotion-check]`, and `[gate-skip]`.
+
+- Exceptions in diagnostics:
+  - `_record_decision()` is exception-wrapped and logs with
+    `[diagnostics] record_signal_decision_failed ...`.
+  - Failure here should not stop signal routing, but it reduces observability.
+
+Logging and observability
+-------------------------
+Primary trace points emitted here:
+- `[PROMOTE HANDLER CALLED]` and `[promote-enter]`
+- `[token-metadata]`
+- `[creator-score]`
+- `[skip-attention]`
+- `[attention]`, `[attention-metrics]`
+- `[execution]`
+- `[auth-check]`, `[liq-check]`, `[risk-gate]`
+- `[risk-score]`
+- `[liq-unknown-bypass]`
+- `[age-bypass]`
+- `[discord-sniper]` and `[discord-send-attempt]`
+- `[decay-watch]`, `[momentum-fail]`, `[blacklist-skip]`
+- `[candidate-skip]`, `[candidate-warning]`, `[candidate-lifecycle]`,
+  `[candidate-attention]`, `[candidate-progress]`
+- `[recheck-stop]`
+- `[score-adjust]`, `[exec-bonus]`, `[score-components]`, `[score] computed`
+- `[gate-skip] stage=heating_up ...`
+- `[promotion-block]`, `[promotion-check]`, `[promotion-validated]`
+
+How to trace one token end-to-end using logs:
+1. Start with `[promote-enter] token=...`.
+2. Check for early exits:
+   `[blacklist-skip]`, `[risk-gate]`, `[momentum-fail]`, candidate skip, or
+   promotion block.
+3. If sniper behavior is expected, look for `[discord-sniper]`.
+4. If candidate behavior is expected, inspect `[candidate-skip]` or
+   `[candidate-progress]`.
+5. If promotion is expected, inspect `[promotion-check]` and
+   `[promotion-validated]`.
+6. Then move to `worker.runner` for cooldown, delivery, and persistence.
+
+Dependencies and external inputs
+--------------------------------
+Internal dependencies:
+- `worker.helius_listener`
+- `worker.state`, `worker.token_state`
+- `worker.attention`
+- `worker.dex`
+- `worker.forensics`
+- `worker.elite`
+- `worker.execution`
+- `worker.alert_gate`
+- `worker.creator_score`
+- `worker.recheck`
+- `app.services.state_service`
+- `app.services.signal_learning_service`
+
+External dependencies:
+- Helius metadata via `fetch_token_metadata()`
+- DEX data via `dex_enrich_token()`
+
+Important config inputs:
+- engine mode and sniper thresholds
+- attention candidate toggles and rate limit
+- promoted policy thresholds
+- risk veto threshold
+- decay / blacklist timing
+- curve liquidity minimum
+
+Gotchas
+-------
+- `heating_up` can be appended before confidence is recomputed; the event is
+  updated later in-place from final `extra`/confidence before return.
+- Candidate decisions are recorded even when no candidate event is returned.
+  Use decision logs plus returned events together when debugging.
+- Promotion requires a DEX pool. Pump.fun / bonding-curve-only tokens cannot
+  become `promoted` in this file.
+- `candidate_send` is only advisory here. Actual send suppression still happens
+  in `worker.runner`.
+- Some imports from `app.services.state_service` are currently used indirectly
+  or vestigially; the authoritative runtime behavior is the control flow inside
+  `process_event()`, not the import list.
+"""
+
 from typing import Dict, Any
 import logging
 import time
@@ -195,6 +410,13 @@ def _record_decision(
         logger.exception("[diagnostics] record_signal_decision_failed token=%s decision=%s", e.token, decision)
 
 async def process_event(state: EngineState, e: Event) -> list[Event]:
+    """
+    Enrich, score, gate, and route one event into zero or more downstream
+    engine events.
+
+    This function is the main runtime decision boundary between ingestion and
+    delivery. See the module docstring for the full control-flow map.
+    """
     out: list[Event] = []
     logger.info("[PROMOTE HANDLER CALLED] type=%s token=%s", e.type, e.token)
     logger.info("[promote-enter] token=%s", e.token)

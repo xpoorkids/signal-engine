@@ -1,3 +1,122 @@
+"""
+Live ingestion path for on-chain events entering the Signal Engine.
+
+Purpose
+-------
+- Owns low-latency event detection from Helius websocket log subscriptions and
+  RPC transaction lookups.
+- Converts noisy Solana transaction/log data into normalized `worker.events.Event`
+  inputs that the worker queue can process.
+- This is the earliest runtime boundary in the worker pipeline:
+  Helius WS/logs -> transaction resolution/parsing -> `Event` emission ->
+  `worker.runner` queue -> `worker.promote`.
+
+Runtime data flow
+-----------------
+Inputs:
+- Helius websocket notifications for program logs.
+- Helius JSON-RPC `getTransaction` responses for signatures that need full
+  resolution.
+- Program-level inputs are primarily Pump.fun and Raydium-oriented via the
+  configured program ids.
+
+Transformations:
+1. WS notifications are screened for swap/buy-like activity using log text.
+2. Matching signatures are resolved via RPC into parsed transaction payloads.
+3. Mints are inferred from:
+   - new post-token-balance mints
+   - inner instruction `initializeMint`
+   - post-token-balance trade deltas
+4. Buyers are inferred from token balance deltas and first-signer fallbacks.
+5. The listener emits normalized `Event` objects such as:
+   - unresolved early observations
+   - `token_resolved`
+   - `trade_buy`
+   depending on what the transaction parser can prove.
+
+Outputs:
+- Asynchronous calls into the supplied `emit_event` callback.
+- Emitted events are the source material consumed later by
+  `worker.runner.event_loop()` and then routed by `worker.promote.process_event()`.
+
+Key logic
+---------
+- Log filtering is intentionally broad and biased toward recall:
+  `_is_swap_log()` and `_is_buy_log()` match generic `buy`, `swap`, `raydium`,
+  and `pump` log patterns before spending RPC work on the signature.
+- Signature-level transaction fetch is retried in `fetch_tx_with_retry()`
+  because Helius can surface logs before the parsed transaction is available.
+- Mint detection prefers concrete transaction state deltas over string parsing:
+  `extract_new_mints_from_token_balances()` and
+  `extract_mint_from_inner_instructions()` are the main resolution paths.
+- Buyer detection is based on positive token balance deltas by `(owner, mint)`,
+  not on a generic sender/receiver heuristic.
+- Excluded mints (`WSOL`, `USDC`) are removed from trade-hit output to avoid
+  treating quote legs as candidate tokens.
+
+Failure modes
+-------------
+- RPC unavailable or misconfigured:
+  - `_resolve_*_from_sig()` returns `None` and the listener can only emit a
+    weaker/unresolved signal, or skip follow-up detection entirely.
+  - Trace with `[rpc] missing_sig_or_rpc_url`, status errors, or
+    `getTransaction result=null`.
+- Parsed transaction lag:
+  - `fetch_tx_with_retry()` can fail after multiple attempts and log
+    `[tx-missing-after-retry]`.
+  - This can delay or drop mint resolution for otherwise valid early signals.
+- Over-broad log matching:
+  - The initial log filter intentionally catches some noise; later transaction
+    parsing is the real correctness boundary.
+- Malformed transaction shapes:
+  - The parser is defensive and swallows many per-field exceptions, which keeps
+    ingestion alive but can downgrade a signal from resolved to unresolved.
+
+Logging and observability
+-------------------------
+Primary trace points:
+- `[rpc] ...`
+- `[tx-fetch] sig=... attempt=... ok=...`
+- `[tx-missing-after-retry] sig=...`
+
+How to trace ingestion for one signature/token:
+1. Start from the signature seen in downstream logs.
+2. Check for `[tx-fetch]` retries and final success/failure.
+3. If no resolved token appears downstream, inspect whether mint extraction or
+   buyer delta detection could not prove the token from the transaction shape.
+4. Then continue in `worker.runner` and `worker.promote`.
+
+Dependencies and config
+-----------------------
+Internal dependencies:
+- `worker.events.Event`
+- `worker.config`
+
+External dependencies:
+- Helius websocket endpoint
+- Helius RPC endpoint
+- `requests`
+- `websockets`
+
+Important config inputs:
+- `ENABLE_LOGS_SUB`
+- `ENABLE_LOGS_TX_LOOKUP`
+- `HELIUS_API_KEY`
+- `HELIUS_WS_URL`
+- `HELIUS_RPC_URL`
+- `PUMPFUN_PROGRAM_ID`
+- `RAYDIUM_AMM_PROGRAM_ID`
+- `MIN_BUY_SOL_FOR_ATTENTION_SNIPER`
+
+Gotchas
+-------
+- This module is recall-oriented. It is expected to emit early/unresolved
+  observations that later get filtered by `worker.promote`.
+- Signature resolution is network-dependent and can race transaction indexing.
+- Program id lists include helper/token programs so transaction parsing sees the
+  full mint-init path, not just the top-level Pump.fun program.
+"""
+
 import os
 import json
 import asyncio
@@ -406,6 +525,10 @@ def _resolve_tx_from_sig(sig: str) -> Dict[str, Any] | None:
 
 
 def fetch_tx_with_retry(signature: str, max_attempts: int = 8, delay: float = 0.35) -> Optional[Dict[str, Any]]:
+    """
+    Resolve a parsed transaction with bounded retries because log notifications
+    can arrive before Helius RPC serves the finalized transaction payload.
+    """
     for attempt in range(1, max_attempts + 1):
         try:
             tx = _resolve_tx_from_sig(signature)
@@ -424,6 +547,13 @@ def fetch_tx_with_retry(signature: str, max_attempts: int = 8, delay: float = 0.
 
 
 class LogSwapProcessor:
+    """
+    Converts Helius log notifications into trade-oriented follow-up events.
+
+    This class is intentionally permissive at the log-pattern stage and relies
+    on transaction balance deltas for the final mint/buyer inference.
+    """
+
     def __init__(self, emit_event) -> None:
         self.emit_event = emit_event
 
@@ -501,6 +631,10 @@ class LogSwapProcessor:
         return hits
 
     async def handle_logs_notification(self, notification: dict) -> None:
+        """
+        Process one websocket log notification and emit downstream events only
+        after swap-like logs and transaction-derived token evidence are found.
+        """
         try:
             value = (
                 notification.get("params", {})

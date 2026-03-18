@@ -1,3 +1,82 @@
+"""
+DEX enrichment and pair selection for token routing decisions.
+
+Purpose
+-------
+- Fetches DexScreener data for a token and reduces multi-pair responses into a
+  single summary used by `worker.promote`.
+- Supplies the main DEX-backed market context for:
+  - candidate admission on the DEX lifecycle
+  - promoted eligibility
+  - Discord link selection and market snapshot fields
+
+Runtime data flow
+-----------------
+Inputs:
+- Token mint address.
+- DexScreener HTTP response from `/dex/tokens/{token}`.
+
+Transformations:
+1. `dex_enrich_token()` fetches the raw DexScreener payload.
+2. `select_best_pair()` filters to Solana pairs that actually reference the
+   token and chooses the pair with the highest USD liquidity.
+3. `summarize_pair()` normalizes the selected pair into a compact structure
+   with liquidity, volume, tx counts, price change, age, FDV/market cap, and
+   social/website links.
+
+Outputs:
+- Raw DEX payload attached to `Event.extra["dex"]`.
+- Normalized pair summary attached to `Event.extra["dex_summary"]` by
+  `worker.promote`.
+
+Key logic
+---------
+- Pair selection is liquidity-first. The highest-liquidity Solana pair wins.
+- Pair matching accepts the token as either base or quote token, which matters
+  for quote-token-oriented pair layouts.
+- `dex_enrich_token()` marks `ok=True` only when DexScreener returns at least
+  one pair; otherwise downstream code should treat the token as non-DEX or not
+  yet listed.
+- Age is derived from `pairCreatedAt` at read time, so it reflects current wall
+  clock rather than a persisted snapshot.
+
+Failure modes
+-------------
+- DexScreener unavailable or timeout:
+  - `dex_enrich_token()` returns `{"ok": False}`.
+  - Downstream candidate logic may fall back to the bonding-curve lifecycle.
+- Non-Solana or malformed pairs:
+  - `select_best_pair()` ignores them.
+- Pair exists but summary fields are sparse:
+  - `summarize_pair()` returns partial values; downstream gates may then fail on
+    missing age/liquidity/volume conditions.
+
+Logging and observability
+-------------------------
+- This module does not log directly.
+- Operational visibility appears later in `worker.promote` via:
+  - `[gate-skip]`
+  - `[promotion-block]`
+  - Discord market snapshot fields derived from `dex_summary`
+
+Dependencies and config
+-----------------------
+External dependencies:
+- DexScreener HTTP API
+- `requests`
+
+Important config inputs:
+- `DEX_BASE`
+
+Gotchas
+-------
+- The "best pair" is not necessarily the newest or most relevant socially; it
+  is simply the highest-liquidity matching Solana pair.
+- Returning `{"ok": False}` does not distinguish between "not listed yet" and
+  "DexScreener request failed". Downstream logic must infer lifecycle from the
+  broader context.
+"""
+
 import os
 import time
 from typing import Any, Optional, Dict
@@ -9,6 +88,10 @@ DEX_BASE = os.getenv("DEX_BASE", "https://api.dexscreener.com/latest").rstrip("/
 
 
 async def dex_enrich_token(token: str) -> dict:
+    """
+    Fetch the raw DexScreener token payload and mark whether any pairs were
+    present.
+    """
     try:
         r = requests.get(f"{DEX_BASE}/dex/tokens/{token}", timeout=8)
         if r.status_code == 200:
@@ -34,6 +117,9 @@ def _pair_matches_token(pair: Dict[str, Any], token: str) -> bool:
 
 
 def select_best_pair(dex_data: Dict[str, Any], token: str) -> Optional[Dict[str, Any]]:
+    """
+    Choose the highest-liquidity Solana pair that actually references the token.
+    """
     pairs = dex_data.get("pairs")
     if not isinstance(pairs, list) or not pairs:
         return None
@@ -59,6 +145,10 @@ def select_best_pair(dex_data: Dict[str, Any], token: str) -> Optional[Dict[str,
 
 
 def summarize_pair(pair: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize one DexScreener pair into the compact summary consumed by routing,
+    gating, and Discord rendering.
+    """
     now_ms = time.time() * 1000
     created = pair.get("pairCreatedAt")
     age_minutes = None

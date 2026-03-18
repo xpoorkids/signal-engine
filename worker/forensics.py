@@ -1,3 +1,96 @@
+"""
+Risk aggregation layer for promotion and candidate veto logic.
+
+Purpose
+-------
+- Builds the runtime risk view used by `worker.promote` to veto or downgrade
+  tokens before candidate or promoted alerts.
+- Combines live state-derived risk features with structural token/liquidity
+  flags and delegates the weighted scoring to
+  `app.services.signal_metrics.compute_risk_score()`.
+- This module does not own threshold policy; it produces the risk score,
+  reasons, and flags that downstream routing evaluates.
+
+Runtime data flow
+-----------------
+Inputs:
+- Current `Event`
+- `EngineState` methods for:
+  - wallet clustering
+  - liquidity stability
+  - top holder concentration
+  - bot-like trade cadence
+- Optional structural/risk inputs from other enrichers:
+  - wallet risk payload
+  - mint authority
+  - freeze authority
+  - liquidity USD
+  - liquidity locked
+  - liquidity drop spike
+
+Transformations:
+1. Probe state for concentration, liquidity, and cadence features.
+2. Convert those observations into coarse `risk_flags`.
+3. Delegate numeric scoring and reason generation to
+   `compute_risk_score()`.
+4. Apply an extra penalty and explicit reason when liquidity is observed as
+   unstable over the local state window.
+5. Return both the numeric risk and the raw metric payload for downstream
+   diagnostics.
+
+Outputs:
+- `risk_score`
+- `risk_reasons`
+- `risk_flags`
+- full `risk_metric` payload from `compute_risk_score()`
+
+Key logic
+---------
+- This module is partly state-derived and partly structural:
+  state history can raise risk even when token metadata looks acceptable.
+- `liquidity_unstable` is handled twice intentionally:
+  - as a boolean operational flag
+  - as an extra additive penalty on top of `compute_risk_score()`
+- If no usable inputs are available, `compute_risk_score()` returns
+  `status="insufficient_data"` and this module returns `risk_score=None`.
+- `risk_flags` is broader than the strict numeric reasons; it is meant for
+  downstream diagnostics and UI grouping as much as routing.
+
+Failure modes
+-------------
+- Missing state methods or sparse state:
+  - Exceptions are swallowed and the corresponding input is treated as absent.
+  - This reduces risk visibility and can yield `risk_score=None`.
+- Incomplete upstream enrichment:
+  - Missing authority/liquidity inputs lower the quality of the computed risk.
+- Risk underestimation:
+  - If both state-derived signals and structural inputs are absent, the system
+    falls back to downstream confidence logic using a neutral risk fallback.
+
+Logging and observability
+-------------------------
+- This module does not log directly.
+- Downstream observability appears in `worker.promote`, especially:
+  - `[risk-gate]`
+  - `[risk-score]`
+  - confidence component logs using the returned risk score
+- For deep debugging, inspect the returned `risk_metric` payload because it
+  includes `status`, `reasons`, and `inputs_used`.
+
+Dependencies and config
+-----------------------
+Internal dependencies:
+- `app.services.signal_metrics.compute_risk_score`
+
+Gotchas
+-------
+- `risk_score=None` means "insufficient data", not "safe".
+- The numeric score is only one output; `risk_flags` can still contain useful
+  diagnostics even when the score is missing.
+- Liquidity instability has custom handling here, so changes to
+  `compute_risk_score()` alone do not fully describe runtime risk behavior.
+"""
+
 from typing import Tuple, List, Dict, Any
 
 from app.services.signal_metrics import compute_risk_score
@@ -15,8 +108,11 @@ def analyze_risk(
     liq_drop_spike: bool | None = None,
 ) -> Tuple[float | None, List[str], Dict[str, bool], dict[str, Any]]:
     """
+    Aggregate stateful and structural risk inputs into the score/reasons used by
+    downstream candidate and promotion gates.
+
     Returns:
-      risk_score: float in [0, 1]
+      risk_score: float in [0, 1] or `None` when inputs are insufficient
       risk_reasons: human-readable list of strings
       risk_flags: dictionary of boolean clusters
     """

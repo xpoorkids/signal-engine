@@ -1,3 +1,204 @@
+"""
+Worker execution boundary for the live Signal Engine.
+
+Purpose
+-------
+- Owns runtime orchestration after ingestion and promotion logic.
+- Consumes raw events from the shared asyncio queue, passes them through
+  `worker.promote.process_event()`, applies delivery-specific cooldown and
+  quality checks, and performs transport plus post-delivery persistence.
+- This file is the bridge between:
+  - ingestion (`worker.helius_listener`, DEX scanner thread)
+  - routing/scoring (`worker.promote`)
+  - delivery (`worker.discord`)
+  - learning/state persistence (`app.services.signal_learning_service`,
+    `app.services.state_service`)
+
+What this file does at runtime
+------------------------------
+1. Starts long-running worker tasks:
+   - event loop
+   - heartbeat loop
+   - learning snapshot worker
+   - daily report worker
+   - ops digest worker
+   - rollout verification worker
+   - Helius listeners, if enabled
+   - DEX scanner thread, if enabled
+2. Receives events from the queue.
+3. Deduplicates source events by `signature:type:token`.
+4. Calls `process_event()` to derive `candidate`, `heating_up`, or `promoted`.
+5. Applies event-type-specific cooldown and send suppression.
+6. Sends Discord/webhook messages.
+7. Persists signal history only after confirmed transport success.
+
+Data flow
+---------
+Input:
+- `Event` objects pushed into the queue by:
+  - `worker.helius_listener.start_helius_listeners()`
+  - `worker.scanner.run()` through the scanner path
+  - scheduled recheck tasks created downstream
+
+Transformations:
+- Dedupe is performed first with `is_sig_new()`.
+- Routing/enrichment/scoring is delegated to `worker.promote.process_event()`.
+- Delivery filtering happens here, not in `worker.promote`:
+  - cooldown via `can_alert()`
+  - `candidate_send` suppression
+  - additional heating-up quality check via `_should_send_heating_up()`
+
+Output:
+- Discord delivery attempts through:
+  - `send_discord()` for `heating_up` and `promoted`
+  - `send_candidate_discord()` for `candidate`
+- Learning/state persistence through:
+  - `record_signal_event()`
+  - `update_candidate_message_id()`
+  - `mark_candidate_alert_sent()`
+  - `record_wallet_signal()`
+
+Key decision points
+-------------------
+1. Queue dedupe:
+- Dedupe key is `"{signature}:{type}:{token}"` when a signature exists.
+- If the dedupe key was seen within `EARLY_DEDUPE_TTL_SEC`, the event is
+  dropped before `process_event()` runs.
+- Events without signatures are never deduped here.
+
+2. Derived event handling:
+- `process_event()` can return multiple derived events for one source event.
+- `heating_up` and `promoted` share the non-candidate delivery path.
+- `candidate` uses a separate create/edit transport path.
+
+3. Heating-up delivery gate:
+- Even if `worker.promote` emits `heating_up`, this file can still suppress it.
+- `_should_send_heating_up()` requires one of:
+  - at least one KOL hit
+  - at least two tracked wallet hits
+  - at least one DexScreener boost
+  - DEX lifecycle with liquidity >= 15000
+  - DEX lifecycle with at least 10 X mentions and 10 authors
+- If this check fails, the event is dropped here and never sent.
+
+4. Candidate delivery gate:
+- Candidates can be suppressed here even after `worker.promote` emitted them.
+- Suppression conditions:
+  - candidate cooldown (`candidate:{token}`)
+  - `candidate_send == False`
+- Candidate edit behavior:
+  - if `candidate_edit` is true and `candidate_message_id` exists, runner sends
+    a Discord PATCH instead of a create
+  - otherwise it sends a create and expects a Discord message id back
+
+5. Persistence after delivery:
+- This file now persists emitted signals only after successful transport.
+- `send_discord()` returns `bool`.
+- `send_candidate_discord()` returns `DeliveryResult(success, message_id)`.
+- If delivery fails:
+  - the signal is not recorded in learning storage
+  - candidate message state is not advanced
+  - a warning log is emitted via `[dispatch-skip-persist]`
+
+Failure modes and live-debug implications
+-----------------------------------------
+- Silent-looking suppression due to cooldown:
+  - `can_alert()` updates in-memory cooldown state only.
+  - Restarts reset this cooldown memory.
+  - Trace candidate suppression with `[candidate-cooldown-skip]`.
+
+- Event dropped before routing:
+  - Dedupe can block the event before `process_event()` is called.
+  - Trace with `[event-loop-skip] reason=dedupe ...`.
+
+- Promotion/heating emitted by promote but not delivered:
+  - Transport failure now prevents persistence.
+  - Trace transport with `[discord] send attempt`, `[discord-http]`,
+    `[discord-http-error]`, and then `[dispatch-skip-persist]`.
+
+- Candidate emitted but not persisted:
+  - This happens on failed candidate transport by design.
+  - Check `[discord] candidate send attempt`, candidate send status, and
+    `[dispatch-skip-persist]`.
+
+- Worker fatal crash:
+  - `main()` catches the top-level exception, logs `[fatal] worker crashed:`,
+    and then intentionally holds the process open in an infinite loop.
+  - This prevents abrupt process exit but does not self-heal the worker.
+
+- Background task failure visibility:
+  - `asyncio.gather(..., return_exceptions=True)` means failed tasks do not
+    automatically crash the process.
+  - This is operationally important: a listener or background worker can stop
+    while the process remains alive.
+
+Logging and observability
+-------------------------
+Primary trace points emitted here:
+- `[event-loop] recv type=... token=... sig=...`
+- `[event-loop-skip] reason=dedupe ...`
+- `[candidate-cooldown-skip]`
+- `[heating-up-skip]`
+- `[dispatch-skip-persist]`
+- `[heartbeat] worker alive`
+- `[startup] worker db_path=...`
+- `[startup] worker learning_write_mode=...`
+- `[fatal] worker crashed: ...`
+- `[worker] crashed but holding process open`
+
+Transport logs emitted in downstream dependency `worker.discord`:
+- `[discord] send attempt ...`
+- `[discord-http] status=...`
+- `[discord-http-error] ...`
+- `[discord] candidate send attempt ...`
+- `[discord] candidate send ok/failed ...`
+
+How to trace an event end-to-end from this file
+-----------------------------------------------
+1. Find `[event-loop] recv ...`.
+2. Check whether dedupe dropped it via `[event-loop-skip]`.
+3. Move into `worker.promote` logs for routing and gating.
+4. Return here and inspect:
+   - cooldown skip
+   - heating-up skip
+   - candidate send/edit path
+5. Inspect `worker.discord` logs for transport result.
+6. Confirm persistence behavior with or without `[dispatch-skip-persist]`.
+
+Dependencies and config
+-----------------------
+Internal dependencies:
+- `worker.promote`
+- `worker.state`
+- `worker.discord`
+- `worker.helius_listener`
+- `worker.scanner`
+- `app.services.state_service`
+- `app.services.signal_learning_service`
+- `app.services.tuning_service`
+
+Important config inputs:
+- `ENABLE_WS`
+- `ENABLE_DEX`
+- `EARLY_DEDUPE_TTL_SEC`
+- `ALERT_COOLDOWN_SEC`
+- `HEATING_UP_ALERT_COOLDOWN_SEC`
+- `CANDIDATE_ALERT_COOLDOWN_SEC`
+- DB path and learning write env vars read during startup
+
+Gotchas
+-------
+- Cooldown state is in-memory (`EngineState.cooldown`), not shared durable
+  state. Restarting the worker resets cooldowns.
+- Signature dedupe is also in-memory and restart-sensitive.
+- `candidate_send` comes from `worker.promote`; this file treats it as an
+  authoritative suppression flag.
+- `record_wallet_signal()` runs before non-candidate transport. Wallet signal
+  tracking can therefore advance even if Discord delivery fails.
+- Because `asyncio.gather(..., return_exceptions=True)` is used, "process alive"
+  does not guarantee every background task is healthy.
+"""
+
 import asyncio
 import os
 import time
@@ -84,6 +285,10 @@ def _persist_candidate_delivery(de: Event, *, delivered: bool, message_id: str |
 
 
 async def event_loop(q: asyncio.Queue) -> None:
+    """
+    Consume queued events, route them through `worker.promote`, and execute the
+    delivery/persistence contract for derived events.
+    """
     state = EngineState()
     state_init()
     learning_init()
@@ -145,6 +350,10 @@ async def heartbeat_loop() -> None:
 
 
 async def run_worker() -> None:
+    """
+    Start the full worker runtime: queue consumer, background reporting tasks,
+    and live event producers.
+    """
     print(f"[worker] deploy_sha={os.getenv('RENDER_GIT_COMMIT', 'unknown')}", flush=True)
     db_path = resolve_engine_db_path()
     learning_base_url = os.getenv("SIGNAL_ENGINE_LEARNING_WRITE_BASE_URL", "").strip() or os.getenv("SIGNAL_ENGINE_PUBLIC_BASE_URL", "").strip()

@@ -1,3 +1,92 @@
+"""
+Admission and market-structure gate for candidate and promoted alerts.
+
+Purpose
+-------
+- Centralizes the market-quality and tradeability checks that decide whether a
+  token is eligible to become a `candidate` or `promoted` signal.
+- Used by `worker.promote` after scoring/enrichment, but before delivery.
+- Separates "interesting attention" from "safe enough to alert."
+
+Runtime data flow
+-----------------
+Inputs:
+- Runtime stage (`candidate` or `promoted` in current usage).
+- DEX summary metrics when a live pool exists.
+- Candidate extras containing age/bonding-curve metrics.
+- Attention score, risk score, and tradeability verification flags.
+
+Transformations:
+- `evaluate_alert_gate()` applies age-tiered DEX market-quality thresholds.
+- `admission_check_candidate()` layers candidate-specific checks on top:
+  - age gate and optional age bypass
+  - minimum attention
+  - risk veto
+  - token tradeability verification
+  - DEX gate when a pair exists
+  - bonding-curve verification and curve-liquidity checks otherwise
+
+Outputs:
+- Boolean pass/fail plus machine-readable rejection reasons.
+- Lifecycle classification of `dex` vs `bonding_curve` for candidate routing.
+
+Key logic
+---------
+- DEX thresholds are adaptive by token age:
+  - `<2m` is strictest
+  - `2m-10m` is moderate
+  - `>=10m` is more permissive
+- A missing/zero DEX age fails the DEX gate with `age_missing`.
+- Candidate gating is stricter than raw attention:
+  - attention alone cannot bypass `risk_veto`, `token_unverified`, or missing
+    bonding-curve verification on non-DEX paths.
+- Non-DEX candidates are treated as bonding-curve lifecycle tokens and require
+  explicit curve verification; fungible metadata alone is not enough.
+
+Failure modes
+-------------
+- Missing DEX summary:
+  - `evaluate_alert_gate()` returns pass when no DEX summary is supplied.
+  - For candidates this shifts control to the bonding-curve branch.
+- Bad or stale `extra["metrics"]` age:
+  - Candidate admission can fail on `age<...` even when the token is otherwise
+    active.
+- Missing tradeability proof:
+  - Candidate admission fails with `token_unverified`.
+- Weak bonding-curve evidence:
+  - Candidate admission fails with `bonding_curve_unverified`,
+    `bonding_curve_missing`, or low `curve_liq`.
+
+Logging and observability
+-------------------------
+- This module returns reasons rather than logging directly.
+- The authoritative logs appear in `worker.promote`, especially:
+  - `[candidate-skip]`
+  - `[gate-skip]`
+  - `[promotion-block]`
+- When debugging, inspect the exact reason strings produced here because they
+  are propagated into those downstream diagnostics.
+
+Dependencies and config
+-----------------------
+Important config inputs:
+- `ENABLE_ALERT_GATE`
+- `RISK_VETO_THRESHOLD`
+- `CAND_MIN_TOKEN_AGE_SEC`
+- `CAND_MIN_CURVE_LIQ_USD`
+- `EARLY_ATTENTION_MIN`
+
+Gotchas
+-------
+- `evaluate_alert_gate()` returning `True` with no `dex_summary` does not mean
+  the token is broadly verified; it only means DEX-specific gating was not
+  applicable.
+- Candidate lifecycle is inferred as `dex` when `dex_summary` exists and
+  `bonding_curve` otherwise. Downstream routing depends on that distinction.
+- Reason strings are part of live debugging; changing them has operational
+  impact because dashboards/log triage often key off these values.
+"""
+
 from __future__ import annotations
 
 from typing import Dict, Any, Tuple, List, Optional
@@ -63,6 +152,10 @@ def evaluate_alert_gate(
     stage: str,
     dex_summary: Optional[Dict[str, Any]],
 ) -> Tuple[bool, List[str]]:
+    """
+    Apply age-tiered DEX market-structure thresholds for alert stages that
+    require a real pool and basic market quality.
+    """
     if not ENABLE_ALERT_GATE:
         return True, []
 
@@ -139,6 +232,10 @@ def admission_check_candidate(
     token_is_tradeable: bool = True,
     bonding_curve_verified: bool = False,
 ) -> tuple[bool, List[str], str]:
+    """
+    Decide whether a token is eligible to emit a watchlist/candidate signal and
+    identify whether it is on the DEX or bonding-curve lifecycle path.
+    """
     if not ENABLE_ALERT_GATE:
         return True, [], "unknown"
 
