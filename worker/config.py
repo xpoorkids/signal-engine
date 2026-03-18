@@ -1,4 +1,5 @@
 import os
+from typing import Final
 
 from dotenv import load_dotenv
 
@@ -13,6 +14,24 @@ def env_bool(name: str, default: str = "0") -> bool:
 def env_csv(name: str, default: str = "") -> list[str]:
     raw = os.getenv(name, default)
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _normalize_execution_mode(raw: str) -> str:
+    mode = (raw or "").strip().lower()
+    if mode in {"validate_only", "shadow", "live", "off"}:
+        return mode
+    return ""
+
+
+def _derive_execution_mode() -> str:
+    explicit = _normalize_execution_mode(os.getenv("EXECUTION_MODE", ""))
+    if explicit:
+        return explicit
+    if env_bool("ENABLE_SHADOW_EXECUTION", "1"):
+        return "shadow"
+    if env_bool("ENABLE_PRETRADE_VALIDATION", "1"):
+        return "validate_only"
+    return "off"
 
 
 DRY_RUN = env_bool("DRY_RUN", "1")
@@ -84,6 +103,11 @@ SHADOW_EXECUTION_POLL_SECONDS = int(os.getenv("SHADOW_EXECUTION_POLL_SECONDS", "
 SHADOW_EXECUTION_MAX_HOLD_MINUTES = int(os.getenv("SHADOW_EXECUTION_MAX_HOLD_MINUTES", "60"))
 SHADOW_EXECUTION_TAKE_PROFIT_PCT = float(os.getenv("SHADOW_EXECUTION_TAKE_PROFIT_PCT", "25"))
 SHADOW_EXECUTION_STOP_LOSS_PCT = float(os.getenv("SHADOW_EXECUTION_STOP_LOSS_PCT", "12"))
+
+EXECUTION_MODE: Final[str] = _derive_execution_mode()
+TRADE_VALIDATION_ENABLED: Final[bool] = EXECUTION_MODE in {"validate_only", "shadow", "live"}
+SHADOW_EXECUTION_ENABLED: Final[bool] = EXECUTION_MODE == "shadow"
+LIVE_EXECUTION_REQUESTED: Final[bool] = EXECUTION_MODE == "live"
 
 ENGINE_MODE = os.getenv("ENGINE_MODE", "balanced")  # balanced | sniper | long_term
 

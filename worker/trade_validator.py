@@ -72,7 +72,7 @@ class ValidationCheck:
 
 
 @dataclass(frozen=True)
-class TradeValidationResult:
+class ValidationResult:
     approved: bool
     token: str
     policy_name: str
@@ -90,6 +90,10 @@ class TradeValidationResult:
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# Backward-compatible alias while the integration migrates to the shorter name.
+TradeValidationResult = ValidationResult
 
 
 def build_pair_context(best_pair: dict[str, Any] | None, token: str) -> PairContext | None:
@@ -182,6 +186,7 @@ def validate_trade(
     intended_size_usd: float | None = None,
 ) -> dict[str, Any]:
     size_usd = float(intended_size_usd or TRADE_VALIDATION_SIZE_USD)
+    logger.info("[trade-validator-start] token=%s size_usd=%.2f has_dex=%s", token, size_usd, 1 if dex_summary else 0)
     reasons: list[str] = []
     warnings: list[str] = []
     checks: list[ValidationCheck] = []
@@ -263,7 +268,7 @@ def validate_trade(
             sell_quote_payload = sell_quote.as_dict()
         buy_quote_payload = buy_quote.as_dict()
 
-    result = TradeValidationResult(
+    result = ValidationResult(
         approved=len(reasons) == 0,
         token=token,
         policy_name=POLICY_NAME,
@@ -287,7 +292,7 @@ def validate_trade(
         },
     ).as_dict()
     logger.info(
-        "[trade-validator] token=%s approved=%s size_usd=%.2f pair=%s reasons=%s warnings=%s",
+        "[trade-validator-complete] token=%s approved=%s size_usd=%.2f pair=%s reasons=%s warnings=%s",
         token,
         1 if result["approved"] else 0,
         size_usd,
@@ -295,4 +300,6 @@ def validate_trade(
         result["reasons"],
         result["warnings"],
     )
+    if not result["approved"]:
+        logger.warning("[trade-validator-rejected] token=%s reasons=%s", token, result["reasons"])
     return result

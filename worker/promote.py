@@ -226,8 +226,8 @@ from worker.config import (
     ENABLE_FORENSICS,
     ENABLE_ATTENTION,
     ENABLE_EXECUTION,
-    ENABLE_PRETRADE_VALIDATION,
     ENABLE_RISK_VETO,
+    TRADE_VALIDATION_ENABLED,
     ENABLE_ATTENTION_BONUS,
     ENABLE_ATTENTION_CANDIDATE,
     RISK_VETO_THRESHOLD,
@@ -785,7 +785,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             top_holder_ratio = float(state.top_holder_ratio(e.token))
         except Exception:
             top_holder_ratio = None
-        if ENABLE_PRETRADE_VALIDATION:
+        if TRADE_VALIDATION_ENABLED:
             try:
                 trade_validation = validate_trade(
                     token=e.token,

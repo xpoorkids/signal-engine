@@ -95,6 +95,7 @@ def test_refresh_open_position_closes_take_profit(tmp_path, monkeypatch):
 
     positions = ses._fetch_open_positions(limit=10)
     assert len(positions) == 1
+    assert positions[0].token == "token-1"
     asyncio.run(ses.refresh_open_position(positions[0]))
 
     with ses._connect() as c:
