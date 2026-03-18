@@ -22,15 +22,17 @@ from worker.config import (
     SHADOW_EXECUTION_FIXED_ENTRY_COST_USD,
     SHADOW_EXECUTION_FIXED_EXIT_COST_USD,
 )
+from worker.execution_lifecycle import (
+    STATE_CLOSED,
+    STATE_ENTRY_RECORDED,
+    STATE_MONITOR_ERROR,
+    plan_shadow_monitor_transition,
+)
 
 
 logger = logging.getLogger(__name__)
 DB_PATH = resolve_engine_db_path()
 _SCHEMA_READY = False
-STATE_ENTRY_RECORDED = "entry_recorded"
-STATE_OPEN = "open"
-STATE_EXIT_TRIGGERED = "exit_triggered"
-STATE_CLOSED = "closed"
 
 
 @dataclass(frozen=True)
@@ -160,19 +162,6 @@ def _ensure_column(c: sqlite3.Connection, table: str, column: str, definition: s
         c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
-def _transition_execution_state(current_state: str | None, *, exit_reason: str | None) -> tuple[str, list[str]]:
-    current = str(current_state or STATE_ENTRY_RECORDED)
-    chain = [current]
-    if exit_reason:
-        if current != STATE_EXIT_TRIGGERED:
-            chain.append(STATE_EXIT_TRIGGERED)
-        chain.append(STATE_CLOSED)
-        return STATE_CLOSED, chain
-    if current != STATE_OPEN:
-        chain.append(STATE_OPEN)
-    return STATE_OPEN, chain
-
-
 def _calculate_entry_fee_usd(intended_size_usd: float) -> float:
     return round((max(0.0, intended_size_usd) * (_entry_fee_bps() / 10000.0)) + _fixed_entry_cost_usd(), 6)
 
@@ -255,6 +244,20 @@ def init() -> None:
             )
             """
         )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS shadow_execution_transitions (
+                transition_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                position_id TEXT NOT NULL,
+                observed_ts INTEGER NOT NULL,
+                from_state TEXT NOT NULL,
+                to_state TEXT NOT NULL,
+                transition_reason TEXT NOT NULL,
+                terminal INTEGER NOT NULL DEFAULT 0,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
         _ensure_column(c, "shadow_positions", "execution_state", "TEXT NOT NULL DEFAULT 'entry_recorded'")
         _ensure_column(c, "shadow_positions", "entry_fee_usd", "REAL NOT NULL DEFAULT 0")
         _ensure_column(c, "shadow_positions", "latest_net_exit_value_usd", "REAL")
@@ -269,6 +272,7 @@ def init() -> None:
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_shadow_positions_signal ON shadow_positions(signal_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_shadow_positions_status ON shadow_positions(status, updated_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_shadow_marks_position ON shadow_position_marks(position_id, observed_ts)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_shadow_transitions_position ON shadow_execution_transitions(position_id, observed_ts)")
     _SCHEMA_READY = True
 
 
@@ -528,6 +532,32 @@ def _write_mark(
         )
 
 
+def _record_transitions(*, position_id: str, observed_ts: int, plan: dict[str, Any], payload: dict[str, Any]) -> None:
+    transitions = plan.get("transitions") if isinstance(plan, dict) else None
+    if not isinstance(transitions, list) or not transitions:
+        return
+    with _connect() as c:
+        for item in transitions:
+            if not isinstance(item, dict):
+                continue
+            c.execute(
+                """
+                INSERT INTO shadow_execution_transitions (
+                    position_id, observed_ts, from_state, to_state, transition_reason, terminal, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    position_id,
+                    observed_ts,
+                    str(item.get("from_state") or ""),
+                    str(item.get("to_state") or ""),
+                    str(item.get("reason") or ""),
+                    1 if item.get("terminal") else 0,
+                    _json_dumps(payload),
+                ),
+            )
+
+
 async def refresh_open_position(position: ShadowPosition) -> None:
     token = position.token
     position_id = position.position_id
@@ -535,10 +565,24 @@ async def refresh_open_position(position: ShadowPosition) -> None:
         return
     best_pair, dex_summary = await _fetch_market_snapshot(token)
     if not best_pair or not dex_summary:
+        plan = plan_shadow_monitor_transition(position.execution_state, exit_reason=None, monitor_error=True)
+        _record_transitions(
+            position_id=position_id,
+            observed_ts=int(time.time()),
+            plan=plan.as_dict(),
+            payload={"token": token, "position_id": position_id, "reason": "market_unavailable"},
+        )
         logger.warning("[shadow-exec-refresh-skip] token=%s position_id=%s reason=market_unavailable", token, position_id)
         return
     ctx = build_pair_context(best_pair, token)
     if ctx is None:
+        plan = plan_shadow_monitor_transition(position.execution_state, exit_reason=None, monitor_error=True)
+        _record_transitions(
+            position_id=position_id,
+            observed_ts=int(time.time()),
+            plan=plan.as_dict(),
+            payload={"token": token, "position_id": position_id, "reason": "pair_context_invalid"},
+        )
         logger.warning("[shadow-exec-refresh-skip] token=%s position_id=%s reason=pair_context_invalid", token, position_id)
         return
     token_amount = position.position_size_tokens
@@ -555,6 +599,13 @@ async def refresh_open_position(position: ShadowPosition) -> None:
     )
     sell_quote_payload = sell_quote_result.quote
     if sell_quote_payload is None:
+        plan = plan_shadow_monitor_transition(position.execution_state, exit_reason=None, monitor_error=True)
+        _record_transitions(
+            position_id=position_id,
+            observed_ts=int(time.time()),
+            plan=plan.as_dict(),
+            payload={"token": token, "position_id": position_id, "reason": "sell_quote_unavailable"},
+        )
         logger.warning("[shadow-exec-refresh-skip] token=%s position_id=%s reason=sell_quote_unavailable", token, position_id)
         return
 
@@ -577,8 +628,11 @@ async def refresh_open_position(position: ShadowPosition) -> None:
     elif age_minutes >= max_hold_minutes:
         exit_reason = "time_stop"
 
-    next_state, transition_chain = _transition_execution_state(position.execution_state, exit_reason=exit_reason)
-    if transition_chain[-1] != position.execution_state:
+    transition_plan = plan_shadow_monitor_transition(position.execution_state, exit_reason=exit_reason)
+    plan_payload = transition_plan.as_dict()
+    next_state = transition_plan.next_state
+    transition_chain = [position.execution_state] + [item["to_state"] for item in plan_payload["transitions"]]
+    if plan_payload["transitions"]:
         logger.info(
             "[shadow-exec-transition] token=%s position_id=%s from=%s to=%s chain=%s reason=%s",
             token,
@@ -693,6 +747,12 @@ async def refresh_open_position(position: ShadowPosition) -> None:
         exit_fee_usd=exit_fee_usd,
         execution_state=next_state,
         status="closed" if exit_reason else "open",
+        payload=payload,
+    )
+    _record_transitions(
+        position_id=position_id,
+        observed_ts=now,
+        plan=plan_payload,
         payload=payload,
     )
     if exit_reason:

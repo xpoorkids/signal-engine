@@ -152,6 +152,10 @@ def test_refresh_open_position_closes_take_profit(tmp_path, monkeypatch):
             "SELECT status, execution_state, exit_reason, latest_pnl_usd, latest_net_pnl_usd, latest_exit_fee_usd FROM shadow_positions WHERE position_id=?",
             (position_id,),
         ).fetchone()
+        transitions = c.execute(
+            "SELECT from_state, to_state, transition_reason FROM shadow_execution_transitions WHERE position_id=? ORDER BY transition_id ASC",
+            (position_id,),
+        ).fetchall()
     assert row is not None
     assert row[0] == "closed"
     assert row[1] == ses.STATE_CLOSED
@@ -159,3 +163,9 @@ def test_refresh_open_position_closes_take_profit(tmp_path, monkeypatch):
     assert row[3] > 0
     assert row[4] < row[3]
     assert row[5] > 0
+    assert transitions is not None
+    assert [(item[0], item[1], item[2]) for item in transitions] == [
+        (ses.STATE_ENTRY_RECORDED, "monitoring", "mark_to_market"),
+        ("monitoring", "exit_triggered", "take_profit"),
+        ("exit_triggered", ses.STATE_CLOSED, "take_profit"),
+    ]
