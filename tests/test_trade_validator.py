@@ -4,6 +4,7 @@ from worker.trade_validator import (
     simulate_sell_quote,
     validate_trade,
 )
+from worker import route_quote, trade_validator
 
 
 def _pair(liq_usd=50000.0, price_usd=0.5):
@@ -38,6 +39,7 @@ def test_validate_trade_approves_clean_setup():
         token="token-1",
         best_pair=_pair(),
         dex_summary={"liquidity_usd": 50000.0, "snapshot_ts": snapshot_ts},
+        token_meta={"decimals": 6},
         risk_score=0.20,
         wallet_risk={"top_holder_pct": 0.04},
         mint_authority=False,
@@ -59,6 +61,7 @@ def test_validate_trade_rejects_on_authority_and_sell_slippage():
         token="token-1",
         best_pair=_pair(liq_usd=6000.0, price_usd=0.25),
         dex_summary={"liquidity_usd": 6000.0},
+        token_meta={"decimals": 6},
         risk_score=0.20,
         wallet_risk={"top_holder_pct": 0.20},
         mint_authority=True,
@@ -81,6 +84,7 @@ def test_validate_trade_rejects_stale_market_data(monkeypatch):
         token="token-1",
         best_pair=_pair(),
         dex_summary={"liquidity_usd": 50000.0, "snapshot_ts": 900},
+        token_meta={"decimals": 6},
         risk_score=0.20,
         wallet_risk={"top_holder_pct": 0.04},
         mint_authority=False,
@@ -91,3 +95,26 @@ def test_validate_trade_rejects_stale_market_data(monkeypatch):
 
     assert result["approved"] is False
     assert "market_data_stale" in result["reasons"]
+
+
+def test_validate_trade_rejects_when_venue_quotes_required(monkeypatch):
+    monkeypatch.setattr(trade_validator, "TRADE_VALIDATION_REQUIRE_VENUE_QUOTES", True)
+    monkeypatch.setattr(route_quote, "TRADE_VALIDATION_REQUIRE_VENUE_QUOTES", True)
+    monkeypatch.setattr(route_quote, "TRADE_VALIDATION_QUOTE_PROVIDER", "jupiter")
+    monkeypatch.setattr(route_quote, "JUPITER_API_KEY", "")
+
+    result = validate_trade(
+        token="token-1",
+        best_pair=_pair(),
+        dex_summary={"liquidity_usd": 50000.0, "snapshot_ts": 2_000_000_000},
+        token_meta={"decimals": 6},
+        risk_score=0.20,
+        wallet_risk={"top_holder_pct": 0.04},
+        mint_authority=False,
+        freeze_authority=False,
+        top_holder_ratio=0.10,
+        intended_size_usd=100.0,
+    )
+
+    assert result["approved"] is False
+    assert "venue_quote_unavailable" in result["reasons"]

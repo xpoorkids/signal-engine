@@ -15,6 +15,8 @@ from worker.config import (
     TRADE_VALIDATION_MIN_LIQ_USD,
     TRADE_VALIDATION_QUOTE_TTL_SEC,
     TRADE_VALIDATION_SIZE_USD,
+    TRADE_VALIDATION_QUOTE_PROVIDER,
+    TRADE_VALIDATION_REQUIRE_VENUE_QUOTES,
 )
 
 
@@ -203,6 +205,7 @@ def validate_trade(
     token: str,
     best_pair: dict[str, Any] | None,
     dex_summary: dict[str, Any] | None,
+    token_meta: dict[str, Any] | None,
     risk_score: float | None,
     wallet_risk: dict[str, Any] | None,
     mint_authority: bool | None,
@@ -210,6 +213,8 @@ def validate_trade(
     top_holder_ratio: float | None,
     intended_size_usd: float | None = None,
 ) -> dict[str, Any]:
+    from worker.route_quote import resolve_buy_quote, resolve_sell_quote
+
     now_ts = int(time.time())
     size_usd = float(intended_size_usd or TRADE_VALIDATION_SIZE_USD)
     logger.info("[trade-validator-start] token=%s size_usd=%.2f has_dex=%s", token, size_usd, 1 if dex_summary else 0)
@@ -286,27 +291,66 @@ def validate_trade(
         if not wallet_top_holder_pass:
             reasons.append("wallet_holder_concentration")
 
-    buy_quote = simulate_buy_quote(ctx, size_usd)
-    if buy_quote is None:
-        reasons.append("buy_quote_unavailable")
-        buy_quote_payload = None
+    reserve_buy_quote = simulate_buy_quote(ctx, size_usd)
+    buy_quote_result = resolve_buy_quote(
+        token=token,
+        token_meta=token_meta,
+        best_pair=best_pair,
+        ctx=ctx,
+        reserve_fallback_quote=reserve_buy_quote.as_dict() if reserve_buy_quote is not None else None,
+        amount_in_usd=size_usd,
+    )
+    warnings.extend(buy_quote_result.warnings)
+    buy_quote_payload = buy_quote_result.quote
+    buy_provider = buy_quote_result.provider
+    if buy_quote_payload is None:
+        reasons.extend(buy_quote_result.errors or ["buy_quote_unavailable"])
+        checks.append(ValidationCheck("buy_route_exists", False, False, True, "buy_quote_unavailable"))
+        if TRADE_VALIDATION_REQUIRE_VENUE_QUOTES:
+            checks.append(ValidationCheck("venue_quote_required_buy", False, buy_provider, "venue", "venue_quote_unavailable"))
         sell_quote_payload = None
     else:
-        buy_pass = buy_quote.slippage_bps <= TRADE_VALIDATION_MAX_BUY_SLIPPAGE_BPS
-        checks.append(ValidationCheck("buy_slippage_bps", buy_pass, round(buy_quote.slippage_bps, 2), TRADE_VALIDATION_MAX_BUY_SLIPPAGE_BPS, None if buy_pass else "buy_slippage_too_high"))
+        checks.append(ValidationCheck("buy_route_exists", True, True, True))
+        buy_slippage_bps = round(float(buy_quote_payload.get("slippage_bps") or 0.0), 2)
+        buy_pass = buy_slippage_bps <= TRADE_VALIDATION_MAX_BUY_SLIPPAGE_BPS
+        checks.append(ValidationCheck("buy_slippage_bps", buy_pass, buy_slippage_bps, TRADE_VALIDATION_MAX_BUY_SLIPPAGE_BPS, None if buy_pass else "buy_slippage_too_high"))
         if not buy_pass:
             reasons.append("buy_slippage_too_high")
-        sell_quote = simulate_sell_quote(ctx, buy_quote.expected_output_tokens)
-        if sell_quote is None:
-            reasons.append("sell_quote_unavailable")
-            sell_quote_payload = None
+        if TRADE_VALIDATION_REQUIRE_VENUE_QUOTES:
+            venue_buy_pass = buy_provider != "reserve"
+            checks.append(ValidationCheck("venue_quote_buy", venue_buy_pass, buy_provider, "venue", None if venue_buy_pass else "venue_quote_unavailable"))
+            if not venue_buy_pass:
+                reasons.append("venue_quote_unavailable")
+        sell_token_amount = float(buy_quote_payload.get("expected_output_tokens") or 0.0)
+        reserve_sell_quote = simulate_sell_quote(ctx, sell_token_amount)
+        sell_quote_result = resolve_sell_quote(
+            token=token,
+            token_meta=token_meta,
+            best_pair=best_pair,
+            ctx=ctx,
+            reserve_fallback_quote=reserve_sell_quote.as_dict() if reserve_sell_quote is not None else None,
+            token_amount=sell_token_amount,
+        )
+        warnings.extend(sell_quote_result.warnings)
+        sell_quote_payload = sell_quote_result.quote
+        sell_provider = sell_quote_result.provider
+        if sell_quote_payload is None:
+            reasons.extend(sell_quote_result.errors or ["sell_quote_unavailable"])
+            checks.append(ValidationCheck("sell_route_exists", False, False, True, "sell_quote_unavailable"))
+            if TRADE_VALIDATION_REQUIRE_VENUE_QUOTES:
+                checks.append(ValidationCheck("venue_quote_sell", False, sell_provider, "venue", "venue_quote_unavailable"))
         else:
-            sell_pass = sell_quote.slippage_bps <= TRADE_VALIDATION_MAX_SELL_SLIPPAGE_BPS
-            checks.append(ValidationCheck("sell_slippage_bps", sell_pass, round(sell_quote.slippage_bps, 2), TRADE_VALIDATION_MAX_SELL_SLIPPAGE_BPS, None if sell_pass else "sell_slippage_too_high"))
+            checks.append(ValidationCheck("sell_route_exists", True, True, True))
+            sell_slippage_bps = round(float(sell_quote_payload.get("slippage_bps") or 0.0), 2)
+            sell_pass = sell_slippage_bps <= TRADE_VALIDATION_MAX_SELL_SLIPPAGE_BPS
+            checks.append(ValidationCheck("sell_slippage_bps", sell_pass, sell_slippage_bps, TRADE_VALIDATION_MAX_SELL_SLIPPAGE_BPS, None if sell_pass else "sell_slippage_too_high"))
             if not sell_pass:
                 reasons.append("sell_slippage_too_high")
-            sell_quote_payload = sell_quote.as_dict()
-        buy_quote_payload = buy_quote.as_dict()
+            if TRADE_VALIDATION_REQUIRE_VENUE_QUOTES:
+                venue_sell_pass = sell_provider != "reserve"
+                checks.append(ValidationCheck("venue_quote_sell", venue_sell_pass, sell_provider, "venue", None if venue_sell_pass else "venue_quote_unavailable"))
+                if not venue_sell_pass:
+                    reasons.append("venue_quote_unavailable")
 
     result = ValidationResult(
         approved=len(reasons) == 0,
@@ -327,6 +371,8 @@ def validate_trade(
             "age_sec": None if market_data_age_sec is None else round(market_data_age_sec, 3),
             "max_age_sec": TRADE_VALIDATION_MAX_MARKET_DATA_AGE_SEC,
             "quote_ttl_sec": max(1, int(TRADE_VALIDATION_QUOTE_TTL_SEC)),
+            "quote_provider": TRADE_VALIDATION_QUOTE_PROVIDER,
+            "require_venue_quotes": TRADE_VALIDATION_REQUIRE_VENUE_QUOTES,
         },
         buy_quote=buy_quote_payload,
         sell_quote=sell_quote_payload,

@@ -13,6 +13,8 @@ from typing import Any
 
 from app.services.db_service import connect_sqlite, resolve_engine_db_path
 from worker.dex import dex_enrich_token, select_best_pair, summarize_pair
+from worker.metadata import fetch_token_metadata
+from worker.route_quote import resolve_sell_quote
 from worker.trade_validator import build_pair_context, simulate_sell_quote
 
 
@@ -413,13 +415,23 @@ async def refresh_open_position(position: ShadowPosition) -> None:
         return
     token_amount = position.position_size_tokens
     intended_size_usd = position.intended_size_usd
-    sell_quote = simulate_sell_quote(ctx, token_amount)
-    if sell_quote is None:
+    reserve_sell_quote = simulate_sell_quote(ctx, token_amount)
+    token_meta = fetch_token_metadata(token)
+    sell_quote_result = resolve_sell_quote(
+        token=token,
+        token_meta=token_meta,
+        best_pair=best_pair,
+        ctx=ctx,
+        reserve_fallback_quote=reserve_sell_quote.as_dict() if reserve_sell_quote is not None else None,
+        token_amount=token_amount,
+    )
+    sell_quote_payload = sell_quote_result.quote
+    if sell_quote_payload is None:
         logger.warning("[shadow-exec-refresh-skip] token=%s position_id=%s reason=sell_quote_unavailable", token, position_id)
         return
 
     now = int(time.time())
-    exit_value_usd = float(sell_quote.expected_output_usd)
+    exit_value_usd = float(sell_quote_payload.get("expected_output_usd") or 0.0)
     pnl_usd = exit_value_usd - intended_size_usd
     pnl_pct = (pnl_usd / intended_size_usd) * 100.0 if intended_size_usd > 0 else 0.0
     age_minutes = max(0.0, (now - position.opened_ts) / 60.0)
@@ -447,7 +459,7 @@ async def refresh_open_position(position: ShadowPosition) -> None:
         "exit_value_usd": exit_value_usd,
         "pnl_pct": pnl_pct,
         "pnl_usd": pnl_usd,
-        "sell_quote": sell_quote.as_dict(),
+        "sell_quote": sell_quote_payload,
         "exit_reason": exit_reason,
         "age_minutes": round(age_minutes, 2),
         "decision_context": position.decision_context,
@@ -477,7 +489,7 @@ async def refresh_open_position(position: ShadowPosition) -> None:
                     peak,
                     trough,
                     exit_reason,
-                    sell_quote.execution_price_usd,
+                    sell_quote_payload.get("execution_price_usd"),
                     exit_value_usd,
                     _json_dumps(payload),
                     position_id,
