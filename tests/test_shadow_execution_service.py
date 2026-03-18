@@ -62,6 +62,7 @@ def test_open_shadow_position_persists_validated_trade(tmp_path, monkeypatch):
     assert [(item[0], item[1], item[2]) for item in transitions] == [
         (ses.STATE_ENTRY_RECORDED, "quote_validated", "quote_validated"),
         ("quote_validated", ses.STATE_SUBMIT_INTENT_RECORDED, "submit_intent_recorded"),
+        (ses.STATE_SUBMIT_INTENT_RECORDED, ses.STATE_SUBMIT_REQUESTED, "submit_requested"),
     ]
 
 
@@ -189,6 +190,7 @@ def test_refresh_open_position_closes_take_profit(tmp_path, monkeypatch):
         },
     )
     position_id = ses.open_shadow_position(event)
+    monkeypatch.setattr(ses.time, "time", lambda: 2_000_000_003)
 
     async def _fake_snapshot(_token: str):
         return (
@@ -230,7 +232,9 @@ def test_refresh_open_position_closes_take_profit(tmp_path, monkeypatch):
     assert [(item[0], item[1], item[2]) for item in transitions] == [
         (ses.STATE_ENTRY_RECORDED, "quote_validated", "quote_validated"),
         ("quote_validated", ses.STATE_SUBMIT_INTENT_RECORDED, "submit_intent_recorded"),
-        (ses.STATE_SUBMIT_INTENT_RECORDED, "monitoring", "mark_to_market"),
+        (ses.STATE_SUBMIT_INTENT_RECORDED, ses.STATE_SUBMIT_REQUESTED, "submit_requested"),
+        (ses.STATE_SUBMIT_INTENT_RECORDED, ses.STATE_LANDED, "landed"),
+        (ses.STATE_LANDED, "monitoring", "mark_to_market"),
         ("monitoring", "exit_triggered", "take_profit"),
         ("exit_triggered", ses.STATE_CLOSED, "take_profit"),
     ]

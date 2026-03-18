@@ -1,13 +1,17 @@
 from worker.execution_lifecycle import (
     STATE_CLOSED,
     STATE_ENTRY_RECORDED,
+    STATE_LANDED,
     STATE_MONITOR_ERROR,
     STATE_MONITORING,
     STATE_QUOTE_EXPIRED,
+    STATE_SUBMIT_ACKED,
     STATE_SUBMIT_INTENT_RECORDED,
+    STATE_SUBMIT_REQUESTED,
     initial_execution_state,
     plan_shadow_entry_transition,
     plan_shadow_monitor_transition,
+    plan_shadow_submission_transition,
 )
 
 
@@ -53,3 +57,13 @@ def test_monitor_transition_can_expire_quote():
     assert plan.next_state == STATE_QUOTE_EXPIRED
     assert plan.terminal is True
     assert [item.to_state for item in plan.transitions] == [STATE_QUOTE_EXPIRED]
+
+
+def test_submission_transition_progresses_request_to_landed():
+    requested = plan_shadow_submission_transition(STATE_SUBMIT_INTENT_RECORDED, submission_status="submit_requested")
+    acked = plan_shadow_submission_transition(STATE_SUBMIT_REQUESTED, submission_status="submit_acked")
+    landed = plan_shadow_submission_transition(STATE_SUBMIT_ACKED, submission_status="landed")
+
+    assert requested.next_state == STATE_SUBMIT_REQUESTED
+    assert acked.next_state == STATE_SUBMIT_ACKED
+    assert landed.next_state == STATE_LANDED

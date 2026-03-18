@@ -7,6 +7,10 @@ from typing import Literal
 STATE_ENTRY_RECORDED = "entry_recorded"
 STATE_QUOTE_VALIDATED = "quote_validated"
 STATE_SUBMIT_INTENT_RECORDED = "submit_intent_recorded"
+STATE_SUBMIT_REQUESTED = "submit_requested"
+STATE_SUBMIT_ACKED = "submit_acked"
+STATE_LANDED = "landed"
+STATE_SUBMIT_FAILED = "submit_failed"
 STATE_MONITORING = "monitoring"
 STATE_EXIT_TRIGGERED = "exit_triggered"
 STATE_CLOSED = "closed"
@@ -19,6 +23,10 @@ TransitionReason = Literal[
     "entry_recorded",
     "quote_validated",
     "submit_intent_recorded",
+    "submit_requested",
+    "submit_acked",
+    "landed",
+    "submit_failed",
     "mark_to_market",
     "take_profit",
     "stop_loss",
@@ -107,6 +115,39 @@ def plan_shadow_entry_transition(
 
     return ExecutionTransitionPlan(
         current_state=str(current_state or STATE_ENTRY_RECORDED),
+        next_state=state,
+        terminal=state in TERMINAL_STATES,
+        transitions=transitions,
+    )
+
+
+def plan_shadow_submission_transition(
+    current_state: str | None,
+    *,
+    submission_status: str,
+) -> ExecutionTransitionPlan:
+    state = str(current_state or STATE_SUBMIT_INTENT_RECORDED)
+    transitions: list[ExecutionTransition] = []
+    mapping = {
+        "submit_requested": STATE_SUBMIT_REQUESTED,
+        "submit_acked": STATE_SUBMIT_ACKED,
+        "landed": STATE_LANDED,
+        "submit_failed": STATE_SUBMIT_FAILED,
+        "submit_expired": STATE_QUOTE_EXPIRED,
+    }
+    next_state = mapping.get(submission_status, state)
+    if next_state != state:
+        transitions.append(
+            ExecutionTransition(
+                from_state=state,
+                to_state=next_state,
+                reason=submission_status if submission_status != "submit_expired" else "quote_expired",
+                terminal=next_state in TERMINAL_STATES,
+            )
+        )
+        state = next_state
+    return ExecutionTransitionPlan(
+        current_state=str(current_state or STATE_SUBMIT_INTENT_RECORDED),
         next_state=state,
         terminal=state in TERMINAL_STATES,
         transitions=transitions,

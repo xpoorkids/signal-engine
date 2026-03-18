@@ -25,12 +25,17 @@ from worker.config import (
 from worker.execution_lifecycle import (
     STATE_CLOSED,
     STATE_ENTRY_RECORDED,
+    STATE_LANDED,
     STATE_MONITOR_ERROR,
     STATE_QUOTE_EXPIRED,
+    STATE_SUBMIT_ACKED,
     STATE_SUBMIT_INTENT_RECORDED,
+    STATE_SUBMIT_REQUESTED,
     plan_shadow_entry_transition,
     plan_shadow_monitor_transition,
+    plan_shadow_submission_transition,
 )
+from worker.submission_simulator import create_submission_plan, advance_submission_plan
 
 
 logger = logging.getLogger(__name__)
@@ -49,6 +54,12 @@ class ShadowPosition:
     opened_ts: int
     submission_intent_ts: int | None
     quote_expires_ts: int | None
+    submission_request_id: str | None
+    submission_status: str | None
+    submission_requested_ts_ms: int | None
+    submission_ack_ts_ms: int | None
+    submission_landing_ts_ms: int | None
+    submission_expires_ts_ms: int | None
     intended_size_usd: float
     position_size_tokens: float
     pair_address: str | None
@@ -197,6 +208,12 @@ def init() -> None:
                 opened_ts INTEGER NOT NULL,
                 submission_intent_ts INTEGER,
                 quote_expires_ts INTEGER,
+                submission_request_id TEXT,
+                submission_status TEXT,
+                submission_requested_ts_ms INTEGER,
+                submission_ack_ts_ms INTEGER,
+                submission_landing_ts_ms INTEGER,
+                submission_expires_ts_ms INTEGER,
                 updated_ts INTEGER NOT NULL,
                 closed_ts INTEGER,
                 intended_size_usd REAL NOT NULL,
@@ -268,6 +285,12 @@ def init() -> None:
         _ensure_column(c, "shadow_positions", "execution_state", "TEXT NOT NULL DEFAULT 'entry_recorded'")
         _ensure_column(c, "shadow_positions", "submission_intent_ts", "INTEGER")
         _ensure_column(c, "shadow_positions", "quote_expires_ts", "INTEGER")
+        _ensure_column(c, "shadow_positions", "submission_request_id", "TEXT")
+        _ensure_column(c, "shadow_positions", "submission_status", "TEXT")
+        _ensure_column(c, "shadow_positions", "submission_requested_ts_ms", "INTEGER")
+        _ensure_column(c, "shadow_positions", "submission_ack_ts_ms", "INTEGER")
+        _ensure_column(c, "shadow_positions", "submission_landing_ts_ms", "INTEGER")
+        _ensure_column(c, "shadow_positions", "submission_expires_ts_ms", "INTEGER")
         _ensure_column(c, "shadow_positions", "entry_fee_usd", "REAL NOT NULL DEFAULT 0")
         _ensure_column(c, "shadow_positions", "latest_net_exit_value_usd", "REAL")
         _ensure_column(c, "shadow_positions", "latest_net_pnl_pct", "REAL")
@@ -312,6 +335,7 @@ def open_shadow_position(event) -> str | None:
 
     buy_quote = validation.get("buy_quote") if isinstance(validation.get("buy_quote"), dict) else {}
     entry_plan = plan_shadow_entry_transition(STATE_ENTRY_RECORDED)
+    submission_plan = create_submission_plan(now_ts=now)
     signal_id = str(extra.get("_signal_id") or "").strip() or None
     position_size_tokens = float(buy_quote.get("expected_output_tokens") or 0.0)
     entry_exec_price = float(buy_quote.get("execution_price_usd") or 0.0)
@@ -338,6 +362,12 @@ def open_shadow_position(event) -> str | None:
             opened_ts=now,
             submission_intent_ts=now,
             quote_expires_ts=quote_expires_ts or None,
+            submission_request_id=submission_plan.request_id,
+            submission_status=submission_plan.status,
+            submission_requested_ts_ms=submission_plan.requested_ts,
+            submission_ack_ts_ms=submission_plan.ack_ts,
+            submission_landing_ts_ms=submission_plan.landing_ts,
+            submission_expires_ts_ms=submission_plan.expires_ts,
             intended_size_usd=float(validation.get("intended_size_usd") or 0.0),
             position_size_tokens=position_size_tokens,
             pair_address=str(validation.get("pair_address") or "") or None,
@@ -358,13 +388,15 @@ def open_shadow_position(event) -> str | None:
             INSERT INTO shadow_positions (
                 position_id, signal_id, token, source_event_type, status, execution_state, opened_ts, updated_ts,
                 submission_intent_ts, quote_expires_ts,
+                submission_request_id, submission_status, submission_requested_ts_ms, submission_ack_ts_ms,
+                submission_landing_ts_ms, submission_expires_ts_ms,
                 intended_size_usd, position_size_tokens, pair_address, dex_id,
                 entry_mid_price_usd, entry_exec_price_usd, entry_fee_usd, expected_buy_slippage_bps,
                 expected_sell_slippage_bps, take_profit_pct, stop_loss_pct, max_hold_minutes,
                 latest_price_usd, latest_liquidity_usd, latest_exit_value_usd, latest_pnl_pct,
                 latest_pnl_usd, latest_net_exit_value_usd, latest_net_pnl_pct, latest_net_pnl_usd, latest_exit_fee_usd,
                 peak_pnl_pct, trough_pnl_pct, validation_json, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position_id,
@@ -377,6 +409,12 @@ def open_shadow_position(event) -> str | None:
                 now,
                 position.submission_intent_ts,
                 position.quote_expires_ts,
+                position.submission_request_id,
+                position.submission_status,
+                position.submission_requested_ts_ms,
+                position.submission_ack_ts_ms,
+                position.submission_landing_ts_ms,
+                position.submission_expires_ts_ms,
                 position.intended_size_usd,
                 position.position_size_tokens,
                 position.pair_address,
@@ -434,8 +472,14 @@ def open_shadow_position(event) -> str | None:
         plan=entry_plan.as_dict(),
         payload=payload,
     )
+    _record_transitions(
+        position_id=position_id,
+        observed_ts=now,
+        plan=plan_shadow_submission_transition(entry_plan.next_state, submission_status=submission_plan.status).as_dict(),
+        payload={"token": event.token, "position_id": position_id, "submission": submission_plan.as_dict()},
+    )
     logger.info(
-        "[shadow-exec-open] token=%s position_id=%s signal_id=%s size_usd=%.2f entry_exec=%.8f qty=%.8f pair=%s entry_fee_usd=%.4f state=%s quote_expires_ts=%s",
+        "[shadow-exec-open] token=%s position_id=%s signal_id=%s size_usd=%.2f entry_exec=%.8f qty=%.8f pair=%s entry_fee_usd=%.4f state=%s submission_status=%s quote_expires_ts=%s",
         event.token,
         position_id,
         signal_id or "",
@@ -445,6 +489,7 @@ def open_shadow_position(event) -> str | None:
         validation.get("pair_address") or "",
         entry_fee_usd,
         position.execution_state,
+        submission_plan.status,
         position.quote_expires_ts or 0,
     )
     return position_id
@@ -464,7 +509,9 @@ def _fetch_open_positions(limit: int = 25) -> list[ShadowPosition]:
         rows = c.execute(
             """
             SELECT position_id, signal_id, token, source_event_type, status, opened_ts,
-                   execution_state, submission_intent_ts, quote_expires_ts, intended_size_usd, position_size_tokens, pair_address, dex_id,
+                   execution_state, submission_intent_ts, quote_expires_ts, submission_request_id, submission_status,
+                   submission_requested_ts_ms, submission_ack_ts_ms, submission_landing_ts_ms, submission_expires_ts_ms,
+                   intended_size_usd, position_size_tokens, pair_address, dex_id,
                    entry_mid_price_usd, entry_exec_price_usd, expected_buy_slippage_bps,
                    expected_sell_slippage_bps, take_profit_pct, stop_loss_pct, max_hold_minutes, entry_fee_usd, payload_json
             FROM shadow_positions
@@ -494,6 +541,12 @@ def _fetch_open_positions(limit: int = 25) -> list[ShadowPosition]:
                 opened_ts=int(row["opened_ts"]),
                 submission_intent_ts=int(row["submission_intent_ts"]) if row["submission_intent_ts"] is not None else None,
                 quote_expires_ts=int(row["quote_expires_ts"]) if row["quote_expires_ts"] is not None else None,
+                submission_request_id=str(row["submission_request_id"]) if row["submission_request_id"] is not None else None,
+                submission_status=str(row["submission_status"]) if row["submission_status"] is not None else None,
+                submission_requested_ts_ms=int(row["submission_requested_ts_ms"]) if row["submission_requested_ts_ms"] is not None else None,
+                submission_ack_ts_ms=int(row["submission_ack_ts_ms"]) if row["submission_ack_ts_ms"] is not None else None,
+                submission_landing_ts_ms=int(row["submission_landing_ts_ms"]) if row["submission_landing_ts_ms"] is not None else None,
+                submission_expires_ts_ms=int(row["submission_expires_ts_ms"]) if row["submission_expires_ts_ms"] is not None else None,
                 intended_size_usd=float(row["intended_size_usd"] or 0.0),
                 position_size_tokens=float(row["position_size_tokens"] or 0.0),
                 pair_address=str(row["pair_address"]) if row["pair_address"] is not None else None,
@@ -622,6 +675,66 @@ async def refresh_open_position(position: ShadowPosition) -> None:
             now,
         )
         return
+    submission_plan = advance_submission_plan(
+        {
+            "request_id": position.submission_request_id,
+            "status": position.submission_status,
+            "requested_ts": position.submission_requested_ts_ms,
+            "ack_ts": position.submission_ack_ts_ms,
+            "landing_ts": position.submission_landing_ts_ms,
+            "expires_ts": position.submission_expires_ts_ms,
+        },
+        now_ts=now,
+        quote_expires_ts=position.quote_expires_ts,
+    )
+    submission_transition = plan_shadow_submission_transition(position.execution_state, submission_status=submission_plan.status)
+    if submission_transition.transitions:
+        with _connect() as c:
+            c.execute(
+                """
+                UPDATE shadow_positions
+                SET execution_state=?, submission_status=?, submission_request_id=?, submission_requested_ts_ms=?,
+                    submission_ack_ts_ms=?, submission_landing_ts_ms=?, submission_expires_ts_ms=?, updated_ts=?, payload_json=payload_json
+                WHERE position_id=?
+                """,
+                (
+                    submission_transition.next_state,
+                    submission_plan.status,
+                    submission_plan.request_id,
+                    submission_plan.requested_ts,
+                    submission_plan.ack_ts,
+                    submission_plan.landing_ts,
+                    submission_plan.expires_ts,
+                    now,
+                    position_id,
+                ),
+            )
+        _record_transitions(
+            position_id=position_id,
+            observed_ts=now,
+            plan=submission_transition.as_dict(),
+            payload={"token": token, "position_id": position_id, "submission": submission_plan.as_dict()},
+        )
+        logger.info(
+            "[shadow-submit-transition] token=%s position_id=%s request_id=%s status=%s state=%s",
+            token,
+            position_id,
+            submission_plan.request_id,
+            submission_plan.status,
+            submission_transition.next_state,
+        )
+        if submission_transition.next_state == STATE_QUOTE_EXPIRED:
+            with _connect() as c:
+                c.execute(
+                    "UPDATE shadow_positions SET status='closed', execution_state=?, closed_ts=?, exit_reason=? WHERE position_id=?",
+                    (STATE_QUOTE_EXPIRED, now, "quote_expired", position_id),
+                )
+            return
+        if submission_transition.next_state != STATE_LANDED:
+            return
+        position = ShadowPosition(
+            **{**position.as_dict(), "execution_state": submission_transition.next_state, "submission_status": submission_plan.status}
+        )
     best_pair, dex_summary = await _fetch_market_snapshot(token)
     if not best_pair or not dex_summary:
         plan = plan_shadow_monitor_transition(position.execution_state, exit_reason=None, monitor_error=True)
