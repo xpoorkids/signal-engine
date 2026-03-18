@@ -60,6 +60,29 @@ def _should_send_heating_up(de: Event) -> bool:
     return strong_quality
 
 
+def _persist_non_candidate_delivery(de: Event, delivered: bool) -> None:
+    if not delivered:
+        logger.warning("[dispatch-skip-persist] type=%s token=%s reason=delivery_failed", de.type, de.token)
+        return
+    record_signal_event(de)
+
+
+def _persist_candidate_delivery(de: Event, *, delivered: bool, message_id: str | None, edited: bool) -> None:
+    if not delivered:
+        logger.warning("[dispatch-skip-persist] type=candidate token=%s reason=delivery_failed", de.token)
+        return
+    external_ref = str(message_id or "")
+    record_signal_event(
+        de,
+        external_ref=external_ref,
+        edited=edited,
+    )
+    if message_id and not edited:
+        from app.services.state_service import update_candidate_message_id, mark_candidate_alert_sent
+        update_candidate_message_id(de.token, message_id)
+        mark_candidate_alert_sent(de.token)
+
+
 async def event_loop(q: asyncio.Queue) -> None:
     state = EngineState()
     state_init()
@@ -86,8 +109,8 @@ async def event_loop(q: asyncio.Queue) -> None:
                         buyer = de.extra.get("buyer") if isinstance(de.extra, dict) else None
                         if isinstance(buyer, str) and buyer:
                             record_wallet_signal(buyer, de.token or "", de.type)
-                        send_discord(de)
-                        record_signal_event(de)
+                        delivered = send_discord(de)
+                        _persist_non_candidate_delivery(de, delivered)
                 elif de.type == "candidate":
                     if de.token and not can_alert(state, f"candidate:{de.token}", CANDIDATE_ALERT_COOLDOWN_SEC):
                         print(f"[candidate-cooldown-skip] token={de.token}", flush=True)
@@ -98,16 +121,13 @@ async def event_loop(q: asyncio.Queue) -> None:
                     if isinstance(de.extra, dict):
                         if de.extra.get("candidate_edit") and de.extra.get("candidate_message_id"):
                             message_id = de.extra.get("candidate_message_id")
-                    msg_id = send_candidate_discord(de, message_id=message_id)
-                    record_signal_event(
+                    delivery = send_candidate_discord(de, message_id=message_id)
+                    _persist_candidate_delivery(
                         de,
-                        external_ref=str(msg_id or message_id or ""),
+                        delivered=delivery.success,
+                        message_id=delivery.message_id,
                         edited=bool(message_id),
                     )
-                    if msg_id:
-                        from app.services.state_service import update_candidate_message_id, mark_candidate_alert_sent
-                        update_candidate_message_id(de.token, msg_id)
-                        mark_candidate_alert_sent(de.token)
         except Exception as ex:
             print(f"[event-loop-error] type={e.type} token={e.token} sig={e.signature} error={type(ex).__name__}:{ex}", flush=True)
             traceback.print_exc()

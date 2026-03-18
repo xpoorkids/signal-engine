@@ -1,6 +1,8 @@
 ﻿import json
 import requests
 import os
+from dataclasses import dataclass
+
 from app.services.signal_presentation import SignalViewModel, build_alert_explanation
 from app.services.signal_metrics import (
     format_metric_number,
@@ -23,6 +25,12 @@ from worker.config import RADAR_QUIET_RISK_MAX
 AMBER = 0xF4C430
 DARK_RED = 0xC0392B
 SLATE = 0x203040
+
+
+@dataclass
+class DeliveryResult:
+    success: bool
+    message_id: str | None = None
 
 
 def _full_addr(addr: str | None) -> str:
@@ -1183,19 +1191,19 @@ def format_discord(e: Event) -> dict:
     return _format_candidate_like(e, "Radar update.")
 
 
-def send_discord(e: Event) -> None:
+def send_discord(e: Event) -> bool:
     if not ENABLE_DISCORD:
-        return
+        return False
     if not DISCORD_WEBHOOK_URL:
         print("[discord] missing DISCORD_WEBHOOK_URL")
-        return
+        return False
 
     payload = format_discord(e)
     print(f"[discord] send attempt type={e.type} token={e.token}", flush=True)
 
     if DRY_RUN:
         print("[DRY_RUN] suppressed Discord send", json.dumps(payload)[:400])
-        return
+        return False
 
     try:
         r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=8)
@@ -1203,28 +1211,31 @@ def send_discord(e: Event) -> None:
         if r.status_code >= 300:
             print(f"[discord-http-error] status={r.status_code} token={e.token} body={r.text[:200]}", flush=True)
             print("[discord] send failed", r.status_code, r.text[:200])
+            return False
         else:
             print("[discord] send ok", r.status_code)
+            return True
     except Exception as ex:
         print(f"[discord-http-error] token={e.token} error={ex}", flush=True)
         print("[discord] send exception", ex)
+        return False
 
 
-def send_candidate_discord(e: Event, message_id: str | None = None) -> str | None:
+def send_candidate_discord(e: Event, message_id: str | None = None) -> DeliveryResult:
     if not ENABLE_DISCORD:
-        return
+        return DeliveryResult(success=False)
     if not DISCORD_CANDIDATE_WEBHOOK:
         print("[discord] missing DISCORD_CANDIDATE_WEBHOOK")
-        return
+        return DeliveryResult(success=False)
     if e.type != "candidate":
-        return
+        return DeliveryResult(success=False)
 
     payload = format_discord(e)
     print(f"[discord] candidate send attempt token={e.token}", flush=True)
 
     if DRY_RUN:
         print("[DRY_RUN] suppressed Candidate Discord send", json.dumps(payload)[:400])
-        return None
+        return DeliveryResult(success=False)
 
     try:
         if message_id:
@@ -1235,14 +1246,17 @@ def send_candidate_discord(e: Event, message_id: str | None = None) -> str | Non
             r = requests.post(url, json=payload, timeout=8)
         if r.status_code >= 300:
             print("[discord] candidate send failed", r.status_code, r.text[:200])
+            return DeliveryResult(success=False)
         else:
             print("[discord] candidate send ok", r.status_code)
+            if message_id:
+                return DeliveryResult(success=True, message_id=message_id)
             if not message_id:
                 try:
                     data = r.json()
-                    return data.get("id")
+                    return DeliveryResult(success=True, message_id=data.get("id"))
                 except Exception:
-                    return None
+                    return DeliveryResult(success=True)
     except Exception as ex:
         print("[discord] candidate send exception", ex)
-    return None
+    return DeliveryResult(success=False)
