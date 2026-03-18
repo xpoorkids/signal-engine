@@ -41,15 +41,18 @@ def test_open_shadow_position_persists_validated_trade(tmp_path, monkeypatch):
 
     with ses._connect() as c:
         row = c.execute(
-            "SELECT token, signal_id, status, intended_size_usd, position_size_tokens FROM shadow_positions WHERE position_id=?",
+            "SELECT token, signal_id, status, execution_state, intended_size_usd, position_size_tokens, entry_fee_usd, latest_net_pnl_usd FROM shadow_positions WHERE position_id=?",
             (position_id,),
         ).fetchone()
     assert row is not None
     assert row[0] == "token-1"
     assert row[1] == "sig-1"
     assert row[2] == "open"
-    assert row[3] == 100.0
-    assert row[4] == 180.0
+    assert row[3] == ses.STATE_ENTRY_RECORDED
+    assert row[4] == 100.0
+    assert row[5] == 180.0
+    assert row[6] > 0
+    assert row[7] < 0
 
 
 def test_open_shadow_position_skips_expired_validation(tmp_path, monkeypatch):
@@ -146,10 +149,13 @@ def test_refresh_open_position_closes_take_profit(tmp_path, monkeypatch):
 
     with ses._connect() as c:
         row = c.execute(
-            "SELECT status, exit_reason, latest_pnl_usd FROM shadow_positions WHERE position_id=?",
+            "SELECT status, execution_state, exit_reason, latest_pnl_usd, latest_net_pnl_usd, latest_exit_fee_usd FROM shadow_positions WHERE position_id=?",
             (position_id,),
         ).fetchone()
     assert row is not None
     assert row[0] == "closed"
-    assert row[1] == "take_profit"
-    assert row[2] > 0
+    assert row[1] == ses.STATE_CLOSED
+    assert row[2] == "take_profit"
+    assert row[3] > 0
+    assert row[4] < row[3]
+    assert row[5] > 0

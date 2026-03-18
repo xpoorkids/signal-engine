@@ -16,11 +16,21 @@ from worker.dex import dex_enrich_token, select_best_pair, summarize_pair
 from worker.metadata import fetch_token_metadata
 from worker.route_quote import resolve_sell_quote
 from worker.trade_validator import build_pair_context, simulate_sell_quote
+from worker.config import (
+    SHADOW_EXECUTION_ENTRY_FEE_BPS,
+    SHADOW_EXECUTION_EXIT_FEE_BPS,
+    SHADOW_EXECUTION_FIXED_ENTRY_COST_USD,
+    SHADOW_EXECUTION_FIXED_EXIT_COST_USD,
+)
 
 
 logger = logging.getLogger(__name__)
 DB_PATH = resolve_engine_db_path()
 _SCHEMA_READY = False
+STATE_ENTRY_RECORDED = "entry_recorded"
+STATE_OPEN = "open"
+STATE_EXIT_TRIGGERED = "exit_triggered"
+STATE_CLOSED = "closed"
 
 
 @dataclass(frozen=True)
@@ -30,6 +40,7 @@ class ShadowPosition:
     token: str
     source_event_type: str
     status: str
+    execution_state: str
     opened_ts: int
     intended_size_usd: float
     position_size_tokens: float
@@ -37,6 +48,7 @@ class ShadowPosition:
     dex_id: str | None
     entry_mid_price_usd: float | None
     entry_exec_price_usd: float
+    entry_fee_usd: float
     expected_buy_slippage_bps: float
     expected_sell_slippage_bps: float
     take_profit_pct: float
@@ -88,6 +100,34 @@ def _max_hold_minutes() -> int:
         return 60
 
 
+def _entry_fee_bps() -> float:
+    try:
+        return max(0.0, float(os.getenv("SHADOW_EXECUTION_ENTRY_FEE_BPS", str(SHADOW_EXECUTION_ENTRY_FEE_BPS))))
+    except Exception:
+        return max(0.0, float(SHADOW_EXECUTION_ENTRY_FEE_BPS))
+
+
+def _exit_fee_bps() -> float:
+    try:
+        return max(0.0, float(os.getenv("SHADOW_EXECUTION_EXIT_FEE_BPS", str(SHADOW_EXECUTION_EXIT_FEE_BPS))))
+    except Exception:
+        return max(0.0, float(SHADOW_EXECUTION_EXIT_FEE_BPS))
+
+
+def _fixed_entry_cost_usd() -> float:
+    try:
+        return max(0.0, float(os.getenv("SHADOW_EXECUTION_FIXED_ENTRY_COST_USD", str(SHADOW_EXECUTION_FIXED_ENTRY_COST_USD))))
+    except Exception:
+        return max(0.0, float(SHADOW_EXECUTION_FIXED_ENTRY_COST_USD))
+
+
+def _fixed_exit_cost_usd() -> float:
+    try:
+        return max(0.0, float(os.getenv("SHADOW_EXECUTION_FIXED_EXIT_COST_USD", str(SHADOW_EXECUTION_FIXED_EXIT_COST_USD))))
+    except Exception:
+        return max(0.0, float(SHADOW_EXECUTION_FIXED_EXIT_COST_USD))
+
+
 def enabled() -> bool:
     return _env_bool("ENABLE_SHADOW_EXECUTION", "1")
 
@@ -114,6 +154,40 @@ def _build_decision_context(event) -> dict[str, Any]:
     }
 
 
+def _ensure_column(c: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {str(row["name"]) for row in c.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _transition_execution_state(current_state: str | None, *, exit_reason: str | None) -> tuple[str, list[str]]:
+    current = str(current_state or STATE_ENTRY_RECORDED)
+    chain = [current]
+    if exit_reason:
+        if current != STATE_EXIT_TRIGGERED:
+            chain.append(STATE_EXIT_TRIGGERED)
+        chain.append(STATE_CLOSED)
+        return STATE_CLOSED, chain
+    if current != STATE_OPEN:
+        chain.append(STATE_OPEN)
+    return STATE_OPEN, chain
+
+
+def _calculate_entry_fee_usd(intended_size_usd: float) -> float:
+    return round((max(0.0, intended_size_usd) * (_entry_fee_bps() / 10000.0)) + _fixed_entry_cost_usd(), 6)
+
+
+def _calculate_exit_fee_usd(exit_value_usd: float) -> float:
+    return round((max(0.0, exit_value_usd) * (_exit_fee_bps() / 10000.0)) + _fixed_exit_cost_usd(), 6)
+
+
+def _net_pnl(exit_value_usd: float, intended_size_usd: float, entry_fee_usd: float) -> tuple[float, float, float]:
+    exit_fee_usd = _calculate_exit_fee_usd(exit_value_usd)
+    net_exit_value_usd = exit_value_usd - exit_fee_usd
+    net_pnl_usd = net_exit_value_usd - intended_size_usd - entry_fee_usd
+    return net_exit_value_usd, net_pnl_usd, exit_fee_usd
+
+
 def init() -> None:
     global _SCHEMA_READY
     with _connect() as c:
@@ -125,6 +199,7 @@ def init() -> None:
                 token TEXT NOT NULL,
                 source_event_type TEXT NOT NULL,
                 status TEXT NOT NULL,
+                execution_state TEXT NOT NULL DEFAULT 'entry_recorded',
                 opened_ts INTEGER NOT NULL,
                 updated_ts INTEGER NOT NULL,
                 closed_ts INTEGER,
@@ -134,6 +209,7 @@ def init() -> None:
                 dex_id TEXT,
                 entry_mid_price_usd REAL,
                 entry_exec_price_usd REAL,
+                entry_fee_usd REAL NOT NULL DEFAULT 0,
                 expected_buy_slippage_bps REAL,
                 expected_sell_slippage_bps REAL,
                 take_profit_pct REAL NOT NULL,
@@ -144,6 +220,10 @@ def init() -> None:
                 latest_exit_value_usd REAL,
                 latest_pnl_pct REAL,
                 latest_pnl_usd REAL,
+                latest_net_exit_value_usd REAL,
+                latest_net_pnl_pct REAL,
+                latest_net_pnl_usd REAL,
+                latest_exit_fee_usd REAL,
                 peak_pnl_pct REAL,
                 trough_pnl_pct REAL,
                 exit_reason TEXT,
@@ -164,12 +244,28 @@ def init() -> None:
                 exit_value_usd REAL,
                 pnl_pct REAL,
                 pnl_usd REAL,
+                net_exit_value_usd REAL,
+                net_pnl_pct REAL,
+                net_pnl_usd REAL,
+                exit_fee_usd REAL,
+                execution_state TEXT,
                 status TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 PRIMARY KEY (position_id, observed_ts)
             )
             """
         )
+        _ensure_column(c, "shadow_positions", "execution_state", "TEXT NOT NULL DEFAULT 'entry_recorded'")
+        _ensure_column(c, "shadow_positions", "entry_fee_usd", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(c, "shadow_positions", "latest_net_exit_value_usd", "REAL")
+        _ensure_column(c, "shadow_positions", "latest_net_pnl_pct", "REAL")
+        _ensure_column(c, "shadow_positions", "latest_net_pnl_usd", "REAL")
+        _ensure_column(c, "shadow_positions", "latest_exit_fee_usd", "REAL")
+        _ensure_column(c, "shadow_position_marks", "net_exit_value_usd", "REAL")
+        _ensure_column(c, "shadow_position_marks", "net_pnl_pct", "REAL")
+        _ensure_column(c, "shadow_position_marks", "net_pnl_usd", "REAL")
+        _ensure_column(c, "shadow_position_marks", "exit_fee_usd", "REAL")
+        _ensure_column(c, "shadow_position_marks", "execution_state", "TEXT")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_shadow_positions_signal ON shadow_positions(signal_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_shadow_positions_status ON shadow_positions(status, updated_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_shadow_marks_position ON shadow_position_marks(position_id, observed_ts)")
@@ -206,6 +302,7 @@ def open_shadow_position(event) -> str | None:
     position_size_tokens = float(buy_quote.get("expected_output_tokens") or 0.0)
     entry_exec_price = float(buy_quote.get("execution_price_usd") or 0.0)
     entry_mid_price = float((extra.get("dex_summary") or {}).get("price_usd") or 0.0)
+    entry_fee_usd = _calculate_entry_fee_usd(float(validation.get("intended_size_usd") or 0.0))
     if position_size_tokens <= 0 or entry_exec_price <= 0:
         logger.warning("[shadow-exec-skip] token=%s reason=missing_entry_quote", event.token)
         return None
@@ -223,6 +320,7 @@ def open_shadow_position(event) -> str | None:
             token=str(event.token or ""),
             source_event_type=str(event.type or ""),
             status="open",
+            execution_state=STATE_ENTRY_RECORDED,
             opened_ts=now,
             intended_size_usd=float(validation.get("intended_size_usd") or 0.0),
             position_size_tokens=position_size_tokens,
@@ -230,6 +328,7 @@ def open_shadow_position(event) -> str | None:
             dex_id=str(validation.get("dex_id") or "") or None,
             entry_mid_price_usd=entry_mid_price or None,
             entry_exec_price_usd=entry_exec_price,
+            entry_fee_usd=entry_fee_usd,
             expected_buy_slippage_bps=float(buy_quote.get("slippage_bps") or 0.0),
             expected_sell_slippage_bps=float(((validation.get("sell_quote") or {}) if isinstance(validation.get("sell_quote"), dict) else {}).get("slippage_bps") or 0.0),
             take_profit_pct=_take_profit_pct(),
@@ -241,19 +340,22 @@ def open_shadow_position(event) -> str | None:
         c.execute(
             """
             INSERT INTO shadow_positions (
-                position_id, signal_id, token, source_event_type, status, opened_ts, updated_ts,
+                position_id, signal_id, token, source_event_type, status, execution_state, opened_ts, updated_ts,
                 intended_size_usd, position_size_tokens, pair_address, dex_id,
-                entry_mid_price_usd, entry_exec_price_usd, expected_buy_slippage_bps,
+                entry_mid_price_usd, entry_exec_price_usd, entry_fee_usd, expected_buy_slippage_bps,
                 expected_sell_slippage_bps, take_profit_pct, stop_loss_pct, max_hold_minutes,
                 latest_price_usd, latest_liquidity_usd, latest_exit_value_usd, latest_pnl_pct,
-                latest_pnl_usd, peak_pnl_pct, trough_pnl_pct, validation_json, payload_json
-            ) VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                latest_pnl_usd, latest_net_exit_value_usd, latest_net_pnl_pct, latest_net_pnl_usd, latest_exit_fee_usd,
+                peak_pnl_pct, trough_pnl_pct, validation_json, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position_id,
                 signal_id,
                 event.token,
                 event.type,
+                position.status,
+                position.execution_state,
                 now,
                 now,
                 position.intended_size_usd,
@@ -262,6 +364,7 @@ def open_shadow_position(event) -> str | None:
                 position.dex_id,
                 position.entry_mid_price_usd,
                 position.entry_exec_price_usd,
+                position.entry_fee_usd,
                 position.expected_buy_slippage_bps,
                 position.expected_sell_slippage_bps,
                 position.take_profit_pct,
@@ -272,6 +375,10 @@ def open_shadow_position(event) -> str | None:
                 position.intended_size_usd,
                 0.0,
                 0.0,
+                position.intended_size_usd,
+                ((0.0 - position.entry_fee_usd) / position.intended_size_usd * 100.0) if position.intended_size_usd > 0 else 0.0,
+                0.0 - position.entry_fee_usd,
+                0.0,
                 0.0,
                 0.0,
                 _json_dumps(validation),
@@ -281,8 +388,9 @@ def open_shadow_position(event) -> str | None:
         c.execute(
             """
             INSERT INTO shadow_position_marks (
-                position_id, observed_ts, price_usd, liquidity_usd, exit_value_usd, pnl_pct, pnl_usd, status, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                position_id, observed_ts, price_usd, liquidity_usd, exit_value_usd, pnl_pct, pnl_usd,
+                net_exit_value_usd, net_pnl_pct, net_pnl_usd, exit_fee_usd, execution_state, status, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position_id,
@@ -292,12 +400,17 @@ def open_shadow_position(event) -> str | None:
                 float(validation.get("intended_size_usd") or 0.0),
                 0.0,
                 0.0,
+                float(validation.get("intended_size_usd") or 0.0),
+                ((0.0 - position.entry_fee_usd) / position.intended_size_usd * 100.0) if position.intended_size_usd > 0 else 0.0,
+                0.0 - position.entry_fee_usd,
+                0.0,
+                position.execution_state,
                 "open",
                 _json_dumps(payload),
             ),
         )
     logger.info(
-        "[shadow-exec-open] token=%s position_id=%s signal_id=%s size_usd=%.2f entry_exec=%.8f qty=%.8f pair=%s",
+        "[shadow-exec-open] token=%s position_id=%s signal_id=%s size_usd=%.2f entry_exec=%.8f qty=%.8f pair=%s entry_fee_usd=%.4f state=%s",
         event.token,
         position_id,
         signal_id or "",
@@ -305,6 +418,8 @@ def open_shadow_position(event) -> str | None:
         entry_exec_price,
         position_size_tokens,
         validation.get("pair_address") or "",
+        entry_fee_usd,
+        position.execution_state,
     )
     return position_id
 
@@ -323,9 +438,9 @@ def _fetch_open_positions(limit: int = 25) -> list[ShadowPosition]:
         rows = c.execute(
             """
             SELECT position_id, signal_id, token, source_event_type, status, opened_ts,
-                   intended_size_usd, position_size_tokens, pair_address, dex_id,
+                   execution_state, intended_size_usd, position_size_tokens, pair_address, dex_id,
                    entry_mid_price_usd, entry_exec_price_usd, expected_buy_slippage_bps,
-                   expected_sell_slippage_bps, take_profit_pct, stop_loss_pct, max_hold_minutes, payload_json
+                   expected_sell_slippage_bps, take_profit_pct, stop_loss_pct, max_hold_minutes, entry_fee_usd, payload_json
             FROM shadow_positions
             WHERE status='open'
             ORDER BY updated_ts ASC
@@ -349,6 +464,7 @@ def _fetch_open_positions(limit: int = 25) -> list[ShadowPosition]:
                 token=str(row["token"]),
                 source_event_type=str(row["source_event_type"]),
                 status=str(row["status"]),
+                execution_state=str(row["execution_state"] or STATE_ENTRY_RECORDED),
                 opened_ts=int(row["opened_ts"]),
                 intended_size_usd=float(row["intended_size_usd"] or 0.0),
                 position_size_tokens=float(row["position_size_tokens"] or 0.0),
@@ -356,6 +472,7 @@ def _fetch_open_positions(limit: int = 25) -> list[ShadowPosition]:
                 dex_id=str(row["dex_id"]) if row["dex_id"] is not None else None,
                 entry_mid_price_usd=float(row["entry_mid_price_usd"]) if row["entry_mid_price_usd"] is not None else None,
                 entry_exec_price_usd=float(row["entry_exec_price_usd"] or 0.0),
+                entry_fee_usd=float(row["entry_fee_usd"] or 0.0),
                 expected_buy_slippage_bps=float(row["expected_buy_slippage_bps"] or 0.0),
                 expected_sell_slippage_bps=float(row["expected_sell_slippage_bps"] or 0.0),
                 take_profit_pct=float(row["take_profit_pct"] or 0.0),
@@ -376,6 +493,11 @@ def _write_mark(
     exit_value_usd: float | None,
     pnl_pct: float | None,
     pnl_usd: float | None,
+    net_exit_value_usd: float | None,
+    net_pnl_pct: float | None,
+    net_pnl_usd: float | None,
+    exit_fee_usd: float | None,
+    execution_state: str,
     status: str,
     payload: dict[str, Any],
 ) -> None:
@@ -383,8 +505,9 @@ def _write_mark(
         c.execute(
             """
             INSERT OR REPLACE INTO shadow_position_marks (
-                position_id, observed_ts, price_usd, liquidity_usd, exit_value_usd, pnl_pct, pnl_usd, status, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                position_id, observed_ts, price_usd, liquidity_usd, exit_value_usd, pnl_pct, pnl_usd,
+                net_exit_value_usd, net_pnl_pct, net_pnl_usd, exit_fee_usd, execution_state, status, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position_id,
@@ -394,6 +517,11 @@ def _write_mark(
                 exit_value_usd,
                 pnl_pct,
                 pnl_usd,
+                net_exit_value_usd,
+                net_pnl_pct,
+                net_pnl_usd,
+                exit_fee_usd,
+                execution_state,
                 status,
                 _json_dumps(payload),
             ),
@@ -434,6 +562,8 @@ async def refresh_open_position(position: ShadowPosition) -> None:
     exit_value_usd = float(sell_quote_payload.get("expected_output_usd") or 0.0)
     pnl_usd = exit_value_usd - intended_size_usd
     pnl_pct = (pnl_usd / intended_size_usd) * 100.0 if intended_size_usd > 0 else 0.0
+    net_exit_value_usd, net_pnl_usd, exit_fee_usd = _net_pnl(exit_value_usd, intended_size_usd, position.entry_fee_usd)
+    net_pnl_pct = (net_pnl_usd / intended_size_usd) * 100.0 if intended_size_usd > 0 else 0.0
     age_minutes = max(0.0, (now - position.opened_ts) / 60.0)
     take_profit_pct = position.take_profit_pct or _take_profit_pct()
     stop_loss_pct = position.stop_loss_pct or _stop_loss_pct()
@@ -447,9 +577,27 @@ async def refresh_open_position(position: ShadowPosition) -> None:
     elif age_minutes >= max_hold_minutes:
         exit_reason = "time_stop"
 
+    next_state, transition_chain = _transition_execution_state(position.execution_state, exit_reason=exit_reason)
+    if transition_chain[-1] != position.execution_state:
+        logger.info(
+            "[shadow-exec-transition] token=%s position_id=%s from=%s to=%s chain=%s reason=%s",
+            token,
+            position_id,
+            position.execution_state,
+            next_state,
+            transition_chain,
+            exit_reason or "mark_to_market",
+        )
+
     payload = {
         "token": token,
         "position_id": position_id,
+        "execution": {
+            "state": next_state,
+            "transition_chain": transition_chain,
+            "entry_fee_usd": position.entry_fee_usd,
+            "exit_fee_usd": exit_fee_usd,
+        },
         "market_data": {
             "snapshot_ts": dex_summary.get("snapshot_ts"),
             "age_sec": 0.0 if dex_summary.get("snapshot_ts") else None,
@@ -459,6 +607,9 @@ async def refresh_open_position(position: ShadowPosition) -> None:
         "exit_value_usd": exit_value_usd,
         "pnl_pct": pnl_pct,
         "pnl_usd": pnl_usd,
+        "net_exit_value_usd": net_exit_value_usd,
+        "net_pnl_pct": net_pnl_pct,
+        "net_pnl_usd": net_pnl_usd,
         "sell_quote": sell_quote_payload,
         "exit_reason": exit_reason,
         "age_minutes": round(age_minutes, 2),
@@ -473,12 +624,14 @@ async def refresh_open_position(position: ShadowPosition) -> None:
             c.execute(
                 """
                 UPDATE shadow_positions
-                SET status='closed', updated_ts=?, closed_ts=?, latest_price_usd=?, latest_liquidity_usd=?,
-                    latest_exit_value_usd=?, latest_pnl_pct=?, latest_pnl_usd=?, peak_pnl_pct=?, trough_pnl_pct=?,
+                SET status='closed', execution_state=?, updated_ts=?, closed_ts=?, latest_price_usd=?, latest_liquidity_usd=?,
+                    latest_exit_value_usd=?, latest_pnl_pct=?, latest_pnl_usd=?, latest_net_exit_value_usd=?, latest_net_pnl_pct=?,
+                    latest_net_pnl_usd=?, latest_exit_fee_usd=?, peak_pnl_pct=?, trough_pnl_pct=?,
                     exit_reason=?, exit_price_usd=?, exit_value_usd=?, payload_json=?
                 WHERE position_id=?
                 """,
                 (
+                    next_state,
                     now,
                     now,
                     dex_summary.get("price_usd"),
@@ -486,6 +639,10 @@ async def refresh_open_position(position: ShadowPosition) -> None:
                     exit_value_usd,
                     pnl_pct,
                     pnl_usd,
+                    net_exit_value_usd,
+                    net_pnl_pct,
+                    net_pnl_usd,
+                    exit_fee_usd,
                     peak,
                     trough,
                     exit_reason,
@@ -499,17 +656,23 @@ async def refresh_open_position(position: ShadowPosition) -> None:
             c.execute(
                 """
                 UPDATE shadow_positions
-                SET updated_ts=?, latest_price_usd=?, latest_liquidity_usd=?, latest_exit_value_usd=?,
-                    latest_pnl_pct=?, latest_pnl_usd=?, peak_pnl_pct=?, trough_pnl_pct=?, payload_json=?
+                SET execution_state=?, updated_ts=?, latest_price_usd=?, latest_liquidity_usd=?, latest_exit_value_usd=?,
+                    latest_pnl_pct=?, latest_pnl_usd=?, latest_net_exit_value_usd=?, latest_net_pnl_pct=?,
+                    latest_net_pnl_usd=?, latest_exit_fee_usd=?, peak_pnl_pct=?, trough_pnl_pct=?, payload_json=?
                 WHERE position_id=?
                 """,
                 (
+                    next_state,
                     now,
                     dex_summary.get("price_usd"),
                     dex_summary.get("liquidity_usd"),
                     exit_value_usd,
                     pnl_pct,
                     pnl_usd,
+                    net_exit_value_usd,
+                    net_pnl_pct,
+                    net_pnl_usd,
+                    exit_fee_usd,
                     peak,
                     trough,
                     _json_dumps(payload),
@@ -524,26 +687,37 @@ async def refresh_open_position(position: ShadowPosition) -> None:
         exit_value_usd=exit_value_usd,
         pnl_pct=pnl_pct,
         pnl_usd=pnl_usd,
+        net_exit_value_usd=net_exit_value_usd,
+        net_pnl_pct=net_pnl_pct,
+        net_pnl_usd=net_pnl_usd,
+        exit_fee_usd=exit_fee_usd,
+        execution_state=next_state,
         status="closed" if exit_reason else "open",
         payload=payload,
     )
     if exit_reason:
         logger.info(
-            "[shadow-exec-close] token=%s position_id=%s reason=%s pnl_pct=%.2f pnl_usd=%.2f",
+            "[shadow-exec-close] token=%s position_id=%s reason=%s gross_pnl_pct=%.2f gross_pnl_usd=%.2f net_pnl_pct=%.2f net_pnl_usd=%.2f exit_fee_usd=%.4f",
             token,
             position_id,
             exit_reason,
             pnl_pct,
             pnl_usd,
+            net_pnl_pct,
+            net_pnl_usd,
+            exit_fee_usd,
         )
     else:
         logger.info(
-            "[shadow-exec-mark] token=%s position_id=%s pnl_pct=%.2f pnl_usd=%.2f age_minutes=%.2f",
+            "[shadow-exec-mark] token=%s position_id=%s gross_pnl_pct=%.2f gross_pnl_usd=%.2f net_pnl_pct=%.2f net_pnl_usd=%.2f age_minutes=%.2f state=%s",
             token,
             position_id,
             pnl_pct,
             pnl_usd,
+            net_pnl_pct,
+            net_pnl_usd,
             age_minutes,
+            next_state,
         )
 
 
