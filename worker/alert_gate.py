@@ -136,6 +136,7 @@ def admission_check_candidate(
     dex_summary: Optional[Dict[str, Any]],
     attention_unavailable: bool,
     gate_config: Optional[Dict[str, Any]] = None,
+    token_is_tradeable: bool = True,
 ) -> tuple[bool, List[str], str]:
     if not ENABLE_ALERT_GATE:
         return True, [], "unknown"
@@ -157,6 +158,8 @@ def admission_check_candidate(
 
     if risk_score >= RISK_VETO_THRESHOLD:
         reasons.append("risk_veto")
+    if not token_is_tradeable:
+        reasons.append("token_unverified")
 
     lifecycle = "dex" if dex_summary else "bonding_curve"
     if lifecycle == "dex":

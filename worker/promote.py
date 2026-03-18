@@ -90,6 +90,14 @@ def _candidate_send_eligible(
     return attn >= 0.50 or (creator_score >= creator_min and attn >= 0.35)
 
 
+def _token_is_tradeable_target(meta: dict | None, dex_summary: Dict[str, Any] | None) -> bool:
+    if dex_summary:
+        return True
+    if not isinstance(meta, dict):
+        return False
+    return bool(meta.get("is_fungible"))
+
+
 def _record_decision(
     e: Event,
     *,
@@ -232,6 +240,9 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         )
         if e.type == "token_resolved":
             meta = fetch_token_metadata(e.token)
+            if meta:
+                e.extra["token_interface"] = meta.get("interface")
+                e.extra["token_is_fungible"] = bool(meta.get("is_fungible"))
             if meta:
                 symbol = meta.get("symbol") or ""
                 name = meta.get("name") or ""
@@ -396,6 +407,12 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 e.reasons.append("dex_pair_found")
         else:
             dex_summary = None
+        token_meta = fetch_token_metadata(e.token) if e.token else None
+        if token_meta:
+            extra["token_interface"] = token_meta.get("interface")
+            extra["token_is_fungible"] = bool(token_meta.get("is_fungible"))
+        token_is_tradeable = _token_is_tradeable_target(token_meta, dex_summary)
+        extra["token_is_tradeable"] = token_is_tradeable
 
         # Elite layer: structural safety + score + age bypass + decay
         hard_fail = False
@@ -696,6 +713,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 dex_summary,
                 attention_unavailable,
                 candidate_config,
+                token_is_tradeable=token_is_tradeable,
             )
             if not ok:
                 logger.info(

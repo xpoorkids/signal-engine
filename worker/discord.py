@@ -846,9 +846,12 @@ def _engine_public_base_url() -> str:
 
 
 def _links_lines(token: str, metrics: dict) -> str:
-    lines = [
-        f"[Dexscreener](https://dexscreener.com/solana/{token}) | [Birdeye](https://birdeye.so/token/{token}?chain=solana)"
-    ]
+    lifecycle = str(metrics.get("lifecycle") or "")
+    if lifecycle == "bonding_curve":
+        primary = f"[pump.fun](https://pump.fun/coin/{token}) | [Birdeye](https://birdeye.so/token/{token}?chain=solana)"
+    else:
+        primary = f"[Dexscreener](https://dexscreener.com/solana/{token}) | [Birdeye](https://birdeye.so/token/{token}?chain=solana)"
+    lines = [primary]
     twitter_url = metrics.get("twitter_url")
     website_url = metrics.get("website_url")
     telegram_url = metrics.get("telegram_url")

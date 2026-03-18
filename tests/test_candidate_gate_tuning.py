@@ -48,6 +48,21 @@ def test_candidate_gate_uses_policy_override_thresholds():
     assert reasons == []
 
 
+def test_candidate_gate_rejects_unverified_token_target():
+    ok, reasons, lifecycle = admission_check_candidate(
+        attention_score=0.42,
+        risk_score=0.20,
+        extra={"metrics": {"age_minutes": 1.0}},
+        dex_summary=None,
+        attention_unavailable=False,
+        token_is_tradeable=False,
+    )
+
+    assert lifecycle == "bonding_curve"
+    assert ok is False
+    assert "token_unverified" in reasons
+
+
 def test_default_policy_descriptor_relaxes_candidate_gate_defaults(monkeypatch):
     monkeypatch.delenv("SIGNAL_ENGINE_CANDIDATE_GATE_ATTENTION_MIN", raising=False)
     monkeypatch.delenv("SIGNAL_ENGINE_CANDIDATE_GATE_MIN_AGE_SEC", raising=False)

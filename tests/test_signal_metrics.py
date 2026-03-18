@@ -517,6 +517,30 @@ def test_link_rendering_includes_only_available_optional_links():
     assert "[TG]" not in links
 
 
+def test_bonding_curve_links_use_pump_fun_primary():
+    event = Event(
+        type="candidate",
+        source="test",
+        token="So11111111111111111111111111111111111111112",
+        confidence=0.6,
+        extra={
+            "symbol": "CURVE",
+            "name": "Curve Token",
+            "lifecycle": "bonding_curve",
+            "risk_score": 0.2,
+            "attention_score": 0.66,
+            "metric_states": {
+                "risk_score": metric_state(0.2, status="computed"),
+                "attention_score": metric_state(0.66, status="computed"),
+            },
+        },
+    )
+
+    links = _candidate_field(format_discord(event)["embeds"][0], "Actions")
+    assert "[pump.fun]" in links
+    assert "[Dexscreener]" not in links
+
+
 def test_shorten_address_is_copy_safe():
     short = shorten_address("23tcQGFh1hriX5Hhhgz1JJgBwgqQCxmDUAoWJivvpump")
     assert short.startswith("23tcQG")

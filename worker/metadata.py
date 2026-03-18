@@ -13,6 +13,30 @@ HELIUS_RPC = (
 )
 
 
+def _extract_token_metadata(result: dict) -> dict | None:
+    if not isinstance(result, dict):
+        return None
+    content = result.get("content") or {}
+    metadata = content.get("metadata") or {}
+    token_info = result.get("token_info") or {}
+    interface = str(result.get("interface") or "").strip()
+    symbol = (metadata.get("symbol") or "").strip()
+    name = (metadata.get("name") or result.get("name") or "").strip()
+    decimals = token_info.get("decimals")
+    is_fungible = interface == "FungibleToken"
+    if not is_fungible and isinstance(decimals, int) and decimals >= 0:
+        is_fungible = True
+    if not symbol and not name and not interface and not token_info:
+        return None
+    return {
+        "symbol": symbol,
+        "name": name,
+        "interface": interface,
+        "decimals": decimals,
+        "is_fungible": is_fungible,
+    }
+
+
 @lru_cache(maxsize=4096)
 def fetch_token_metadata(mint: str) -> dict | None:
     if not mint or not HELIUS_RPC:
@@ -30,13 +54,7 @@ def fetch_token_metadata(mint: str) -> dict | None:
             return None
         data = r.json()
         result = data.get("result") or {}
-        content = result.get("content") or {}
-        metadata = content.get("metadata") or {}
-        symbol = (metadata.get("symbol") or "").strip()
-        name = (metadata.get("name") or result.get("name") or "").strip()
-        if not symbol and not name:
-            return None
-        return {"symbol": symbol, "name": name}
+        return _extract_token_metadata(result)
     except Exception:
         print("[metadata] getAsset exception", flush=True)
         return None
