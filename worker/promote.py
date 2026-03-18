@@ -226,6 +226,7 @@ from worker.config import (
     ENABLE_FORENSICS,
     ENABLE_ATTENTION,
     ENABLE_EXECUTION,
+    ENABLE_PRETRADE_VALIDATION,
     ENABLE_RISK_VETO,
     ENABLE_ATTENTION_BONUS,
     ENABLE_ATTENTION_CANDIDATE,
@@ -265,6 +266,7 @@ from worker.wallet_risk import score_wallet_risk
 from worker.dex import dex_enrich_token, select_best_pair, summarize_pair
 from worker.forensics import analyze_risk
 from worker.execution import estimate_edge
+from worker.trade_validator import validate_trade
 from worker.attention import compute_attention, register_buyer
 from worker.token_state import _ts
 from worker.elite import ELITE
@@ -633,6 +635,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             e.reasons.append("token_resolved")
 
         extra: Dict[str, Any] = dict(e.extra)
+        best_pair = None
         if ENABLE_DEX:
             extra["dex"] = await dex_enrich_token(e.token)
             dex_summary = None
@@ -776,6 +779,44 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             extra["risk_flags"] = risk_flags
             extra["token_wallet_risk"] = token_wallet_risk
             extra["metric_states"] = dict(e.extra.get("metric_states") or {})
+
+        top_holder_ratio = None
+        try:
+            top_holder_ratio = float(state.top_holder_ratio(e.token))
+        except Exception:
+            top_holder_ratio = None
+        if ENABLE_PRETRADE_VALIDATION:
+            try:
+                trade_validation = validate_trade(
+                    token=e.token,
+                    best_pair=best_pair,
+                    dex_summary=dex_summary,
+                    risk_score=risk_score,
+                    wallet_risk=token_wallet_risk,
+                    mint_authority=mint_auth,
+                    freeze_authority=freeze_auth,
+                    top_holder_ratio=top_holder_ratio,
+                )
+            except Exception:
+                logger.exception("[trade-validator-error] token=%s", e.token)
+                trade_validation = {
+                    "approved": False,
+                    "token": e.token,
+                    "policy_name": "elite_pretrade_validator",
+                    "policy_version": "v1",
+                    "reasons": ["validator_exception"],
+                    "warnings": [],
+                    "checks": [],
+                    "buy_quote": None,
+                    "sell_quote": None,
+                    "risk_summary": {},
+                    "intended_size_usd": None,
+                    "market_target": "unknown",
+                    "pair_address": None,
+                    "dex_id": None,
+                }
+            extra["trade_validation"] = trade_validation
+            extra["trade_validation_approved"] = bool(trade_validation.get("approved"))
 
         elite_score = ELITE.compute_elite_score(
             token=e.token,

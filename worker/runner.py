@@ -222,6 +222,7 @@ from worker.events import Event
 from worker.promote import process_event
 from worker.discord import send_discord, send_candidate_discord
 from worker.helius_listener import start_helius_listeners
+from worker.shadow_executor import maybe_open_shadow_position, shadow_monitor_worker
 import worker.scanner as scanner
 from app.services.state_service import record_wallet_signal, init as state_init
 from app.services.db_service import resolve_engine_db_path
@@ -261,11 +262,14 @@ def _should_send_heating_up(de: Event) -> bool:
     return strong_quality
 
 
-def _persist_non_candidate_delivery(de: Event, delivered: bool) -> None:
+def _persist_non_candidate_delivery(de: Event, delivered: bool) -> str | None:
     if not delivered:
         logger.warning("[dispatch-skip-persist] type=%s token=%s reason=delivery_failed", de.type, de.token)
-        return
-    record_signal_event(de)
+        return None
+    signal_id = record_signal_event(de)
+    if isinstance(de.extra, dict) and signal_id:
+        de.extra["_signal_id"] = signal_id
+    return signal_id
 
 
 def _persist_candidate_delivery(de: Event, *, delivered: bool, message_id: str | None, edited: bool) -> None:
@@ -315,7 +319,9 @@ async def event_loop(q: asyncio.Queue) -> None:
                         if isinstance(buyer, str) and buyer:
                             record_wallet_signal(buyer, de.token or "", de.type)
                         delivered = send_discord(de)
-                        _persist_non_candidate_delivery(de, delivered)
+                        signal_id = _persist_non_candidate_delivery(de, delivered)
+                        if delivered and signal_id and de.type == "promoted":
+                            maybe_open_shadow_position(de)
                 elif de.type == "candidate":
                     if de.token and not can_alert(state, f"candidate:{de.token}", CANDIDATE_ALERT_COOLDOWN_SEC):
                         print(f"[candidate-cooldown-skip] token={de.token}", flush=True)
@@ -379,6 +385,7 @@ async def run_worker() -> None:
     tasks.append(asyncio.create_task(daily_report_worker()))
     tasks.append(asyncio.create_task(ops_digest_worker()))
     tasks.append(asyncio.create_task(rollout_verification_worker()))
+    tasks.append(asyncio.create_task(shadow_monitor_worker()))
     if ENABLE_WS:
         tasks.append(asyncio.create_task(start_helius_listeners(q)))
     if ENABLE_DEX:

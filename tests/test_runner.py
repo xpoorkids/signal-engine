@@ -8,20 +8,23 @@ def test_persist_non_candidate_delivery_skips_when_not_delivered(monkeypatch):
     monkeypatch.setattr(runner, "record_signal_event", lambda event: recorded.append(event))
 
     event = Event(type="promoted", source="test", token="token-1")
-    runner._persist_non_candidate_delivery(event, delivered=False)
+    signal_id = runner._persist_non_candidate_delivery(event, delivered=False)
 
+    assert signal_id is None
     assert recorded == []
 
 
 def test_persist_non_candidate_delivery_records_on_success(monkeypatch):
     recorded: list[Event] = []
 
-    monkeypatch.setattr(runner, "record_signal_event", lambda event: recorded.append(event))
+    monkeypatch.setattr(runner, "record_signal_event", lambda event: (recorded.append(event), "sig-1")[1])
 
     event = Event(type="heating_up", source="test", token="token-2")
-    runner._persist_non_candidate_delivery(event, delivered=True)
+    signal_id = runner._persist_non_candidate_delivery(event, delivered=True)
 
+    assert signal_id == "sig-1"
     assert recorded == [event]
+    assert event.extra["_signal_id"] == "sig-1"
 
 
 def test_persist_candidate_delivery_create_updates_state(monkeypatch):
