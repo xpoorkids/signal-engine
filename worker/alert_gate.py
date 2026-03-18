@@ -137,6 +137,7 @@ def admission_check_candidate(
     attention_unavailable: bool,
     gate_config: Optional[Dict[str, Any]] = None,
     token_is_tradeable: bool = True,
+    bonding_curve_verified: bool = False,
 ) -> tuple[bool, List[str], str]:
     if not ENABLE_ALERT_GATE:
         return True, [], "unknown"
@@ -167,6 +168,8 @@ def admission_check_candidate(
         if not gate_ok:
             reasons.extend(f"dex_gate:{reason}" for reason in gate_reasons)
     if lifecycle == "bonding_curve":
+        if not bonding_curve_verified:
+            reasons.append("bonding_curve_unverified")
         has_bonding, bonding_ok = _bonding_curve_status(extra)
         if has_bonding and not bonding_ok:
             reasons.append("bonding_curve_missing")

@@ -772,6 +772,9 @@ def _attention_signal_lines(e: Event, risk_flags: dict) -> str:
 def _pretty_reason(reason: str) -> str:
     mapping = {
         "dex_pair_found": "Dex pair is live",
+        "bonding_curve_unverified": "Pump.fun curve is not verified yet",
+        "bonding_curve_missing": "Pump.fun curve liquidity is missing",
+        "token_unverified": "Token target is not verified",
         "token_resolved": "Token metadata resolved",
         "sniper_route": "Sniper route triggered",
         "promotion_gate_passed": "Promotion gate passed",

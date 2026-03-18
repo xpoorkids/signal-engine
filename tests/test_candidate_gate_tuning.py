@@ -34,13 +34,14 @@ def test_candidate_gate_uses_policy_override_thresholds():
     ok, reasons, lifecycle = admission_check_candidate(
         attention_score=0.17,
         risk_score=0.30,
-        extra={"metrics": {"age_minutes": 0.4}},
+        extra={"metrics": {"age_minutes": 0.4}, "bonding_curve_present": True},
         dex_summary=None,
         attention_unavailable=False,
         gate_config={
             "candidate_gate_attention_min": 0.14,
             "candidate_gate_min_age_sec": 15,
         },
+        bonding_curve_verified=True,
     )
 
     assert lifecycle == "bonding_curve"
@@ -61,6 +62,22 @@ def test_candidate_gate_rejects_unverified_token_target():
     assert lifecycle == "bonding_curve"
     assert ok is False
     assert "token_unverified" in reasons
+
+
+def test_candidate_gate_rejects_unverified_bonding_curve_path():
+    ok, reasons, lifecycle = admission_check_candidate(
+        attention_score=0.42,
+        risk_score=0.20,
+        extra={"metrics": {"age_minutes": 1.0}},
+        dex_summary=None,
+        attention_unavailable=False,
+        token_is_tradeable=True,
+        bonding_curve_verified=False,
+    )
+
+    assert lifecycle == "bonding_curve"
+    assert ok is False
+    assert "bonding_curve_unverified" in reasons
 
 
 def test_default_policy_descriptor_relaxes_candidate_gate_defaults(monkeypatch):

@@ -3,6 +3,7 @@ from app.services.signal_presentation import build_alert_explanation
 from app.services.signal_metrics import compute_risk_score, metric_state
 from worker.discord import format_discord, get_signal_color, shorten_address
 from worker.events import Event, as_dict
+from worker.promote import _has_bonding_curve_evidence
 
 
 def _candidate_field(embed: dict, name: str) -> str:
@@ -539,6 +540,18 @@ def test_bonding_curve_links_use_pump_fun_primary():
     links = _candidate_field(format_discord(event)["embeds"][0], "Actions")
     assert "[pump.fun]" in links
     assert "[Dexscreener]" not in links
+
+
+def test_bonding_curve_evidence_detects_pump_resolution_event():
+    event = Event(
+        type="token_resolved",
+        source="logs",
+        token="So11111111111111111111111111111111111111112",
+        reasons=["mint_resolved_from_logs_lookup"],
+        extra={},
+    )
+
+    assert _has_bonding_curve_evidence(event, {}) is True
 
 
 def test_shorten_address_is_copy_safe():
