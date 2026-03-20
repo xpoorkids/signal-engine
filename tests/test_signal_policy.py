@@ -1,4 +1,5 @@
 from worker.signal_policy import (
+    adversarial_signal_flags,
     candidate_confirmation_signals,
     candidate_send_reasons,
     classify_route_signal,
@@ -96,6 +97,93 @@ def test_candidate_send_reasons_allow_fast_lane_heating_setup_with_flow_strength
     assert "burst_strength" in confirmations
 
 
+def test_adversarial_signal_flags_detect_bursty_shallow_liquidity_pattern():
+    flags = adversarial_signal_flags(
+        metrics={
+            "unique_buyers_5m": 2,
+            "burst_count_60s": 9,
+            "tracked_wallet_hits": 0,
+            "kol_wallet_hits": 0,
+            "top_wallet_share_30s": 0.78,
+            "unique_wallets_30s": 2,
+        },
+        dex_summary={
+            "liquidity_usd": 7000.0,
+            "volume_m5": 35000.0,
+            "txns_m5_buys": 7,
+            "txns_m5_sells": 11,
+        },
+        anti_wash_top_wallet_share=0.70,
+        anti_wash_unique_wallets_30s=2,
+        min_unique_buyers_5m=3,
+        min_burst_count_60s=6,
+        max_sell_ratio_5m=1.2,
+        max_vol_liq_ratio_5m=4.0,
+        shallow_liq_usd=12000.0,
+    )
+
+    assert "burst_without_breadth" in flags
+    assert "concentrated_wallet_flow" in flags
+    assert "shallow_liquidity_hype" in flags
+    assert "volume_liquidity_imbalance" in flags
+    assert "sell_pressure_elevated" in flags
+
+
+def test_candidate_send_reasons_reject_adversarial_burst_without_hard_quality():
+    eligible, reasons, _confirmations = candidate_send_reasons(
+        attention_score=0.78,
+        creator_score=0.42,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 2,
+                "burst_count_60s": 9,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+                "unique_wallets_30s": 2,
+                "top_wallet_share_30s": 0.78,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 7000.0,
+            "volume_m5": 35000.0,
+            "txns_m5_buys": 7,
+            "txns_m5_sells": 11,
+        },
+    )
+
+    assert eligible is False
+    assert "burst_without_breadth" in reasons
+    assert "shallow_liquidity_hype" in reasons
+
+
+def test_candidate_send_reasons_allow_smart_money_supported_early_runner():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.78,
+        creator_score=0.42,
+        extra={
+            "route_decision": {"tier": "sniper", "route_confidence": 0.84},
+            "attention_metrics": {
+                "unique_buyers_5m": 2,
+                "burst_count_60s": 9,
+                "tracked_wallet_hits": 1,
+                "kol_wallet_hits": 0,
+                "unique_wallets_30s": 2,
+                "top_wallet_share_30s": 0.78,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 7000.0,
+            "volume_m5": 35000.0,
+            "txns_m5_buys": 7,
+            "txns_m5_sells": 11,
+        },
+    )
+
+    assert eligible is True
+    assert reasons == []
+    assert "tracked_wallet_flow" in confirmations
+
+
 def test_promotion_confirmation_target_scales_with_signal_strength():
     strong_target, strong_reasons = promotion_confirmation_target(
         confidence_score=0.90,
@@ -130,6 +218,26 @@ def test_promotion_confirmation_target_scales_with_signal_strength():
     assert "smart_money_support" in strong_reasons
     assert weak_target >= 3
     assert "sell_pressure_high" in weak_reasons
+
+
+def test_promotion_confirmation_target_penalizes_adversarial_market_shape():
+    target, reasons = promotion_confirmation_target(
+        confidence_score=0.86,
+        confidence_min=0.80,
+        attention_score=0.64,
+        attention_min=0.50,
+        risk_score=0.32,
+        risk_max=0.60,
+        liquidity_usd=14000.0,
+        liquidity_min=12000.0,
+        buyers_15m=34,
+        buyers_15m_min=30,
+        extra={"attention_metrics": {"unique_buyers_5m": 2, "burst_count_60s": 9, "tracked_wallet_hits": 0, "kol_wallet_hits": 0}},
+        dex_summary={"liquidity_usd": 7000.0, "volume_m5": 35000.0, "txns_m5_buys": 7, "txns_m5_sells": 11},
+    )
+
+    assert target >= 3
+    assert "volume_liquidity_imbalance" in reasons
 
 
 def test_classify_route_signal_distinguishes_sniper_from_watch():
@@ -225,6 +333,37 @@ def test_classify_route_signal_keeps_heating_up_when_flow_is_strong_without_hard
 
     assert route["tier"] == "heating_up"
     assert route["age_bypass_eligible"] is False
+
+
+def test_classify_route_signal_blocks_adversarial_fake_momentum_without_hard_quality():
+    route = classify_route_signal(
+        attention_score=0.78,
+        elite_score=9,
+        unique_10s=3,
+        burst_10s=8,
+        hard_fail_from_authority_checks=False,
+        extra={"attention_metrics": {"unique_buyers_5m": 2, "burst_count_60s": 9, "tracked_wallet_hits": 0, "kol_wallet_hits": 0, "unique_wallets_30s": 2, "top_wallet_share_30s": 0.78}},
+        dex_summary={"liquidity_usd": 7000.0, "volume_m5": 35000.0, "txns_m5_buys": 7, "txns_m5_sells": 11},
+    )
+
+    assert route["tier"] == "watch"
+    assert "shallow_liquidity_hype" in route["blockers"]
+    assert "volume_liquidity_imbalance" in route["blockers"]
+
+
+def test_classify_route_signal_keeps_smart_money_supported_runner_as_sniper():
+    route = classify_route_signal(
+        attention_score=0.78,
+        elite_score=9,
+        unique_10s=3,
+        burst_10s=8,
+        hard_fail_from_authority_checks=False,
+        extra={"attention_metrics": {"unique_buyers_5m": 2, "burst_count_60s": 9, "tracked_wallet_hits": 1, "kol_wallet_hits": 0, "unique_wallets_30s": 2, "top_wallet_share_30s": 0.78}},
+        dex_summary={"liquidity_usd": 7000.0, "volume_m5": 35000.0, "txns_m5_buys": 7, "txns_m5_sells": 11},
+    )
+
+    assert route["tier"] == "sniper"
+    assert route["sniper_ready"] is True
 
 
 def test_heating_delivery_decision_trusts_sniper_route():
