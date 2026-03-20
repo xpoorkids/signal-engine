@@ -48,7 +48,7 @@ def _background_workers_enabled() -> bool:
 def _policy_automation_worker_enabled() -> bool:
     if not _background_workers_enabled():
         return False
-    return os.getenv("SIGNAL_ENGINE_ENABLE_POLICY_AUTOMATION_WORKER", "1").strip().lower() not in {"0", "false", "no", "off"}
+    return os.getenv("SIGNAL_ENGINE_ENABLE_POLICY_AUTOMATION_WORKER", "0").strip().lower() not in {"0", "false", "no", "off"}
 
 
 @app.on_event("startup")
