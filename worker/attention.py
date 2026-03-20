@@ -138,6 +138,7 @@ from worker.config import (
     KOL_WALLETS,
     NARRATIVE_KEYWORDS,
 )
+from worker.signal_policy import candidate_signal_policy
 from worker.token_state import _ts
 from app.services.state_service import get_dynamic_tracked_wallets, get_dynamic_kol_wallets
 from worker.x_signal import fetch_x_signal
@@ -231,7 +232,11 @@ def register_buyer(mint: str, buyer: str, sol_spent: float | None = None) -> int
     total = len(st.buys_30s)
     unique_30s = len(counts)
     top_share = (max(counts.values()) / total) if total else 0.0
-    wash_suppress = 0.30 if (top_share >= 0.70 and unique_30s <= 2) else 0.0
+    wash_policy = candidate_signal_policy()
+    wash_suppress = 0.30 if (
+        top_share >= wash_policy.anti_wash_top_wallet_share
+        and unique_30s <= wash_policy.anti_wash_unique_wallets_30s
+    ) else 0.0
 
     if wash_suppress:
         print(
@@ -288,7 +293,11 @@ def _anti_wash_multiplier(mint: str) -> float:
         by_wallet[buyer] = by_wallet.get(buyer, 0) + 1
     unique_wallets = len(by_wallet)
     top_wallet_share = max(by_wallet.values()) / total if total else 0.0
-    if top_wallet_share >= 0.70 and unique_wallets <= 2:
+    wash_policy = candidate_signal_policy()
+    if (
+        top_wallet_share >= wash_policy.anti_wash_top_wallet_share
+        and unique_wallets <= wash_policy.anti_wash_unique_wallets_30s
+    ):
         return 0.70
     return 1.0
 
@@ -473,6 +482,8 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         "x_tweet_count": 0,
         "x_unique_authors": 0,
         "x_likes": 0,
+        "unique_wallets_30s": 0,
+        "top_wallet_share_30s": 0.0,
     }
 
     token = getattr(e, "token", None)
@@ -494,6 +505,17 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
     buyers_5m = metrics["unique_buyers_5m"]
     buyers_15m = metrics["unique_buyers_15m"]
     burst_60s = metrics["burst_count_60s"]
+    st = _ts(token) if token else None
+    if st is not None:
+        now = time.time()
+        while st.buys_30s and now - st.buys_30s[0][1] > 30:
+            st.buys_30s.popleft()
+        if st.buys_30s:
+            by_wallet: Dict[str, int] = {}
+            for buyer, _, _, _ in st.buys_30s:
+                by_wallet[buyer] = by_wallet.get(buyer, 0) + 1
+            metrics["unique_wallets_30s"] = len(by_wallet)
+            metrics["top_wallet_share_30s"] = (max(by_wallet.values()) / len(st.buys_30s)) if st.buys_30s else 0.0
 
     local_buyers = min(0.32, (min(buyers_5m, 4) * 0.045) + (max(buyers_5m - 4, 0) * 0.02))
     local_burst = min(0.24, (min(burst_60s, 8) * 0.015) + (max(burst_60s - 8, 0) * 0.0075))

@@ -276,6 +276,7 @@ from worker.alert_gate import evaluate_alert_gate, admission_check_candidate
 from worker.creator_score import compute_creator_score
 from worker.progression import metrics_improved
 from worker.recheck import schedule_rechecks, update_stop_counters, min_liquidity_gate
+from worker.signal_policy import candidate_send_reasons, promotion_confirmation_target
 from app.services.signal_metrics import compute_confidence_score, metric_state
 from app.services.signal_learning_service import classify_policy_regime, record_signal_decision, resolve_live_policy
 from app.services.state_service import (
@@ -338,6 +339,22 @@ def _candidate_send_eligible(
     attn = float(attention_score or 0.0)
     # Creator quality can help borderline setups, but should not push weak attention through on its own.
     return attn >= 0.50 or (creator_score >= creator_min and attn >= 0.35)
+
+
+def _candidate_send_decision(
+    *,
+    attention_score: float | None,
+    creator_score: float,
+    extra: dict[str, Any] | None,
+    dex_summary: dict[str, Any] | None,
+) -> tuple[bool, list[str], list[str]]:
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=attention_score,
+        creator_score=creator_score,
+        extra=extra,
+        dex_summary=dex_summary,
+    )
+    return eligible, reasons, confirmations
 
 
 def _token_is_tradeable_target(meta: dict | None, dex_summary: Dict[str, Any] | None) -> bool:
@@ -1105,10 +1122,17 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 creator_score_value = float(creator_score_info.get("score") or 0.0)
                 creator_ok = creator_score_value >= creator_min
                 attention_improving = (attention_score or 0.0) > prev_attention
-                send_eligible = _candidate_send_eligible(attention_score, creator_score_value, creator_min)
+                send_eligible, send_reasons, confirmation_signals = _candidate_send_decision(
+                    attention_score=attention_score,
+                    creator_score=creator_score_value,
+                    extra=extra,
+                    dex_summary=dex_summary,
+                )
                 allow_rate = allow_candidate_rate_limit(EARLY_WATCH_RATE_LIMIT_PER_HOUR) if send_eligible else False
                 should_send = send_eligible and allow_rate
                 extra["candidate_rate_limit_allowed"] = allow_rate
+                extra["candidate_confirmation_signals"] = confirmation_signals
+                extra["candidate_send_reasons"] = send_reasons
                 if not allow_rate:
                     if send_eligible:
                         logger.info(
@@ -1136,12 +1160,17 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                         e.token,
                         sniper_conditions_met,
                     )
-                    logger.info("[candidate-skip] reason=no_creator_or_improve token=%s", e.token)
+                    logger.info(
+                        "[candidate-skip] reason=no_creator_or_improve token=%s send_reasons=%s confirmations=%s",
+                        e.token,
+                        send_reasons,
+                        confirmation_signals,
+                    )
                     _record_decision(
                         e,
                         stage="candidate",
                         decision="candidate_not_eligible",
-                        reasons=["no_creator_or_attention"],
+                        reasons=send_reasons or ["no_creator_or_attention"],
                         attention_score=attention_score,
                         risk_score=risk_score,
                         confidence_score=e.confidence,
@@ -1178,10 +1207,12 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     policy_version=candidate_policy.get("policy_version"),
                 )
                 logger.info(
-                    "[candidate-progress] token=%s improved=%s keys=%s",
+                    "[candidate-progress] token=%s improved=%s keys=%s confirmations=%s send_reasons=%s",
                     e.token,
                     improved,
                     improved_keys,
+                    confirmation_signals,
+                    send_reasons,
                 )
                 upsert_candidate_state(
                     e.token,
@@ -1408,14 +1439,42 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 _record_decision(e, stage="promoted", decision="promotion_block", reasons=["creator_sell"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex", policy_name=promoted_policy.get("policy_name"), policy_version=promoted_policy.get("policy_version"))
                 return out
 
+            required_confirmations, promotion_strength_reasons = promotion_confirmation_target(
+                confidence_score=e.confidence,
+                confidence_min=promoted_confidence_min,
+                attention_score=attention_score,
+                attention_min=promoted_attention_min,
+                risk_score=risk_score,
+                risk_max=promoted_risk_max,
+                liquidity_usd=liq,
+                liquidity_min=promoted_liquidity_min,
+                buyers_15m=buyers_15m,
+                buyers_15m_min=promoted_buyers_15m_min,
+                extra=extra,
+                dex_summary=dex_summary,
+            )
             confirm_count = update_promo_confirm(e.token, True)
             logger.info(
-                "[promotion-check] token=%s confirm_count=%s",
+                "[promotion-check] token=%s confirm_count=%s required=%s strength_reasons=%s",
                 e.token,
                 confirm_count,
+                required_confirmations,
+                promotion_strength_reasons,
             )
-            if confirm_count < 2:
-                _record_decision(e, stage="promoted", decision="promotion_wait_confirm", reasons=[f"confirm_count:{confirm_count}"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex", policy_name=promoted_policy.get("policy_name"), policy_version=promoted_policy.get("policy_version"))
+            if confirm_count < required_confirmations:
+                _record_decision(
+                    e,
+                    stage="promoted",
+                    decision="promotion_wait_confirm",
+                    reasons=[f"confirm_count:{confirm_count}", f"required_confirmations:{required_confirmations}", *promotion_strength_reasons],
+                    attention_score=attention_score,
+                    risk_score=risk_score,
+                    confidence_score=e.confidence,
+                    creator_score=creator_score,
+                    lifecycle="dex",
+                    policy_name=promoted_policy.get("policy_name"),
+                    policy_version=promoted_policy.get("policy_version"),
+                )
                 return out
             gate_pass, gate_reasons = evaluate_alert_gate(
                 "promoted",

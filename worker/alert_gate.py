@@ -99,6 +99,7 @@ from worker.config import (
     CAND_MIN_CURVE_LIQ_USD,
     EARLY_ATTENTION_MIN,
 )
+from worker.signal_policy import market_quality_thresholds_for_age, candidate_confirmation_signals
 
 
 def _float_or_zero(value: Any) -> float:
@@ -113,39 +114,6 @@ def _int_or_zero(value: Any) -> int:
         return int(value)
     except Exception:
         return 0
-
-
-def _get_thresholds_for_age(age_min: float) -> Dict[str, float]:
-    # Adaptive gate tuned for Solana junk markets.
-    # Tier 1: <2m (very strict)
-    if age_min < 2.0:
-        return {
-            "min_liq": 20000.0,
-            "min_vol5m": 12000.0,
-            "min_buys5m": 20.0,
-            "max_sell_ratio5m": 1.3,
-            "max_vol_liq_ratio5m": 4.0,
-            "max_price_drop5m": -8.0,
-        }
-    # Tier 2: 2m - 10m (moderately strict)
-    if age_min < 10.0:
-        return {
-            "min_liq": 12000.0,
-            "min_vol5m": 7000.0,
-            "min_buys5m": 12.0,
-            "max_sell_ratio5m": 1.6,
-            "max_vol_liq_ratio5m": 6.0,
-            "max_price_drop5m": -12.0,
-        }
-    # Tier 3: >=10m (more permissive)
-    return {
-        "min_liq": 8000.0,
-        "min_vol5m": 5000.0,
-        "min_buys5m": 8.0,
-        "max_sell_ratio5m": 2.0,
-        "max_vol_liq_ratio5m": 8.0,
-        "max_price_drop5m": -18.0,
-    }
 
 
 def evaluate_alert_gate(
@@ -165,7 +133,7 @@ def evaluate_alert_gate(
     age_min = _float_or_zero(dex_summary.get("age_minutes"))
     if age_min <= 0:
         return False, ["age_missing"]
-    thresholds = _get_thresholds_for_age(age_min)
+    thresholds = market_quality_thresholds_for_age(age_min).as_dict()
     reasons: List[str] = []
 
     liq = _float_or_zero(dex_summary.get("liquidity_usd"))
@@ -279,5 +247,16 @@ def admission_check_candidate(
             pass
         elif curve_liq < CAND_MIN_CURVE_LIQ_USD:
             reasons.append(f"curve_liq<{CAND_MIN_CURVE_LIQ_USD:.0f}")
+
+    confirmation_reasons, confirmations = candidate_confirmation_signals(
+        attention_score=0.0 if attention_score is None else float(attention_score),
+        extra=extra,
+        dex_summary=dex_summary,
+    )
+    if confirmation_reasons:
+        reasons.extend(confirmation_reasons)
+    if confirmations:
+        if isinstance(extra, dict):
+            extra["candidate_confirmation_signals"] = confirmations
 
     return len(reasons) == 0, reasons, lifecycle
