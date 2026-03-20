@@ -406,12 +406,17 @@ def _quality_tier(attention_score: float | None, risk_score: float | None, elite
 
 
 def _decision_strip(extra: dict | None, confidence_pct: str, lifecycle: str) -> str:
+    route = ""
+    if isinstance(extra, dict):
+        route_decision = extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}
+        route = str(route_decision.get("tier") or "")
     return " ".join(
         [
             f"`CONF {confidence_pct}`",
             f"`RISK {_metric_display(extra, 'risk_score')}`",
             f"`ATTN {_metric_display(extra, 'attention_score')}`",
             f"`LIFE {lifecycle.upper() if lifecycle else 'N/A'}`",
+            f"`ROUTE {route.upper() if route else 'N/A'}`",
         ]
     )
 
@@ -451,6 +456,7 @@ def _build_intelligence_section(e: Event) -> str:
     extra = e.extra if isinstance(e.extra, dict) else {}
     attention_metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
     risk_flags = extra.get("risk_flags") if isinstance(extra.get("risk_flags"), dict) else {}
+    route_decision = extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}
 
     unique_buyers_5m = attention_metrics.get("unique_buyers_5m")
     unique_buyers_15m = attention_metrics.get("unique_buyers_15m")
@@ -500,6 +506,15 @@ def _build_intelligence_section(e: Event) -> str:
         narrative = ", ".join(_clean_text(str(item)) for item in narrative_hits[:2] if str(item).strip())
         if narrative:
             lines.append(f"- Narrative: `{narrative}`")
+    route_tier = str(route_decision.get("tier") or "").strip()
+    confirmations = route_decision.get("confirmations") if isinstance(route_decision.get("confirmations"), list) else []
+    blockers = route_decision.get("blockers") if isinstance(route_decision.get("blockers"), list) else []
+    if route_tier:
+        lines.append(f"- Route Tier: `{route_tier}`")
+    if confirmations:
+        lines.append(f"- Route Confirmations: `{', '.join(str(item) for item in confirmations[:3])}`")
+    if blockers and route_tier not in {"sniper", "heating_up"}:
+        lines.append(f"- Route Blockers: `{', '.join(str(item) for item in blockers[:3])}`")
 
     if risk_flags.get("wallet_cluster"):
         lines.append("- Wallet clustering detected")

@@ -223,6 +223,7 @@ from worker.promote import process_event
 from worker.discord import send_discord, send_candidate_discord
 from worker.helius_listener import start_helius_listeners
 from worker.shadow_executor import maybe_open_shadow_position, shadow_monitor_worker
+from worker.signal_policy import heating_delivery_decision
 import worker.scanner as scanner
 from app.services.state_service import record_wallet_signal, init as state_init
 from app.services.db_service import resolve_engine_db_path
@@ -237,29 +238,21 @@ from app.services.tuning_service import ops_digest_worker, rollout_verification_
 
 def _should_send_heating_up(de: Event) -> bool:
     extra = de.extra if isinstance(de.extra, dict) else {}
-    metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
-    lifecycle = str(extra.get("lifecycle") or "")
-    dex_summary = extra.get("dex_summary") if isinstance(extra.get("dex_summary"), dict) else {}
-    tracked_hits = int(metrics.get("tracked_wallet_hits") or 0)
-    kol_hits = int(metrics.get("kol_wallet_hits") or 0)
-    x_mentions = int(metrics.get("x_tweet_count") or 0)
-    x_authors = int(metrics.get("x_unique_authors") or 0)
-    boosts = int(metrics.get("dexscreener_boosts_count") or 0)
-    liq = float((dex_summary or {}).get("liquidity_usd") or 0.0)
-    strong_quality = (
-        kol_hits >= 1
-        or tracked_hits >= 2
-        or boosts >= 1
-        or (lifecycle == "dex" and liq >= 15000)
-        or (x_mentions >= 10 and x_authors >= 10 and lifecycle == "dex")
-    )
-    if not strong_quality:
+    allow, reasons = heating_delivery_decision(extra)
+    if not allow:
+        route = extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}
         print(
-            f"[heating-up-skip] token={de.token} lifecycle={lifecycle or 'unknown'} "
-            f"tracked={tracked_hits} kol={kol_hits} x_mentions={x_mentions} x_authors={x_authors} boosts={boosts} liq={liq:.0f}",
+            f"[heating-up-skip] token={de.token} tier={route.get('tier') or 'unknown'} blockers={reasons}",
             flush=True,
         )
-    return strong_quality
+    else:
+        logger.info(
+            "[heating-up-route] token=%s tier=%s confirmations=%s",
+            de.token,
+            str(((extra.get('route_decision') if isinstance(extra.get('route_decision'), dict) else {}) or {}).get('tier') or ''),
+            reasons,
+        )
+    return allow
 
 
 def _persist_non_candidate_delivery(de: Event, delivered: bool) -> str | None:

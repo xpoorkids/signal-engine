@@ -276,7 +276,7 @@ from worker.alert_gate import evaluate_alert_gate, admission_check_candidate
 from worker.creator_score import compute_creator_score
 from worker.progression import metrics_improved
 from worker.recheck import schedule_rechecks, update_stop_counters, min_liquidity_gate
-from worker.signal_policy import candidate_send_reasons, promotion_confirmation_target
+from worker.signal_policy import candidate_send_reasons, promotion_confirmation_target, classify_route_signal
 from app.services.signal_metrics import compute_confidence_score, metric_state
 from app.services.signal_learning_service import classify_policy_regime, record_signal_decision, resolve_live_policy
 from app.services.state_service import (
@@ -952,26 +952,49 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             st.age_bypass_until = 0.0
             age_bypassed = False
         extra["age_bypass_until"] = st.age_bypass_until if age_bypassed else 0.0
-
-        sniper_conditions_met = (
-            ENGINE_MODE == "balanced"
-            and unique_10s >= SNIPER_MIN_UNIQUE_10S
-            and burst_10s >= 6
-            and elite_score >= 8
-            and not hard_fail_from_authority_checks
+        route_decision = classify_route_signal(
+            attention_score=attention_score,
+            elite_score=elite_score,
+            unique_10s=unique_10s,
+            burst_10s=burst_10s,
+            hard_fail_from_authority_checks=hard_fail_from_authority_checks,
+            extra=extra,
+            dex_summary=dex_summary,
         )
-        if sniper_conditions_met:
+        extra["route_decision"] = route_decision
+        route_tier = str(route_decision.get("tier") or "watch")
+        logger.info(
+            "[route-decision] token=%s tier=%s confirmations=%s blockers=%s",
+            e.token,
+            route_tier,
+            route_decision.get("confirmations") or [],
+            route_decision.get("blockers") or [],
+        )
+        sniper_conditions_met = ENGINE_MODE == "balanced" and route_tier == "sniper"
+        heating_conditions_met = ENGINE_MODE == "balanced" and route_tier in {"sniper", "heating_up"}
+        if heating_conditions_met:
             if now_wall > st.age_bypass_until:
                 st.age_bypass_until = now_wall + AGE_BYPASS_TTL_SECONDS
                 extra["age_bypass_until"] = st.age_bypass_until
-            print(
-                f"[discord-sniper] token={e.token} elite={elite_score} unique_10s={unique_10s} burst10s={burst_10s}",
-                flush=True,
+            logger.info(
+                "[route-emit] token=%s tier=%s elite=%s unique_10s=%s burst10s=%s attention=%s confirmations=%s",
+                e.token,
+                route_tier,
+                elite_score,
+                unique_10s,
+                burst_10s,
+                attention_score,
+                route_decision.get("confirmations") or [],
             )
-            print(
-                f"[discord-send-attempt] tier=sniper url_set={1 if bool(DISCORD_WEBHOOK_URL) else 0} token={e.token}",
-                flush=True,
-            )
+            if route_tier == "sniper":
+                print(
+                    f"[discord-sniper] token={e.token} elite={elite_score} unique_10s={unique_10s} burst10s={burst_10s}",
+                    flush=True,
+                )
+                print(
+                    f"[discord-send-attempt] tier=sniper url_set={1 if bool(DISCORD_WEBHOOK_URL) else 0} token={e.token}",
+                    flush=True,
+                )
             out.append(
                 Event(
                     type="heating_up",
@@ -979,7 +1002,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     token=e.token,
                     creator=ts.creator,
                     confidence=e.confidence,
-                    reasons=e.reasons + ["sniper_route"],
+                    reasons=e.reasons + [f"{route_tier}_route"],
                     extra=dict(extra),
                     signature=e.signature,
                 )

@@ -1,6 +1,8 @@
 from worker.signal_policy import (
     candidate_confirmation_signals,
     candidate_send_reasons,
+    classify_route_signal,
+    heating_delivery_decision,
     promotion_confirmation_target,
 )
 
@@ -79,3 +81,44 @@ def test_promotion_confirmation_target_scales_with_signal_strength():
     assert "smart_money_support" in strong_reasons
     assert weak_target >= 3
     assert "sell_pressure_high" in weak_reasons
+
+
+def test_classify_route_signal_distinguishes_sniper_from_watch():
+    sniper = classify_route_signal(
+        attention_score=0.70,
+        elite_score=9,
+        unique_10s=3,
+        burst_10s=8,
+        hard_fail_from_authority_checks=False,
+        extra={"attention_metrics": {"tracked_wallet_hits": 1}},
+        dex_summary={"liquidity_usd": 25000.0, "txns_m5_buys": 14},
+    )
+    watch = classify_route_signal(
+        attention_score=0.25,
+        elite_score=4,
+        unique_10s=1,
+        burst_10s=2,
+        hard_fail_from_authority_checks=False,
+        extra={"attention_metrics": {"tracked_wallet_hits": 0}},
+        dex_summary={"liquidity_usd": 4000.0, "txns_m5_buys": 2},
+    )
+
+    assert sniper["tier"] == "sniper"
+    assert "tracked_wallet_flow" in sniper["confirmations"]
+    assert watch["tier"] == "watch"
+    assert watch["blockers"]
+
+
+def test_heating_delivery_decision_trusts_sniper_route():
+    allowed, reasons = heating_delivery_decision(
+        {
+            "route_decision": {
+                "tier": "sniper",
+                "confirmations": ["tracked_wallet_flow", "market_support"],
+                "blockers": [],
+            }
+        }
+    )
+
+    assert allowed is True
+    assert "sniper_route" in reasons

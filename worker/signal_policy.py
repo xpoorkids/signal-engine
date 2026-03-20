@@ -64,6 +64,23 @@ class PromotionSignalPolicy:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class RouteSignalPolicy:
+    heating_min_attention: float
+    heating_min_liq_usd: float
+    heating_min_x_mentions: int
+    heating_min_x_authors: int
+    sniper_min_attention: float
+    sniper_min_unique_10s: int
+    sniper_min_burst_10s: int
+    sniper_min_elite: int
+    sniper_min_confirmations: int
+    heating_min_confirmations: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def candidate_signal_policy() -> CandidateSignalPolicy:
     return CandidateSignalPolicy(
         min_unique_buyers_5m=_env_int("SIGNAL_ENGINE_CANDIDATE_MIN_UNIQUE_BUYERS_5M", 3),
@@ -89,6 +106,21 @@ def promotion_signal_policy() -> PromotionSignalPolicy:
         strong_attention_buffer=_env_float("SIGNAL_ENGINE_PROMOTED_STRONG_ATTENTION_BUFFER", 0.08),
         strong_risk_buffer=_env_float("SIGNAL_ENGINE_PROMOTED_STRONG_RISK_BUFFER", 0.12),
         max_sell_ratio5m=_env_float("SIGNAL_ENGINE_PROMOTED_MAX_SELL_RATIO_5M", 1.15),
+    )
+
+
+def route_signal_policy() -> RouteSignalPolicy:
+    return RouteSignalPolicy(
+        heating_min_attention=_env_float("SIGNAL_ENGINE_HEATING_MIN_ATTENTION", 0.45),
+        heating_min_liq_usd=_env_float("SIGNAL_ENGINE_HEATING_MIN_LIQ_USD", 15000.0),
+        heating_min_x_mentions=_env_int("SIGNAL_ENGINE_HEATING_MIN_X_MENTIONS", 10),
+        heating_min_x_authors=_env_int("SIGNAL_ENGINE_HEATING_MIN_X_AUTHORS", 10),
+        sniper_min_attention=_env_float("SIGNAL_ENGINE_SNIPER_MIN_ATTENTION", 0.55),
+        sniper_min_unique_10s=_env_int("SIGNAL_ENGINE_SNIPER_MIN_UNIQUE_10S", 2),
+        sniper_min_burst_10s=_env_int("SIGNAL_ENGINE_SNIPER_MIN_BURST_10S", 6),
+        sniper_min_elite=_env_int("SIGNAL_ENGINE_SNIPER_MIN_ELITE", 8),
+        sniper_min_confirmations=_env_int("SIGNAL_ENGINE_SNIPER_MIN_CONFIRMATIONS", 2),
+        heating_min_confirmations=_env_int("SIGNAL_ENGINE_HEATING_MIN_CONFIRMATIONS", 1),
     )
 
 
@@ -243,3 +275,103 @@ def promotion_confirmation_target(
             confirm_target += 1
             reasons.append("sell_pressure_high")
     return confirm_target, reasons
+
+
+def classify_route_signal(
+    *,
+    attention_score: float | None,
+    elite_score: int,
+    unique_10s: int,
+    burst_10s: int,
+    hard_fail_from_authority_checks: bool,
+    extra: dict[str, Any] | None,
+    dex_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    policy = route_signal_policy()
+    payload = extra if isinstance(extra, dict) else {}
+    metrics = payload.get("attention_metrics") if isinstance(payload.get("attention_metrics"), dict) else {}
+    liq = float(dex_summary.get("liquidity_usd") or 0.0) if isinstance(dex_summary, dict) else 0.0
+    buys5m = int(dex_summary.get("txns_m5_buys") or 0) if isinstance(dex_summary, dict) else 0
+    tracked_hits = int(metrics.get("tracked_wallet_hits") or 0)
+    kol_hits = int(metrics.get("kol_wallet_hits") or 0)
+    x_mentions = int(metrics.get("x_tweet_count") or 0)
+    x_authors = int(metrics.get("x_unique_authors") or 0)
+    attention = float(attention_score or 0.0)
+
+    confirmations: list[str] = []
+    blockers: list[str] = []
+    route_tier = "watch"
+
+    if tracked_hits > 0:
+        confirmations.append("tracked_wallet_flow")
+    if kol_hits > 0:
+        confirmations.append("kol_wallet_flow")
+    if liq >= policy.heating_min_liq_usd and buys5m >= 10:
+        confirmations.append("market_support")
+    if attention >= policy.heating_min_attention:
+        confirmations.append("attention_support")
+    if x_mentions >= policy.heating_min_x_mentions and x_authors >= policy.heating_min_x_authors:
+        confirmations.append("social_support")
+
+    if hard_fail_from_authority_checks:
+        blockers.append("authority_hard_fail")
+
+    if (
+        not blockers
+        and unique_10s >= policy.sniper_min_unique_10s
+        and burst_10s >= policy.sniper_min_burst_10s
+        and elite_score >= policy.sniper_min_elite
+        and attention >= policy.sniper_min_attention
+        and len(confirmations) >= policy.sniper_min_confirmations
+    ):
+        route_tier = "sniper"
+    elif not blockers and len(confirmations) >= policy.heating_min_confirmations and (
+        attention >= policy.heating_min_attention
+        or elite_score >= max(7, policy.sniper_min_elite - 1)
+        or tracked_hits > 0
+        or kol_hits > 0
+    ):
+        route_tier = "heating_up"
+    else:
+        if unique_10s < policy.sniper_min_unique_10s:
+            blockers.append(f"unique_10s<{policy.sniper_min_unique_10s}")
+        if burst_10s < policy.sniper_min_burst_10s:
+            blockers.append(f"burst_10s<{policy.sniper_min_burst_10s}")
+        if elite_score < policy.sniper_min_elite:
+            blockers.append(f"elite<{policy.sniper_min_elite}")
+        if attention < policy.heating_min_attention:
+            blockers.append(f"attention<{policy.heating_min_attention:.2f}")
+        if len(confirmations) < policy.heating_min_confirmations:
+            blockers.append(f"route_confirmations<{policy.heating_min_confirmations}")
+
+    return {
+        "tier": route_tier,
+        "confirmations": confirmations,
+        "blockers": blockers,
+        "policy": policy.as_dict(),
+        "metrics": {
+            "attention_score": attention,
+            "elite_score": elite_score,
+            "unique_10s": unique_10s,
+            "burst_10s": burst_10s,
+            "tracked_wallet_hits": tracked_hits,
+            "kol_wallet_hits": kol_hits,
+            "liquidity_usd": liq,
+            "txns_m5_buys": buys5m,
+            "x_tweet_count": x_mentions,
+            "x_unique_authors": x_authors,
+        },
+    }
+
+
+def heating_delivery_decision(extra: dict[str, Any] | None) -> tuple[bool, list[str]]:
+    payload = extra if isinstance(extra, dict) else {}
+    route = payload.get("route_decision") if isinstance(payload.get("route_decision"), dict) else {}
+    tier = str(route.get("tier") or "")
+    confirmations = route.get("confirmations") if isinstance(route.get("confirmations"), list) else []
+    blockers = route.get("blockers") if isinstance(route.get("blockers"), list) else []
+    if tier == "sniper":
+        return True, ["sniper_route", *confirmations]
+    if tier == "heating_up" and confirmations:
+        return True, confirmations
+    return False, blockers or ["route_not_heating_ready"]

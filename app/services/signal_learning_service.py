@@ -1680,7 +1680,14 @@ def record_signal_event(event, *, external_ref: str | None = None, edited: bool 
         if result and result.get("signal_id"):
             return str(result["signal_id"])
         if mode == "remote":
-            logger.warning("[signal-learning] remote signal write failed; falling back to local persistence")
+            logger.warning(
+                "[signal-learning] remote signal write failed; falling back to local persistence mode=%s role=%s base_url=%s token=%s event_type=%s",
+                mode,
+                _learning_process_role(),
+                _learning_write_base_url(),
+                getattr(event, "token", None),
+                getattr(event, "type", None),
+            )
     return _persist_signal_event(event, external_ref=external_ref, edited=edited)
 
 
@@ -1873,7 +1880,15 @@ def record_signal_decision(
         if result and "signal_id" in result:
             return str(result["signal_id"]) if result.get("signal_id") else None
         if mode == "remote":
-            logger.warning("[signal-learning] remote decision write failed; falling back to local persistence")
+            logger.warning(
+                "[signal-learning] remote decision write failed; falling back to local persistence mode=%s role=%s base_url=%s token=%s stage=%s decision=%s",
+                mode,
+                _learning_process_role(),
+                _learning_write_base_url(),
+                token,
+                stage,
+                decision,
+            )
     return _persist_signal_decision(
         token=token,
         event_type=event_type,

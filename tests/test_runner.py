@@ -102,3 +102,37 @@ def test_persist_candidate_delivery_skips_when_not_delivered(monkeypatch):
     )
 
     assert recorded == []
+
+
+def test_should_send_heating_up_uses_route_decision():
+    event = Event(
+        type="heating_up",
+        source="test",
+        token="token-6",
+        extra={
+            "route_decision": {
+                "tier": "sniper",
+                "confirmations": ["tracked_wallet_flow", "market_support"],
+                "blockers": [],
+            }
+        },
+    )
+
+    assert runner._should_send_heating_up(event) is True
+
+
+def test_should_send_heating_up_blocks_watch_route():
+    event = Event(
+        type="heating_up",
+        source="test",
+        token="token-7",
+        extra={
+            "route_decision": {
+                "tier": "watch",
+                "confirmations": [],
+                "blockers": ["attention<0.45"],
+            }
+        },
+    )
+
+    assert runner._should_send_heating_up(event) is False
