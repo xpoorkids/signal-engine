@@ -35,7 +35,7 @@ from worker.execution_lifecycle import (
     plan_shadow_monitor_transition,
     plan_shadow_submission_transition,
 )
-from worker.submission_simulator import create_submission_plan, advance_submission_plan
+from worker.execution_adapter import create_submission_attempt, advance_submission_attempt
 from worker.transaction_builder import build_execution_request, build_transaction_intent
 
 
@@ -61,6 +61,7 @@ class ShadowPosition:
     submission_ack_ts_ms: int | None
     submission_landing_ts_ms: int | None
     submission_expires_ts_ms: int | None
+    submission_attempt: dict[str, Any]
     intended_size_usd: float
     position_size_tokens: float
     pair_address: str | None
@@ -219,6 +220,7 @@ def init() -> None:
                 submission_ack_ts_ms INTEGER,
                 submission_landing_ts_ms INTEGER,
                 submission_expires_ts_ms INTEGER,
+                submission_attempt_json TEXT NOT NULL DEFAULT '{}',
                 updated_ts INTEGER NOT NULL,
                 closed_ts INTEGER,
                 intended_size_usd REAL NOT NULL,
@@ -297,6 +299,7 @@ def init() -> None:
         _ensure_column(c, "shadow_positions", "submission_ack_ts_ms", "INTEGER")
         _ensure_column(c, "shadow_positions", "submission_landing_ts_ms", "INTEGER")
         _ensure_column(c, "shadow_positions", "submission_expires_ts_ms", "INTEGER")
+        _ensure_column(c, "shadow_positions", "submission_attempt_json", "TEXT NOT NULL DEFAULT '{}'")
         _ensure_column(c, "shadow_positions", "entry_fee_usd", "REAL NOT NULL DEFAULT 0")
         _ensure_column(c, "shadow_positions", "latest_net_exit_value_usd", "REAL")
         _ensure_column(c, "shadow_positions", "latest_net_pnl_pct", "REAL")
@@ -353,7 +356,8 @@ def open_shadow_position(event) -> str | None:
 
     intent_payload = transaction_intent.as_dict()
     entry_plan = plan_shadow_entry_transition(STATE_ENTRY_RECORDED)
-    submission_plan = create_submission_plan(now_ts=now)
+    submission_attempt = create_submission_attempt(transaction_intent=intent_payload, now_ts=now)
+    submission_attempt_payload = submission_attempt.as_dict()
     signal_id = str(extra.get("_signal_id") or "").strip() or None
     position_size_tokens = float(transaction_intent.amounts.expected_output_tokens)
     entry_exec_price = float(transaction_intent.amounts.quoted_execution_price_usd)
@@ -380,12 +384,13 @@ def open_shadow_position(event) -> str | None:
             opened_ts=now,
             submission_intent_ts=now,
             quote_expires_ts=quote_expires_ts or None,
-            submission_request_id=submission_plan.request_id,
-            submission_status=submission_plan.status,
-            submission_requested_ts_ms=submission_plan.requested_ts,
-            submission_ack_ts_ms=submission_plan.ack_ts,
-            submission_landing_ts_ms=submission_plan.landing_ts,
-            submission_expires_ts_ms=submission_plan.expires_ts,
+            submission_request_id=submission_attempt.request_id,
+            submission_status=submission_attempt.status,
+            submission_requested_ts_ms=submission_attempt.requested_ts,
+            submission_ack_ts_ms=submission_attempt.ack_ts,
+            submission_landing_ts_ms=submission_attempt.landing_ts,
+            submission_expires_ts_ms=submission_attempt.expires_ts,
+            submission_attempt=submission_attempt_payload,
             intended_size_usd=float(transaction_intent.amounts.intended_size_usd),
             position_size_tokens=position_size_tokens,
             pair_address=transaction_intent.route.pair_address,
@@ -408,14 +413,14 @@ def open_shadow_position(event) -> str | None:
                 position_id, signal_id, token, source_event_type, status, execution_state, opened_ts, updated_ts,
                 submission_intent_ts, quote_expires_ts,
                 submission_request_id, submission_status, submission_requested_ts_ms, submission_ack_ts_ms,
-                submission_landing_ts_ms, submission_expires_ts_ms,
+                submission_landing_ts_ms, submission_expires_ts_ms, submission_attempt_json,
                 intended_size_usd, position_size_tokens, pair_address, dex_id,
                 entry_mid_price_usd, entry_exec_price_usd, entry_fee_usd, expected_buy_slippage_bps,
                 expected_sell_slippage_bps, take_profit_pct, stop_loss_pct, max_hold_minutes,
                 latest_price_usd, latest_liquidity_usd, latest_exit_value_usd, latest_pnl_pct,
                 latest_pnl_usd, latest_net_exit_value_usd, latest_net_pnl_pct, latest_net_pnl_usd, latest_exit_fee_usd,
                 peak_pnl_pct, trough_pnl_pct, transaction_intent_json, validation_json, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position_id,
@@ -434,6 +439,7 @@ def open_shadow_position(event) -> str | None:
                 position.submission_ack_ts_ms,
                 position.submission_landing_ts_ms,
                 position.submission_expires_ts_ms,
+                _json_dumps(position.submission_attempt),
                 position.intended_size_usd,
                 position.position_size_tokens,
                 position.pair_address,
@@ -495,28 +501,30 @@ def open_shadow_position(event) -> str | None:
     _record_transitions(
         position_id=position_id,
         observed_ts=now,
-        plan=plan_shadow_submission_transition(entry_plan.next_state, submission_status=submission_plan.status).as_dict(),
+        plan=plan_shadow_submission_transition(entry_plan.next_state, submission_status=submission_attempt.status).as_dict(),
         payload={
             "token": event.token,
             "position_id": position_id,
             "transaction_intent_id": transaction_intent.intent_id,
-            "submission": submission_plan.as_dict(),
+            "submission_attempt": submission_attempt_payload,
         },
     )
     logger.info(
-        "[shadow-exec-open] token=%s position_id=%s signal_id=%s intent_id=%s size_usd=%.2f entry_exec=%.8f qty=%.8f pair=%s entry_fee_usd=%.4f state=%s submission_status=%s quote_expires_ts=%s",
+        "[shadow-exec-open] token=%s position_id=%s signal_id=%s intent_id=%s request_id=%s size_usd=%.2f entry_exec=%.8f qty=%.8f pair=%s entry_fee_usd=%.4f state=%s submission_status=%s quote_expires_ts=%s adapter=%s",
         event.token,
         position_id,
         signal_id or "",
         transaction_intent.intent_id,
+        submission_attempt.request_id,
         float(transaction_intent.amounts.intended_size_usd),
         entry_exec_price,
         position_size_tokens,
         transaction_intent.route.pair_address or "",
         entry_fee_usd,
         position.execution_state,
-        submission_plan.status,
+        submission_attempt.status,
         position.quote_expires_ts or 0,
+        submission_attempt.adapter_kind,
     )
     return position_id
 
@@ -537,6 +545,7 @@ def _fetch_open_positions(limit: int = 25) -> list[ShadowPosition]:
             SELECT position_id, signal_id, token, source_event_type, status, opened_ts,
                    execution_state, submission_intent_ts, quote_expires_ts, submission_request_id, submission_status,
                    submission_requested_ts_ms, submission_ack_ts_ms, submission_landing_ts_ms, submission_expires_ts_ms,
+                   submission_attempt_json,
                    intended_size_usd, position_size_tokens, pair_address, dex_id,
                    entry_mid_price_usd, entry_exec_price_usd, expected_buy_slippage_bps,
                    expected_sell_slippage_bps, take_profit_pct, stop_loss_pct, max_hold_minutes, entry_fee_usd,
@@ -552,6 +561,7 @@ def _fetch_open_positions(limit: int = 25) -> list[ShadowPosition]:
     for row in rows:
         payload = {}
         transaction_intent = {}
+        submission_attempt = {}
         try:
             payload = json.loads(row["payload_json"] or "{}")
             if not isinstance(payload, dict):
@@ -564,6 +574,12 @@ def _fetch_open_positions(limit: int = 25) -> list[ShadowPosition]:
                 transaction_intent = {}
         except Exception:
             transaction_intent = {}
+        try:
+            submission_attempt = json.loads(row["submission_attempt_json"] or "{}")
+            if not isinstance(submission_attempt, dict):
+                submission_attempt = {}
+        except Exception:
+            submission_attempt = {}
         positions.append(
             ShadowPosition(
                 position_id=str(row["position_id"]),
@@ -581,6 +597,7 @@ def _fetch_open_positions(limit: int = 25) -> list[ShadowPosition]:
                 submission_ack_ts_ms=int(row["submission_ack_ts_ms"]) if row["submission_ack_ts_ms"] is not None else None,
                 submission_landing_ts_ms=int(row["submission_landing_ts_ms"]) if row["submission_landing_ts_ms"] is not None else None,
                 submission_expires_ts_ms=int(row["submission_expires_ts_ms"]) if row["submission_expires_ts_ms"] is not None else None,
+                submission_attempt=submission_attempt,
                 intended_size_usd=float(row["intended_size_usd"] or 0.0),
                 position_size_tokens=float(row["position_size_tokens"] or 0.0),
                 pair_address=str(row["pair_address"]) if row["pair_address"] is not None else None,
@@ -710,36 +727,40 @@ async def refresh_open_position(position: ShadowPosition) -> None:
             now,
         )
         return
-    submission_plan = advance_submission_plan(
-        {
+    submission_attempt = advance_submission_attempt(
+        transaction_intent=position.transaction_intent,
+        attempt=position.submission_attempt
+        or {
             "request_id": position.submission_request_id,
             "status": position.submission_status,
             "requested_ts": position.submission_requested_ts_ms,
             "ack_ts": position.submission_ack_ts_ms,
             "landing_ts": position.submission_landing_ts_ms,
             "expires_ts": position.submission_expires_ts_ms,
+            "quote_expires_ts": position.quote_expires_ts,
         },
         now_ts=now,
-        quote_expires_ts=position.quote_expires_ts,
     )
-    submission_transition = plan_shadow_submission_transition(position.execution_state, submission_status=submission_plan.status)
+    submission_attempt_payload = submission_attempt.as_dict()
+    submission_transition = plan_shadow_submission_transition(position.execution_state, submission_status=submission_attempt.status)
     if submission_transition.transitions:
         with _connect() as c:
             c.execute(
                 """
                 UPDATE shadow_positions
                 SET execution_state=?, submission_status=?, submission_request_id=?, submission_requested_ts_ms=?,
-                    submission_ack_ts_ms=?, submission_landing_ts_ms=?, submission_expires_ts_ms=?, updated_ts=?, payload_json=payload_json
+                    submission_ack_ts_ms=?, submission_landing_ts_ms=?, submission_expires_ts_ms=?, submission_attempt_json=?, updated_ts=?, payload_json=payload_json
                 WHERE position_id=?
                 """,
                 (
                     submission_transition.next_state,
-                    submission_plan.status,
-                    submission_plan.request_id,
-                    submission_plan.requested_ts,
-                    submission_plan.ack_ts,
-                    submission_plan.landing_ts,
-                    submission_plan.expires_ts,
+                    submission_attempt.status,
+                    submission_attempt.request_id,
+                    submission_attempt.requested_ts,
+                    submission_attempt.ack_ts,
+                    submission_attempt.landing_ts,
+                    submission_attempt.expires_ts,
+                    _json_dumps(submission_attempt_payload),
                     now,
                     position_id,
                 ),
@@ -752,16 +773,17 @@ async def refresh_open_position(position: ShadowPosition) -> None:
                 "token": token,
                 "position_id": position_id,
                 "transaction_intent_id": str((position.transaction_intent or {}).get("intent_id") or ""),
-                "submission": submission_plan.as_dict(),
+                "submission_attempt": submission_attempt_payload,
             },
         )
         logger.info(
-            "[shadow-submit-transition] token=%s position_id=%s request_id=%s status=%s state=%s",
+            "[shadow-submit-transition] token=%s position_id=%s request_id=%s status=%s state=%s adapter=%s",
             token,
             position_id,
-            submission_plan.request_id,
-            submission_plan.status,
+            submission_attempt.request_id,
+            submission_attempt.status,
             submission_transition.next_state,
+            submission_attempt.adapter_kind,
         )
         if submission_transition.next_state == STATE_QUOTE_EXPIRED:
             with _connect() as c:
@@ -773,7 +795,12 @@ async def refresh_open_position(position: ShadowPosition) -> None:
         if submission_transition.next_state != STATE_LANDED:
             return
         position = ShadowPosition(
-            **{**position.as_dict(), "execution_state": submission_transition.next_state, "submission_status": submission_plan.status}
+            **{
+                **position.as_dict(),
+                "execution_state": submission_transition.next_state,
+                "submission_status": submission_attempt.status,
+                "submission_attempt": submission_attempt_payload,
+            }
         )
     best_pair, dex_summary = await _fetch_market_snapshot(token)
     if not best_pair or not dex_summary:

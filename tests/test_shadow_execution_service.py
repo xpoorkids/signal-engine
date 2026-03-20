@@ -41,7 +41,7 @@ def test_open_shadow_position_persists_validated_trade(tmp_path, monkeypatch):
 
     with ses._connect() as c:
         row = c.execute(
-            "SELECT token, signal_id, status, execution_state, submission_intent_ts, quote_expires_ts, intended_size_usd, position_size_tokens, entry_fee_usd, latest_net_pnl_usd, transaction_intent_json FROM shadow_positions WHERE position_id=?",
+            "SELECT token, signal_id, status, execution_state, submission_intent_ts, quote_expires_ts, intended_size_usd, position_size_tokens, entry_fee_usd, latest_net_pnl_usd, transaction_intent_json, submission_attempt_json FROM shadow_positions WHERE position_id=?",
             (position_id,),
         ).fetchone()
         transitions = c.execute(
@@ -61,6 +61,8 @@ def test_open_shadow_position_persists_validated_trade(tmp_path, monkeypatch):
     assert row[9] < 0
     assert "intent_id" in str(row[10] or "")
     assert "no_signing" in str(row[10] or "")
+    assert "shadow_submission_simulator" in str(row[11] or "")
+    assert "request_id" in str(row[11] or "")
     assert [(item[0], item[1], item[2]) for item in transitions] == [
         (ses.STATE_ENTRY_RECORDED, "quote_validated", "quote_validated"),
         ("quote_validated", ses.STATE_SUBMIT_INTENT_RECORDED, "submit_intent_recorded"),
