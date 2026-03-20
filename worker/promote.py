@@ -298,6 +298,7 @@ from app.services.state_service import (
     update_promo_confirm,
     should_mute,
 )
+from app.services.structured_logging import log_event
 from app.services.wallet_service import wallet_risk_score
 
 logger = logging.getLogger(__name__)
@@ -408,39 +409,71 @@ def _record_decision(
     policy_name: str | None = None,
     policy_version: str | None = None,
 ) -> None:
+    extra = e.extra if isinstance(e.extra, dict) else {}
+    dex_summary = extra.get("dex_summary") if isinstance(extra.get("dex_summary"), dict) else {}
+    attention_metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
+    route_decision = extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}
+    features = {
+        "attention_score": attention_score,
+        "risk_score": risk_score,
+        "confidence_score": confidence_score,
+        "creator_score": creator_score,
+        "lifecycle": lifecycle,
+        "market_cap_usd": dex_summary.get("market_cap") or dex_summary.get("fdv"),
+        "liquidity_usd": dex_summary.get("liquidity_usd"),
+        "volume_m5_usd": dex_summary.get("volume_m5"),
+        "age_minutes": dex_summary.get("age_minutes"),
+        "price_change_m5": dex_summary.get("price_change_m5"),
+        "price_change_h1": dex_summary.get("price_change_h1"),
+        "txns_m5_buys": dex_summary.get("txns_m5_buys"),
+        "txns_m5_sells": dex_summary.get("txns_m5_sells"),
+        "unique_buyers_5m": attention_metrics.get("unique_buyers_5m"),
+        "unique_buyers_15m": attention_metrics.get("unique_buyers_15m"),
+        "burst_count_60s": attention_metrics.get("burst_count_60s"),
+        "tracked_wallet_hits": attention_metrics.get("tracked_wallet_hits"),
+        "kol_wallet_hits": attention_metrics.get("kol_wallet_hits"),
+        "candidate_send_eligible": extra.get("candidate_send"),
+        "candidate_edit": extra.get("candidate_edit"),
+        "candidate_improved": extra.get("candidate_improved"),
+        "candidate_rate_limit_allowed": extra.get("candidate_rate_limit_allowed"),
+        "candidate_progression_ok": extra.get("candidate_progression_ok"),
+        "has_dex_pool": bool(dex_summary),
+        "lp_drain": extra.get("lp_drain"),
+        "creator_sell": extra.get("creator_sold"),
+    }
+    features.update(classify_policy_regime(features, stage=stage, ts_value=e.ts))
+    log_event(
+        logger,
+        logging.INFO,
+        "decision",
+        token=e.token,
+        event_type=e.type,
+        source=e.source,
+        stage=stage,
+        decision=decision,
+        action_taken=action_taken,
+        reasons=reasons or [],
+        attention_score=attention_score,
+        risk_score=risk_score,
+        confidence_score=confidence_score,
+        creator_score=creator_score,
+        lifecycle=lifecycle,
+        route_tier=route_decision.get("tier"),
+        route_confidence=route_decision.get("route_confidence"),
+        route_confirmations=route_decision.get("confirmations") or [],
+        route_blockers=route_decision.get("blockers") or [],
+        sniper_blockers=route_decision.get("sniper_blockers") or [],
+        sniper_ready=route_decision.get("sniper_ready"),
+        sniper_fast_track=route_decision.get("sniper_fast_track"),
+        age_bypass_eligible=route_decision.get("age_bypass_eligible"),
+        age_bypass_ttl_sec=route_decision.get("age_bypass_ttl_sec"),
+        age_bypass_until=extra.get("age_bypass_until"),
+        candidate_send=extra.get("candidate_send"),
+        policy_name=policy_name,
+        policy_version=policy_version,
+        features=features,
+    )
     try:
-        extra = e.extra if isinstance(e.extra, dict) else {}
-        dex_summary = extra.get("dex_summary") if isinstance(extra.get("dex_summary"), dict) else {}
-        attention_metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
-        features = {
-            "attention_score": attention_score,
-            "risk_score": risk_score,
-            "confidence_score": confidence_score,
-            "creator_score": creator_score,
-            "lifecycle": lifecycle,
-            "market_cap_usd": dex_summary.get("market_cap") or dex_summary.get("fdv"),
-            "liquidity_usd": dex_summary.get("liquidity_usd"),
-            "volume_m5_usd": dex_summary.get("volume_m5"),
-            "age_minutes": dex_summary.get("age_minutes"),
-            "price_change_m5": dex_summary.get("price_change_m5"),
-            "price_change_h1": dex_summary.get("price_change_h1"),
-            "txns_m5_buys": dex_summary.get("txns_m5_buys"),
-            "txns_m5_sells": dex_summary.get("txns_m5_sells"),
-            "unique_buyers_5m": attention_metrics.get("unique_buyers_5m"),
-            "unique_buyers_15m": attention_metrics.get("unique_buyers_15m"),
-            "burst_count_60s": attention_metrics.get("burst_count_60s"),
-            "tracked_wallet_hits": attention_metrics.get("tracked_wallet_hits"),
-            "kol_wallet_hits": attention_metrics.get("kol_wallet_hits"),
-            "candidate_send_eligible": extra.get("candidate_send"),
-            "candidate_edit": extra.get("candidate_edit"),
-            "candidate_improved": extra.get("candidate_improved"),
-            "candidate_rate_limit_allowed": extra.get("candidate_rate_limit_allowed"),
-            "candidate_progression_ok": extra.get("candidate_progression_ok"),
-            "has_dex_pool": bool(dex_summary),
-            "lp_drain": extra.get("lp_drain"),
-            "creator_sell": extra.get("creator_sold"),
-        }
-        features.update(classify_policy_regime(features, stage=stage, ts_value=e.ts))
         signal_id = record_signal_decision(
             token=e.token,
             event_type=e.type,
@@ -570,7 +603,8 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         st = _ts(e.token)
         now_wall = time.time()
         if now_wall < st.blacklist_until:
-            print(f"[blacklist-skip] token={e.token} until={st.blacklist_until}", flush=True)
+            log_event(logger, logging.INFO, "blacklist-skip", token=e.token, blacklist_until=st.blacklist_until)
+            _record_decision(e, stage="routing", decision="blacklist_skip", reasons=["blacklisted"], lifecycle=str((e.extra or {}).get("lifecycle") or "unknown"))
             return out
         if e.creator and e.type == "token_resolved" and ts.signals == 1:
 
@@ -627,10 +661,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 else MIN_BUY_SOL_FOR_ATTENTION_LONG
             )
             if buy_size_sol < min_sol:
-                print(
-                    f"[skip-attention] token={e.token} sol={buy_size_sol} min_sol={min_sol}",
-                    flush=True,
-                )
+                log_event(logger, logging.INFO, "skip-attention", token=e.token, sol=buy_size_sol, min_sol=min_sol)
             else:
                 weight = register_buyer(e.token, buyer, buy_size_sol)
                 state.record_buyer(e.token, buyer, ts=e.ts, weight=weight)
@@ -723,43 +754,43 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         # Elite layer: structural safety + score + age bypass + decay
         hard_fail = False
         hard_fail_from_authority_checks = False
+        hard_fail_reasons: list[str] = []
         try:
             mint_auth, freeze_auth = ELITE.auth_check(e.token)
-            print(
-                f"[auth-check] token={e.token} mint_auth={1 if mint_auth else 0} freeze_auth={1 if freeze_auth else 0}",
-                flush=True,
-            )
+            log_event(logger, logging.INFO, "auth-check", token=e.token, mint_auth=bool(mint_auth), freeze_auth=bool(freeze_auth))
             if mint_auth:
-                print(f"[risk-gate] token={e.token} reason=mint_authority_active", flush=True)
+                log_event(logger, logging.INFO, "risk-gate", token=e.token, reason="mint_authority_active")
                 hard_fail = True
                 hard_fail_from_authority_checks = True
+                hard_fail_reasons.append("mint_authority_active")
             if freeze_auth:
-                print(f"[risk-gate] token={e.token} reason=freeze_authority_active", flush=True)
+                log_event(logger, logging.INFO, "risk-gate", token=e.token, reason="freeze_authority_active")
                 hard_fail = True
                 hard_fail_from_authority_checks = True
+                hard_fail_reasons.append("freeze_authority_active")
         except Exception:
             mint_auth = None
             freeze_auth = None
 
         try:
             liq_usd, liq_locked, liq_drop = ELITE.liq_check(e.token, dex_summary)
-            print(
-                f"[liq-check] token={e.token} liq_usd={liq_usd} locked={1 if liq_locked else 0}",
-                flush=True,
-            )
+            log_event(logger, logging.INFO, "liq-check", token=e.token, liq_usd=liq_usd, liq_locked=liq_locked, liq_drop=liq_drop)
             liquidity_unknown = False
             if liq_usd == 0:
                 liquidity_unknown = True
             elif liq_usd < 15000:
-                print(f"[risk-gate] token={e.token} reason=low_liquidity", flush=True)
+                log_event(logger, logging.INFO, "risk-gate", token=e.token, reason="low_liquidity", liq_usd=liq_usd)
                 hard_fail = True
+                hard_fail_reasons.append("low_liquidity")
             if not liquidity_unknown:
                 if liq_drop:
-                    print(f"[risk-gate] token={e.token} reason=liq_drop_spike", flush=True)
+                    log_event(logger, logging.INFO, "risk-gate", token=e.token, reason="liq_drop_spike")
                     hard_fail = True
+                    hard_fail_reasons.append("liq_drop_spike")
                 if liq_locked is False:
-                    print(f"[risk-gate] token={e.token} reason=liq_unlocked", flush=True)
+                    log_event(logger, logging.INFO, "risk-gate", token=e.token, reason="liq_unlocked")
                     hard_fail = True
+                    hard_fail_reasons.append("liq_unlocked")
         except Exception:
             liq_usd = None
             liq_locked = None
@@ -801,9 +832,10 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             top_wallet_share=top_share,
         )
         for reason in distribution_fail_reasons:
-            print(f"[risk-gate] token={e.token} reason={reason}", flush=True)
+            log_event(logger, logging.INFO, "risk-gate", token=e.token, reason=reason)
         if distribution_fail_reasons:
             hard_fail = True
+            hard_fail_reasons.extend(distribution_fail_reasons)
         if ENABLE_FORENSICS:
             risk_score, risk_reasons, risk_flags, risk_metric = analyze_risk(
                 e,
@@ -922,6 +954,17 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 risk_score,
                 RISK_VETO_THRESHOLD,
             )
+            _record_decision(
+                e,
+                stage="routing",
+                decision="risk_veto_skip",
+                reasons=["risk_veto"],
+                attention_score=attention_score,
+                risk_score=risk_score,
+                confidence_score=e.confidence,
+                creator_score=float(creator_score_info.get("score") or 0.0),
+                lifecycle=str(extra.get("lifecycle") or "unknown"),
+            )
             return [e]
 
         if liquidity_unknown:
@@ -940,15 +983,32 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 and elite_score >= route_policy.sniper_min_elite
                 and route_like_support
             ):
-                print(
-                    f"[liq-unknown-bypass] token={e.token} attention={attention_score} tracked_hits={int(attn_metrics.get('tracked_wallet_hits') or 0)} "
-                    f"kol_hits={int(attn_metrics.get('kol_wallet_hits') or 0)} unique_buyers_5m={int(attn_metrics.get('unique_buyers_5m') or 0)}",
-                    flush=True,
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "liq-unknown-bypass",
+                    token=e.token,
+                    attention_score=attention_score,
+                    tracked_wallet_hits=int(attn_metrics.get("tracked_wallet_hits") or 0),
+                    kol_wallet_hits=int(attn_metrics.get("kol_wallet_hits") or 0),
+                    unique_buyers_5m=int(attn_metrics.get("unique_buyers_5m") or 0),
                 )
             else:
                 hard_fail = True
+                hard_fail_reasons.append("liquidity_unknown")
 
         if hard_fail:
+            _record_decision(
+                e,
+                stage="routing",
+                decision="hard_fail",
+                reasons=hard_fail_reasons or ["hard_fail"],
+                attention_score=attention_score,
+                risk_score=risk_score,
+                confidence_score=e.confidence,
+                creator_score=float(creator_score_info.get("score") or 0.0),
+                lifecycle=str(extra.get("lifecycle") or "unknown"),
+            )
             return out
 
         age_bypassed = False
@@ -977,27 +1037,35 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             desired_until = now_wall + age_bypass_ttl_sec
             if desired_until > st.age_bypass_until:
                 st.age_bypass_until = desired_until
-                print(
-                    f"[age-bypass] token={e.token} tier={route_tier} ttl={age_bypass_ttl_sec} confidence={route_confidence:.2f} reason={age_bypass_reason}",
-                    flush=True,
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "age-bypass",
+                    token=e.token,
+                    tier=route_tier,
+                    ttl=age_bypass_ttl_sec,
+                    confidence=round(route_confidence, 3),
+                    reason=age_bypass_reason,
                 )
             age_bypassed = now_wall <= st.age_bypass_until
             extra["age_bypass_until"] = st.age_bypass_until
         else:
             age_bypassed = now_wall <= st.age_bypass_until
             extra["age_bypass_until"] = st.age_bypass_until if age_bypassed else 0.0
-        logger.info(
-            "[route-decision] token=%s tier=%s confidence=%.2f sniper_ready=%s fast_track=%s age_bypass_eligible=%s ttl=%s confirmations=%s blockers=%s sniper_blockers=%s",
-            e.token,
-            route_tier,
-            route_confidence,
-            bool(route_decision.get("sniper_ready")),
-            bool(route_decision.get("sniper_fast_track")),
-            age_bypass_eligible,
-            age_bypass_ttl_sec,
-            route_decision.get("confirmations") or [],
-            route_decision.get("blockers") or [],
-            route_decision.get("sniper_blockers") or [],
+        log_event(
+            logger,
+            logging.INFO,
+            "route-decision",
+            token=e.token,
+            tier=route_tier,
+            confidence=round(route_confidence, 3),
+            sniper_ready=bool(route_decision.get("sniper_ready")),
+            fast_track=bool(route_decision.get("sniper_fast_track")),
+            age_bypass_eligible=age_bypass_eligible,
+            ttl=age_bypass_ttl_sec,
+            confirmations=route_decision.get("confirmations") or [],
+            blockers=route_decision.get("blockers") or [],
+            sniper_blockers=route_decision.get("sniper_blockers") or [],
         )
         sniper_conditions_met = ENGINE_MODE == "balanced" and route_tier == "sniper"
         heating_conditions_met = ENGINE_MODE == "balanced" and route_tier in {"sniper", "heating_up"}
@@ -1005,27 +1073,40 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             if age_bypass_eligible and age_bypass_ttl_sec > 0 and now_wall > st.age_bypass_until:
                 st.age_bypass_until = now_wall + age_bypass_ttl_sec
                 extra["age_bypass_until"] = st.age_bypass_until
-            logger.info(
-                "[route-emit] token=%s tier=%s confidence=%.2f elite=%s unique_10s=%s burst10s=%s attention=%s confirmations=%s age_bypass_until=%s",
-                e.token,
-                route_tier,
-                route_confidence,
-                elite_score,
-                unique_10s,
-                burst_10s,
-                attention_score,
-                route_decision.get("confirmations") or [],
-                int(st.age_bypass_until or 0),
+            log_event(
+                logger,
+                logging.INFO,
+                "route-emit",
+                token=e.token,
+                tier=route_tier,
+                confidence=round(route_confidence, 3),
+                elite_score=elite_score,
+                unique_10s=unique_10s,
+                burst_10s=burst_10s,
+                attention_score=attention_score,
+                confirmations=route_decision.get("confirmations") or [],
+                age_bypass_until=int(st.age_bypass_until or 0),
             )
             if route_tier == "sniper":
-                print(
-                    f"[discord-sniper] token={e.token} confidence={route_confidence:.2f} elite={elite_score} unique_10s={unique_10s} burst10s={burst_10s} "
-                    f"confirmations={route_decision.get('confirmations') or []}",
-                    flush=True,
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "discord-sniper",
+                    token=e.token,
+                    confidence=round(route_confidence, 3),
+                    elite_score=elite_score,
+                    unique_10s=unique_10s,
+                    burst_10s=burst_10s,
+                    confirmations=route_decision.get("confirmations") or [],
                 )
-                print(
-                    f"[discord-send-attempt] tier=sniper url_set={1 if bool(DISCORD_WEBHOOK_URL) else 0} token={e.token} confidence={route_confidence:.2f}",
-                    flush=True,
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "discord-send-attempt",
+                    tier="sniper",
+                    url_set=bool(DISCORD_WEBHOOK_URL),
+                    token=e.token,
+                    confidence=round(route_confidence, 3),
                 )
             out.append(
                 Event(
@@ -1054,14 +1135,22 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 st.spike_started_at = now_wall
                 st.last_unique_buyers = unique_10s
                 st.last_burst_weight = burst_10s
-                print(f"[decay-watch] token={e.token} started_at={st.spike_started_at}", flush=True)
+                log_event(logger, logging.INFO, "decay-watch", token=e.token, started_at=st.spike_started_at)
 
         if st.spike_started_at and (now_wall - st.spike_started_at) <= DECAY_WINDOW_SECONDS:
             if unique_10s <= st.last_unique_buyers and burst_10s < (st.last_burst_weight * 0.5):
                 st.blacklist_until = now_wall + BLACKLIST_SECONDS
-                print(
-                    f"[momentum-fail] token={e.token} reason=no_follow_through blacklist={BLACKLIST_SECONDS}",
-                    flush=True,
+                log_event(logger, logging.INFO, "momentum-fail", token=e.token, reason="no_follow_through", blacklist_seconds=BLACKLIST_SECONDS)
+                _record_decision(
+                    e,
+                    stage="routing",
+                    decision="momentum_fail",
+                    reasons=["no_follow_through"],
+                    attention_score=attention_score,
+                    risk_score=risk_score,
+                    confidence_score=e.confidence,
+                    creator_score=float(creator_score_info.get("score") or 0.0),
+                    lifecycle=str(extra.get("lifecycle") or "unknown"),
                 )
                 return out
 
@@ -1071,9 +1160,25 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         if ENGINE_MODE == "long_term":
             unique_buyers_5m = int(attn_metrics.get("unique_buyers_5m") or 0)
             if unique_buyers_5m < LONG_MIN_UNIQUE_BUYERS_5M or elite_score < LONG_MIN_ELITE_SCORE:
-                print(
-                    f"[engine-gate] token={e.token} mode=long_term unique_buyers_5m={unique_buyers_5m} elite={elite_score}",
-                    flush=True,
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "engine-gate",
+                    token=e.token,
+                    mode="long_term",
+                    unique_buyers_5m=unique_buyers_5m,
+                    elite_score=elite_score,
+                )
+                _record_decision(
+                    e,
+                    stage="routing",
+                    decision="engine_gate_skip",
+                    reasons=["long_term_gate"],
+                    attention_score=attention_score,
+                    risk_score=risk_score,
+                    confidence_score=e.confidence,
+                    creator_score=float(creator_score_info.get("score") or 0.0),
+                    lifecycle=str(extra.get("lifecycle") or "unknown"),
                 )
                 return out
 

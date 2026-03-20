@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.services.db_service import connect_sqlite, resolve_engine_db_path
+from app.services.structured_logging import log_event
 from worker.dex import dex_enrich_token, select_best_pair, summarize_pair
 
 try:
@@ -1680,13 +1681,17 @@ def record_signal_event(event, *, external_ref: str | None = None, edited: bool 
         if result and result.get("signal_id"):
             return str(result["signal_id"])
         if mode == "remote":
-            logger.warning(
-                "[signal-learning] remote signal write failed; falling back to local persistence mode=%s role=%s base_url=%s token=%s event_type=%s",
-                mode,
-                _learning_process_role(),
-                _learning_write_base_url(),
-                getattr(event, "token", None),
-                getattr(event, "type", None),
+            log_event(
+                logger,
+                logging.WARNING,
+                "signal-learning-fallback",
+                record_type="signal",
+                mode=mode,
+                role=_learning_process_role(),
+                base_url=_learning_write_base_url(),
+                token=getattr(event, "token", None),
+                event_type=getattr(event, "type", None),
+                fallback="local_persistence",
             )
     return _persist_signal_event(event, external_ref=external_ref, edited=edited)
 
@@ -1880,14 +1885,18 @@ def record_signal_decision(
         if result and "signal_id" in result:
             return str(result["signal_id"]) if result.get("signal_id") else None
         if mode == "remote":
-            logger.warning(
-                "[signal-learning] remote decision write failed; falling back to local persistence mode=%s role=%s base_url=%s token=%s stage=%s decision=%s",
-                mode,
-                _learning_process_role(),
-                _learning_write_base_url(),
-                token,
-                stage,
-                decision,
+            log_event(
+                logger,
+                logging.WARNING,
+                "signal-learning-fallback",
+                record_type="decision",
+                mode=mode,
+                role=_learning_process_role(),
+                base_url=_learning_write_base_url(),
+                token=token,
+                stage=stage,
+                decision=decision,
+                fallback="local_persistence",
             )
     return _persist_signal_decision(
         token=token,

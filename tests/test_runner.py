@@ -2,6 +2,27 @@ from worker.events import Event
 from worker import runner
 
 
+def test_should_send_heating_up_logs_structured_skip(caplog):
+    caplog.set_level("INFO")
+    event = Event(
+        type="heating_up",
+        source="test",
+        token="token-log-1",
+        extra={
+            "route_decision": {
+                "tier": "watch",
+                "confirmations": [],
+                "blockers": ["attention<0.45"],
+            }
+        },
+    )
+
+    assert runner._should_send_heating_up(event) is False
+    assert "[heating-up-skip]" in caplog.text
+    assert "token=token-log-1" in caplog.text
+    assert 'blockers=["attention<0.45"]' in caplog.text
+
+
 def test_persist_non_candidate_delivery_skips_when_not_delivered(monkeypatch):
     recorded: list[Event] = []
 
@@ -12,6 +33,20 @@ def test_persist_non_candidate_delivery_skips_when_not_delivered(monkeypatch):
 
     assert signal_id is None
     assert recorded == []
+
+
+def test_persist_non_candidate_delivery_logs_structured_skip(monkeypatch, caplog):
+    caplog.set_level("WARNING")
+    monkeypatch.setattr(runner, "record_signal_event", lambda event: "sig-unused")
+
+    event = Event(type="promoted", source="test", token="token-log-2")
+    signal_id = runner._persist_non_candidate_delivery(event, delivered=False)
+
+    assert signal_id is None
+    assert "[dispatch-skip-persist]" in caplog.text
+    assert "type=promoted" in caplog.text
+    assert "token=token-log-2" in caplog.text
+    assert "reason=delivery_failed" in caplog.text
 
 
 def test_persist_non_candidate_delivery_records_on_success(monkeypatch):

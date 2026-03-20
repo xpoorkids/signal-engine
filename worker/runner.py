@@ -234,23 +234,32 @@ from app.services.signal_learning_service import (
     daily_report_worker,
 )
 from app.services.tuning_service import ops_digest_worker, rollout_verification_worker
+from app.services.structured_logging import log_event
 
 
 def _should_send_heating_up(de: Event) -> bool:
     extra = de.extra if isinstance(de.extra, dict) else {}
     allow, reasons = heating_delivery_decision(extra)
+    route = extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}
     if not allow:
-        route = extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}
-        print(
-            f"[heating-up-skip] token={de.token} tier={route.get('tier') or 'unknown'} blockers={reasons}",
-            flush=True,
+        log_event(
+            logger,
+            logging.INFO,
+            "heating-up-skip",
+            token=de.token,
+            tier=route.get("tier") or "unknown",
+            blockers=reasons,
+            confidence_score=getattr(de, "confidence", None),
         )
     else:
-        logger.info(
-            "[heating-up-route] token=%s tier=%s confirmations=%s",
-            de.token,
-            str(((extra.get('route_decision') if isinstance(extra.get('route_decision'), dict) else {}) or {}).get('tier') or ''),
-            reasons,
+        log_event(
+            logger,
+            logging.INFO,
+            "heating-up-route",
+            token=de.token,
+            tier=str(route.get("tier") or ""),
+            confirmations=reasons,
+            confidence_score=getattr(de, "confidence", None),
         )
     return allow
 
@@ -270,23 +279,34 @@ def _non_candidate_cooldown_key(de: Event) -> tuple[str | None, int]:
 
 def _persist_non_candidate_delivery(de: Event, delivered: bool) -> str | None:
     if not delivered:
-        logger.warning("[dispatch-skip-persist] type=%s token=%s reason=delivery_failed", de.type, de.token)
+        log_event(logger, logging.WARNING, "dispatch-skip-persist", type=de.type, token=de.token, reason="delivery_failed")
         return None
     signal_id = record_signal_event(de)
     if isinstance(de.extra, dict) and signal_id:
         de.extra["_signal_id"] = signal_id
+    log_event(logger, logging.INFO, "dispatch-persist", type=de.type, token=de.token, signal_id=signal_id, delivered=delivered)
     return signal_id
 
 
 def _persist_candidate_delivery(de: Event, *, delivered: bool, message_id: str | None, edited: bool) -> None:
     if not delivered:
-        logger.warning("[dispatch-skip-persist] type=candidate token=%s reason=delivery_failed", de.token)
+        log_event(logger, logging.WARNING, "dispatch-skip-persist", type="candidate", token=de.token, reason="delivery_failed")
         return
     external_ref = str(message_id or "")
     record_signal_event(
         de,
         external_ref=external_ref,
         edited=edited,
+    )
+    log_event(
+        logger,
+        logging.INFO,
+        "dispatch-persist",
+        type="candidate",
+        token=de.token,
+        message_id=message_id,
+        edited=edited,
+        delivered=delivered,
     )
     if message_id and not edited:
         from app.services.state_service import update_candidate_message_id, mark_candidate_alert_sent
@@ -306,9 +326,9 @@ async def event_loop(q: asyncio.Queue) -> None:
         e: Event = await q.get()
         dedupe_sig = f"{e.signature}:{e.type}:{e.token or ''}" if e.signature else None
         try:
-            print(f"[event-loop] recv type={e.type} token={e.token} sig={e.signature}", flush=True)
+            log_event(logger, logging.INFO, "event-loop", action="recv", type=e.type, token=e.token, sig=e.signature)
             if not is_sig_new(state, dedupe_sig, EARLY_DEDUPE_TTL_SEC):
-                print(f"[event-loop-skip] reason=dedupe type={e.type} token={e.token} sig={e.signature}", flush=True)
+                log_event(logger, logging.INFO, "event-loop-skip", reason="dedupe", type=e.type, token=e.token, sig=e.signature)
                 q.task_done()
                 continue
 
@@ -318,9 +338,15 @@ async def event_loop(q: asyncio.Queue) -> None:
                     cooldown_key, cooldown_sec = _non_candidate_cooldown_key(de)
                     if de.token and cooldown_key and not can_alert(state, cooldown_key, cooldown_sec):
                         route = de.extra.get("route_decision") if isinstance(de.extra, dict) and isinstance(de.extra.get("route_decision"), dict) else {}
-                        print(
-                            f"[dispatch-cooldown-skip] type={de.type} token={de.token} tier={route.get('tier') or ''} key={cooldown_key}",
-                            flush=True,
+                        log_event(
+                            logger,
+                            logging.INFO,
+                            "dispatch-cooldown-skip",
+                            type=de.type,
+                            token=de.token,
+                            tier=route.get("tier") or "",
+                            key=cooldown_key,
+                            cooldown_sec=cooldown_sec,
                         )
                         continue
                     if de.type == "heating_up" and not _should_send_heating_up(de):
@@ -334,9 +360,27 @@ async def event_loop(q: asyncio.Queue) -> None:
                         maybe_open_shadow_position(de)
                 elif de.type == "candidate":
                     if de.token and not can_alert(state, f"candidate:{de.token}", CANDIDATE_ALERT_COOLDOWN_SEC):
-                        print(f"[candidate-cooldown-skip] token={de.token}", flush=True)
+                        log_event(
+                            logger,
+                            logging.INFO,
+                            "candidate-cooldown-skip",
+                            token=de.token,
+                            cooldown_key=f"candidate:{de.token}",
+                            cooldown_sec=CANDIDATE_ALERT_COOLDOWN_SEC,
+                        )
                         continue
                     if isinstance(de.extra, dict) and de.extra.get("candidate_send") is False:
+                        route = de.extra.get("route_decision") if isinstance(de.extra.get("route_decision"), dict) else {}
+                        log_event(
+                            logger,
+                            logging.INFO,
+                            "candidate-send-skip",
+                            token=de.token,
+                            reason="candidate_send_false",
+                            route_tier=route.get("tier"),
+                            route_blockers=route.get("blockers") or [],
+                            candidate_send_reasons=(de.extra.get("candidate_send_reasons") or []),
+                        )
                         continue
                     message_id = None
                     if isinstance(de.extra, dict):
@@ -350,7 +394,16 @@ async def event_loop(q: asyncio.Queue) -> None:
                         edited=bool(message_id),
                     )
         except Exception as ex:
-            print(f"[event-loop-error] type={e.type} token={e.token} sig={e.signature} error={type(ex).__name__}:{ex}", flush=True)
+            log_event(
+                logger,
+                logging.ERROR,
+                "event-loop-error",
+                type=e.type,
+                token=e.token,
+                sig=e.signature,
+                error_type=type(ex).__name__,
+                error=str(ex),
+            )
             traceback.print_exc()
         finally:
             q.task_done()
@@ -370,7 +423,7 @@ async def run_worker() -> None:
     Start the full worker runtime: queue consumer, background reporting tasks,
     and live event producers.
     """
-    print(f"[worker] deploy_sha={os.getenv('RENDER_GIT_COMMIT', 'unknown')}", flush=True)
+    log_event(logger, logging.INFO, "worker", action="startup", deploy_sha=os.getenv("RENDER_GIT_COMMIT", "unknown"))
     db_path = resolve_engine_db_path()
     learning_base_url = os.getenv("SIGNAL_ENGINE_LEARNING_WRITE_BASE_URL", "").strip() or os.getenv("SIGNAL_ENGINE_PUBLIC_BASE_URL", "").strip()
     learning_mode = os.getenv("SIGNAL_ENGINE_LEARNING_WRITE_MODE", "").strip().lower() or "auto"
@@ -408,15 +461,14 @@ def main() -> None:
     try:
         asyncio.run(run_worker())
     except Exception as e:
-        print("[fatal] worker crashed:", e)
+        log_event(logger, logging.ERROR, "fatal", component="worker", error_type=type(e).__name__, error=str(e))
         traceback.print_exc()
 
     # CRITICAL: never exit
     while True:
-        print("[worker] crashed but holding process open")
+        log_event(logger, logging.ERROR, "worker", action="crashed_hold_open")
         time.sleep(60)
 
 
 if __name__ == "__main__":
     main()
-logger = logging.getLogger(__name__)
