@@ -35,6 +35,8 @@ _SCHEMA_READY = False
 DEFAULT_POLICY_NAME = "deterministic_engine"
 DEFAULT_POLICY_VERSION = "deterministic-v1"
 _REMOTE_WRITE_TIMEOUT = 5.0
+_POSITIVE_OUTCOME_LABELS = {"worked", "strong_continuation"}
+_NEGATIVE_OUTCOME_LABELS = {"failed", "faded"}
 
 
 def _connect() -> sqlite3.Connection:
@@ -636,6 +638,136 @@ def _policy_config_fingerprint(config: dict[str, Any] | None) -> str:
         return json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
     except Exception:
         return "{}"
+
+
+def _json_loads_dict(raw: str | None) -> dict[str, Any]:
+    try:
+        value = json.loads(raw or "{}")
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _json_loads_list(raw: str | None) -> list[Any]:
+    try:
+        value = json.loads(raw or "[]")
+        return value if isinstance(value, list) else []
+    except Exception:
+        return []
+
+
+def _reason_family(reason: str) -> str:
+    text = str(reason or "").strip().lower()
+    if not text:
+        return "unknown"
+    if text.startswith("age") or "ttl" in text or "bypass" in text:
+        return "timing"
+    if "liq" in text or "volume" in text or "pool" in text or "market_support" in text:
+        return "market_quality"
+    if "wallet" in text or "holder" in text or "buyer" in text or "kol" in text or "tracked" in text:
+        return "wallet_quality"
+    if "risk" in text or "authority" in text or "creator" in text or "lp_drain" in text or "mint" in text:
+        return "safety"
+    if "attention" in text or "burst" in text or "momentum" in text or "sniper" in text:
+        return "momentum"
+    if "candidate" in text or "promotion" in text or "promoted" in text:
+        return "promotion"
+    return "other"
+
+
+def _extract_bypass_flags(features: dict[str, Any]) -> list[str]:
+    bypasses: list[str] = []
+    if bool(features.get("age_bypass_eligible")) or bool(features.get("age_bypass_used")) or bool(features.get("age_bypass_until")):
+        bypasses.append("age_bypass")
+    if bool(features.get("liq_unknown_bypass")):
+        bypasses.append("liq_unknown_bypass")
+    if bool(features.get("sniper_fast_track")):
+        bypasses.append("sniper_fast_track")
+    if bool(features.get("candidate_rate_limit_bypass")):
+        bypasses.append("candidate_rate_limit_bypass")
+    return bypasses
+
+
+def _decision_route_class(
+    *,
+    signal_event_type: str | None,
+    stage: str | None,
+    decision: str | None,
+    action_taken: str | None,
+    features: dict[str, Any],
+) -> str:
+    route_tier = str(features.get("route_tier") or "").strip().lower()
+    signal_type = str(signal_event_type or "").strip().lower()
+    decision_name = str(decision or "").strip().lower()
+    stage_name = str(stage or "").strip().lower()
+    action_name = str(action_taken or "").strip().lower()
+
+    if stage_name in {"candidate", "heating_up"} and ("skip" in decision_name or "block" in decision_name):
+        return "reject"
+    if stage_name == "promoted" and "block" in decision_name:
+        return "reject"
+    if decision_name in {"candidate_buffered", "candidate_watch", "watch"}:
+        return "watch"
+    if signal_type == "promoted" or stage_name == "promoted" or decision_name.startswith("promotion_") and action_name == "emit":
+        return "promoted"
+    if signal_type == "heating_up":
+        return "sniper" if route_tier == "sniper" or bool(features.get("sniper_ready")) else "heating_up"
+    if signal_type == "candidate" and action_name == "emit":
+        return "candidate"
+    if action_name == "emit":
+        if route_tier == "sniper":
+            return "sniper"
+        if stage_name == "heating_up" or route_tier == "heating_up":
+            return "heating_up"
+        if stage_name == "candidate":
+            return "candidate"
+    if route_tier == "sniper":
+        return "sniper"
+    if route_tier == "heating_up":
+        return "heating_up"
+    return "watch" if stage_name == "candidate" else "reject"
+
+
+def _classify_validation_bucket(
+    *,
+    route_class: str,
+    sent_to_discord: bool,
+    outcome_label: str,
+    market_cap_change_pct: float | None,
+    age_minutes: float | None,
+) -> str:
+    outcome = str(outcome_label or "pending")
+    mc_change = _to_float(market_cap_change_pct)
+    age_value = _to_float(age_minutes)
+    route = str(route_class or "unknown")
+
+    if outcome in _NEGATIVE_OUTCOME_LABELS:
+        return "noisy_heating_up" if route == "heating_up" else "false_positive"
+    if outcome == "strong_continuation":
+        if route in {"sniper", "promoted"} or (mc_change is not None and mc_change >= 75.0):
+            return "elite_winner"
+        return "too_early_but_valid" if route in {"candidate", "heating_up"} else "decent_signal"
+    if outcome == "worked":
+        if route in {"candidate", "heating_up"} and ((mc_change is not None and mc_change >= 35.0) or (age_value is not None and age_value <= 30.0)):
+            return "too_early_but_valid"
+        if route in {"promoted", "sniper"} and mc_change is not None and mc_change < 15.0:
+            return "too_late"
+        return "decent_signal"
+    if not sent_to_discord:
+        return "rejected"
+    return "pending" if outcome == "pending" else "weak_alert"
+
+
+def _policy_descriptor_from_features(
+    features: dict[str, Any],
+    *,
+    policy_name: str | None,
+    policy_version: str | None,
+) -> dict[str, Any]:
+    descriptor = features.get("policy_descriptor") if isinstance(features.get("policy_descriptor"), dict) else {}
+    if descriptor:
+        return dict(descriptor)
+    return _normalize_policy_descriptor(policy_name=policy_name, policy_version=policy_version)
 
 
 def _public_policy_profile(record: sqlite3.Row | tuple[Any, ...]) -> dict[str, Any]:
@@ -1741,6 +1873,10 @@ def _persist_signal_decision(
         policy_name=policy_name,
         policy_version=policy_version,
     )
+    if "policy_descriptor" not in feature_map:
+        feature_map["policy_descriptor"] = dict(resolved_policy)
+    if "parameter_fingerprint" not in feature_map:
+        feature_map["parameter_fingerprint"] = _policy_config_fingerprint(resolved_policy)
     resolved_signal_id = _ensure_signal_shell(
         token=token,
         event_type=event_type,
@@ -5059,6 +5195,606 @@ def get_diagnostics_recommendations(hours: int = 24) -> list[dict[str, str]]:
             }
         )
     return recs
+
+
+def get_live_validation_records(
+    *,
+    hours: int = 72,
+    limit: int = 200,
+    route_class: str | None = None,
+    sent_only: bool = False,
+) -> list[dict[str, Any]]:
+    _ensure_schema()
+    cutoff = int(time.time()) - max(1, hours) * 3600
+    with _connect() as c:
+        signal_rows = c.execute(
+            """
+            SELECT signal_id, token, event_type, source, creator, alert_ts, updated_ts, external_ref,
+                   lifecycle, confidence_score, attention_score, risk_score, elite_score,
+                   market_cap_usd, liquidity_usd, volume_m5_usd, age_minutes, payload_json
+            FROM signals
+            WHERE alert_ts >= ?
+            ORDER BY alert_ts DESC
+            """,
+            (cutoff,),
+        ).fetchall()
+        decision_rows = c.execute(
+            """
+            SELECT decision_id, signal_id, token, event_type, stage, decision, action_taken,
+                   policy_name, policy_version, reasons_json, features_json,
+                   attention_score, risk_score, confidence_score, creator_score,
+                   lifecycle, created_ts
+            FROM signal_decisions
+            WHERE created_ts >= ?
+            ORDER BY created_ts DESC
+            """,
+            (cutoff,),
+        ).fetchall()
+        snapshot_rows = c.execute(
+            """
+            SELECT signal_id, horizon_minutes, captured_ts, outcome_label, market_cap_change_pct,
+                   liquidity_change_pct, volume_m5_change_pct, snapshot_json
+            FROM signal_snapshots
+            WHERE signal_id IN (SELECT signal_id FROM signals WHERE alert_ts >= ?)
+            ORDER BY horizon_minutes DESC, captured_ts DESC
+            """,
+            (cutoff,),
+        ).fetchall()
+
+    latest_decision_by_signal: dict[str, dict[str, Any]] = {}
+    for row in decision_rows:
+        signal_id = str(row[1] or "")
+        if not signal_id or signal_id in latest_decision_by_signal:
+            continue
+        latest_decision_by_signal[signal_id] = {
+            "decision_id": row[0],
+            "signal_id": signal_id,
+            "token": row[2],
+            "event_type": row[3],
+            "stage": row[4],
+            "decision": row[5],
+            "action_taken": row[6],
+            "policy_name": row[7],
+            "policy_version": row[8],
+            "reasons": [str(item) for item in _json_loads_list(row[9])],
+            "features": _json_loads_dict(row[10]),
+            "attention_score": row[11],
+            "risk_score": row[12],
+            "confidence_score": row[13],
+            "creator_score": row[14],
+            "lifecycle": row[15],
+            "created_ts": row[16],
+        }
+
+    latest_snapshot_by_signal: dict[str, dict[str, Any]] = {}
+    for row in snapshot_rows:
+        signal_id = str(row[0] or "")
+        if not signal_id or signal_id in latest_snapshot_by_signal:
+            continue
+        latest_snapshot_by_signal[signal_id] = {
+            "signal_id": signal_id,
+            "horizon_minutes": row[1],
+            "captured_ts": row[2],
+            "outcome_label": row[3],
+            "market_cap_change_pct": row[4],
+            "liquidity_change_pct": row[5],
+            "volume_m5_change_pct": row[6],
+            "snapshot": _json_loads_dict(row[7]),
+        }
+
+    records: list[dict[str, Any]] = []
+    wanted_route = str(route_class or "").strip().lower() or None
+    for row in signal_rows:
+        signal_id = str(row[0] or "")
+        decision = latest_decision_by_signal.get(signal_id, {})
+        features = decision.get("features") if isinstance(decision.get("features"), dict) else {}
+        snapshot = latest_snapshot_by_signal.get(signal_id, {})
+        source = str(row[3] or "")
+        payload = _json_loads_dict(row[17])
+        sent_to_discord = bool(payload) or bool(row[7])
+        derived_route = _decision_route_class(
+            signal_event_type=row[2],
+            stage=decision.get("stage"),
+            decision=decision.get("decision"),
+            action_taken=decision.get("action_taken"),
+            features=features,
+        )
+        if wanted_route and derived_route != wanted_route:
+            continue
+        if sent_only and not sent_to_discord:
+            continue
+        policy_descriptor = _policy_descriptor_from_features(
+            features,
+            policy_name=decision.get("policy_name"),
+            policy_version=decision.get("policy_version"),
+        )
+        record = {
+            "signal_id": signal_id,
+            "timestamp": row[5],
+            "token": row[1],
+            "creator": row[4],
+            "event_type": row[2],
+            "final_route_class": derived_route,
+            "sent_to_discord": sent_to_discord,
+            "source": source,
+            "external_ref": row[7],
+            "score": row[9],
+            "confidence": row[9],
+            "attention_score": row[10],
+            "risk_score": row[11],
+            "elite_score": row[12],
+            "market_cap_usd": row[13],
+            "liquidity_usd": row[14],
+            "volume_m5_usd": row[15],
+            "age_minutes": row[16],
+            "decision_stage": decision.get("stage"),
+            "decision_name": decision.get("decision"),
+            "action_taken": decision.get("action_taken"),
+            "decision_reasons": decision.get("reasons") or [],
+            "key_metrics": {
+                "attention_score": row[10],
+                "risk_score": row[11],
+                "elite_score": row[12],
+                "market_cap_usd": row[13],
+                "liquidity_usd": row[14],
+                "volume_m5_usd": row[15],
+                "age_minutes": row[16],
+                "tracked_wallet_hits": features.get("tracked_wallet_hits"),
+                "kol_wallet_hits": features.get("kol_wallet_hits"),
+                "unique_10s": features.get("unique_10s"),
+                "burst_10s": features.get("burst_10s"),
+                "unique_buyers_5m": features.get("unique_buyers_5m"),
+                "top_wallet_share_30s": features.get("top_wallet_share_30s"),
+                "route_confidence": features.get("route_confidence"),
+            },
+            "thresholds_used": policy_descriptor,
+            "parameter_fingerprint": str(features.get("parameter_fingerprint") or _policy_config_fingerprint(policy_descriptor)),
+            "policy_name": decision.get("policy_name"),
+            "policy_version": decision.get("policy_version"),
+            "bypasses_used": _extract_bypass_flags(features),
+            "route_tier": str(features.get("route_tier") or "").strip().lower() or None,
+            "route_confirmations": features.get("route_confirmations") if isinstance(features.get("route_confirmations"), list) else [],
+            "route_blockers": features.get("route_blockers") if isinstance(features.get("route_blockers"), list) else [],
+            "sniper_blockers": features.get("sniper_blockers") if isinstance(features.get("sniper_blockers"), list) else [],
+            "outcome_label": snapshot.get("outcome_label"),
+            "outcome_market_cap_change_pct": snapshot.get("market_cap_change_pct"),
+            "outcome_liquidity_change_pct": snapshot.get("liquidity_change_pct"),
+            "outcome_volume_m5_change_pct": snapshot.get("volume_m5_change_pct"),
+            "outcome_horizon_minutes": snapshot.get("horizon_minutes"),
+            "outcome_snapshot": snapshot.get("snapshot") if isinstance(snapshot.get("snapshot"), dict) else {},
+        }
+        record["evaluation_bucket"] = _classify_validation_bucket(
+            route_class=derived_route,
+            sent_to_discord=sent_to_discord,
+            outcome_label=str(snapshot.get("outcome_label") or "pending"),
+            market_cap_change_pct=_to_float(snapshot.get("market_cap_change_pct")),
+            age_minutes=_to_float(row[16]),
+        )
+        records.append(record)
+        if len(records) >= max(1, limit):
+            break
+    return records
+
+
+def get_missed_runner_analysis(*, hours: int = 168, limit: int = 50) -> dict[str, Any]:
+    records = get_live_validation_records(hours=hours, limit=max(limit * 5, 200), sent_only=False)
+    missed: list[dict[str, Any]] = []
+    for record in records:
+        if record.get("sent_to_discord"):
+            continue
+        outcome_label = str(record.get("outcome_label") or "pending")
+        if outcome_label not in _POSITIVE_OUTCOME_LABELS:
+            continue
+        reasons = [str(item) for item in record.get("decision_reasons") or []]
+        route_class = str(record.get("final_route_class") or "unknown")
+        route_blockers = [str(item) for item in record.get("route_blockers") or []]
+        sniper_blockers = [str(item) for item in record.get("sniper_blockers") or []]
+        missed.append(
+            {
+                "signal_id": record.get("signal_id"),
+                "token": record.get("token"),
+                "timestamp": record.get("timestamp"),
+                "decision_stage": record.get("decision_stage"),
+                "decision_name": record.get("decision_name"),
+                "binding_reasons": reasons[:8],
+                "binding_gate_families": sorted({_reason_family(reason) for reason in reasons}),
+                "route_class": route_class,
+                "miss_bucket": "missed_sniper" if route_class == "sniper" or sniper_blockers else "missed_runner",
+                "outcome_label": outcome_label,
+                "market_cap_change_pct": record.get("outcome_market_cap_change_pct"),
+                "route_blockers": route_blockers[:6],
+                "sniper_blockers": sniper_blockers[:6],
+                "thresholds_used": record.get("thresholds_used") if isinstance(record.get("thresholds_used"), dict) else {},
+            }
+        )
+    missed.sort(
+        key=lambda item: (
+            0 if str(item.get("miss_bucket") or "") == "missed_sniper" else 1,
+            -float(item.get("market_cap_change_pct") or 0.0),
+            str(item.get("token") or ""),
+        )
+    )
+    family_counts: dict[str, int] = {}
+    for item in missed:
+        for family in item.get("binding_gate_families") or []:
+            family_counts[family] = family_counts.get(family, 0) + 1
+    return {
+        "lookback_hours": hours,
+        "missed_runner_count": len(missed),
+        "top_binding_gate_families": [
+            {"family": family, "count": count}
+            for family, count in sorted(family_counts.items(), key=lambda pair: (-pair[1], pair[0]))[:10]
+        ],
+        "missed_runners": missed[: max(1, limit)],
+    }
+
+
+def get_policy_validation_comparison(*, hours: int = 168, limit: int = 12) -> dict[str, Any]:
+    records = get_live_validation_records(hours=hours, limit=5000, sent_only=False)
+    grouped: dict[str, dict[str, Any]] = {}
+    for record in records:
+        descriptor = record.get("thresholds_used") if isinstance(record.get("thresholds_used"), dict) else {}
+        fingerprint = str(record.get("parameter_fingerprint") or _policy_config_fingerprint(descriptor))
+        policy_key = f"{record.get('policy_name') or 'unknown'}@{record.get('policy_version') or 'unknown'}"
+        group = grouped.setdefault(
+            f"{policy_key}|{fingerprint}",
+            {
+                "parameter_fingerprint": fingerprint,
+                "policy_name": record.get("policy_name"),
+                "policy_version": record.get("policy_version"),
+                "policy_key": policy_key,
+                "thresholds_used": descriptor,
+                "total": 0,
+                "sent": 0,
+                "positive": 0,
+                "negative": 0,
+                "pending": 0,
+                "route_counts": {},
+                "evaluation_buckets": {},
+            },
+        )
+        group["total"] += 1
+        if record.get("sent_to_discord"):
+            group["sent"] += 1
+        outcome_label = str(record.get("outcome_label") or "pending")
+        if outcome_label in _POSITIVE_OUTCOME_LABELS:
+            group["positive"] += 1
+        elif outcome_label in _NEGATIVE_OUTCOME_LABELS:
+            group["negative"] += 1
+        else:
+            group["pending"] += 1
+        route = str(record.get("final_route_class") or "unknown")
+        group["route_counts"][route] = int(group["route_counts"].get(route, 0)) + 1
+        bucket = str(record.get("evaluation_bucket") or "unknown")
+        group["evaluation_buckets"][bucket] = int(group["evaluation_buckets"].get(bucket, 0)) + 1
+
+    ranked: list[dict[str, Any]] = []
+    for item in grouped.values():
+        sent = int(item["sent"] or 0)
+        positive = int(item["positive"] or 0)
+        negative = int(item["negative"] or 0)
+        total = int(item["total"] or 0)
+        precision = round((positive / sent) * 100.0, 1) if sent else 0.0
+        false_positive_rate = round((negative / sent) * 100.0, 1) if sent else 0.0
+        coverage = round((sent / total) * 100.0, 1) if total else 0.0
+        robustness = round(precision - (false_positive_rate * 0.6), 1)
+        ranked.append(
+            {
+                **item,
+                "precision": precision,
+                "false_positive_rate": false_positive_rate,
+                "coverage": coverage,
+                "robustness": robustness,
+            }
+        )
+    ranked.sort(
+        key=lambda item: (
+            -float(item.get("robustness") or 0.0),
+            -float(item.get("precision") or 0.0),
+            int(item.get("sent") or 0),
+            str(item.get("policy_key") or ""),
+        )
+    )
+    return {
+        "lookback_hours": hours,
+        "variant_count": len(ranked),
+        "variants": ranked[: max(1, limit)],
+    }
+
+
+def get_live_validation_summary(*, hours: int = 72, limit: int = 200) -> dict[str, Any]:
+    records = get_live_validation_records(hours=hours, limit=max(limit, 300), sent_only=False)
+    missed = get_missed_runner_analysis(hours=hours, limit=max(10, min(50, limit)))
+    comparison = get_policy_validation_comparison(hours=max(hours, 24), limit=8)
+
+    route_counts: dict[str, int] = {}
+    sent_route_counts: dict[str, int] = {}
+    evaluation_buckets: dict[str, int] = {}
+    gate_families: dict[str, dict[str, Any]] = {}
+    route_quality_map: dict[str, dict[str, Any]] = {}
+    borderline_cases: list[dict[str, Any]] = []
+
+    for record in records:
+        route = str(record.get("final_route_class") or "unknown")
+        route_counts[route] = route_counts.get(route, 0) + 1
+        if record.get("sent_to_discord"):
+            sent_route_counts[route] = sent_route_counts.get(route, 0) + 1
+        bucket = str(record.get("evaluation_bucket") or "unknown")
+        evaluation_buckets[bucket] = evaluation_buckets.get(bucket, 0) + 1
+
+        quality = route_quality_map.setdefault(route, {"route_class": route, "total": 0, "sent": 0, "positive": 0, "negative": 0})
+        quality["total"] += 1
+        if record.get("sent_to_discord"):
+            quality["sent"] += 1
+        outcome = str(record.get("outcome_label") or "pending")
+        if outcome in _POSITIVE_OUTCOME_LABELS:
+            quality["positive"] += 1
+        elif outcome in _NEGATIVE_OUTCOME_LABELS:
+            quality["negative"] += 1
+
+        reasons = [str(item) for item in record.get("decision_reasons") or []]
+        for reason in reasons:
+            family = _reason_family(reason)
+            family_card = gate_families.setdefault(family, {"family": family, "count": 0, "positive": 0, "negative": 0})
+            family_card["count"] += 1
+            if outcome in _POSITIVE_OUTCOME_LABELS:
+                family_card["positive"] += 1
+            elif outcome in _NEGATIVE_OUTCOME_LABELS:
+                family_card["negative"] += 1
+
+        if (
+            bucket in {"too_early_but_valid", "weak_alert", "pending"}
+            or (not record.get("sent_to_discord") and outcome in _POSITIVE_OUTCOME_LABELS)
+            or (record.get("sent_to_discord") and outcome in _NEGATIVE_OUTCOME_LABELS and route in {"sniper", "promoted"})
+        ):
+            borderline_cases.append(
+                {
+                    "token": record.get("token"),
+                    "route_class": route,
+                    "sent_to_discord": record.get("sent_to_discord"),
+                    "evaluation_bucket": bucket,
+                    "outcome_label": outcome,
+                    "decision_name": record.get("decision_name"),
+                    "decision_reasons": reasons[:6],
+                    "market_cap_change_pct": record.get("outcome_market_cap_change_pct"),
+                }
+            )
+
+    route_quality: list[dict[str, Any]] = []
+    for item in route_quality_map.values():
+        sent = int(item["sent"] or 0)
+        positive = int(item["positive"] or 0)
+        negative = int(item["negative"] or 0)
+        route_quality.append(
+            {
+                **item,
+                "precision": round((positive / sent) * 100.0, 1) if sent else 0.0,
+                "false_positive_rate": round((negative / sent) * 100.0, 1) if sent else 0.0,
+                "conversion_rate": round((positive / max(1, int(item["total"] or 0))) * 100.0, 1),
+            }
+        )
+    route_quality.sort(key=lambda item: (-float(item["precision"]), -int(item["sent"]), item["route_class"]))
+
+    gate_family_summary: list[dict[str, Any]] = []
+    for item in gate_families.values():
+        count = int(item["count"] or 0)
+        positive = int(item["positive"] or 0)
+        negative = int(item["negative"] or 0)
+        gate_family_summary.append(
+            {
+                **item,
+                "positive_rate": round((positive / count) * 100.0, 1) if count else 0.0,
+                "negative_rate": round((negative / count) * 100.0, 1) if count else 0.0,
+            }
+        )
+    gate_family_summary.sort(key=lambda item: (-int(item["count"]), item["family"]))
+    borderline_cases.sort(
+        key=lambda item: (
+            0 if str(item.get("evaluation_bucket") or "") == "missed_sniper" else 1,
+            -float(item.get("market_cap_change_pct") or 0.0),
+            str(item.get("token") or ""),
+        )
+    )
+
+    diagnostics = get_diagnostics_summary(hours=hours)
+    sent_records = [record for record in records if record.get("sent_to_discord")]
+    return {
+        "lookback_hours": hours,
+        "total_tracked_opportunities": len(records),
+        "sent_alerts": len(sent_records),
+        "route_counts": route_counts,
+        "sent_route_counts": sent_route_counts,
+        "evaluation_buckets": evaluation_buckets,
+        "route_quality": route_quality,
+        "gate_family_summary": gate_family_summary[:10],
+        "missed_runner_analysis": missed,
+        "policy_comparison": comparison,
+        "borderline_cases": borderline_cases[:12],
+        "threshold_effectiveness": diagnostics.get("threshold_guidance") if isinstance(diagnostics.get("threshold_guidance"), list) else [],
+        "reject_reasons": diagnostics.get("top_skip_reasons") if isinstance(diagnostics.get("top_skip_reasons"), list) else [],
+        "alerts": sent_records[: max(1, min(limit, 100))],
+        "opportunities": records[: max(1, limit)],
+        "tuning_workflow": {
+            "parameter_source": "worker/signal_policy.py and env-backed policy thresholds",
+            "test_path": "app/services/parameter_search_service.py",
+            "compare_path": "/learning/validation/policies and /learning/policy/replay/*",
+            "safe_rollout": "shadow or replay first, then tuning approval, then rollout verification",
+            "overfitting_guard": "prefer multi-day comparisons, keep sample-size discipline, and do not promote a parameter set on one regime burst alone",
+        },
+    }
+
+
+def render_live_validation_html(*, hours: int = 72, limit: int = 200) -> str:
+    summary = get_live_validation_summary(hours=hours, limit=limit)
+    route_quality = summary.get("route_quality") if isinstance(summary.get("route_quality"), list) else []
+    gate_families = summary.get("gate_family_summary") if isinstance(summary.get("gate_family_summary"), list) else []
+    borderline_cases = summary.get("borderline_cases") if isinstance(summary.get("borderline_cases"), list) else []
+    threshold_effectiveness = summary.get("threshold_effectiveness") if isinstance(summary.get("threshold_effectiveness"), list) else []
+    missed = summary.get("missed_runner_analysis") if isinstance(summary.get("missed_runner_analysis"), dict) else {}
+    variants = (summary.get("policy_comparison") or {}).get("variants") if isinstance(summary.get("policy_comparison"), dict) else []
+
+    def metric_card(label: str, value: Any) -> str:
+        return (
+            '<div class="metric-card">'
+            f'<span>{html.escape(label)}</span>'
+            f"<strong>{html.escape(str(value))}</strong>"
+            "</div>"
+        )
+
+    overview_cards = "".join(
+        [
+            metric_card("Tracked", summary.get("total_tracked_opportunities", 0)),
+            metric_card("Sent Alerts", summary.get("sent_alerts", 0)),
+            metric_card("Missed Runners", missed.get("missed_runner_count", 0)),
+            metric_card("Variants", (summary.get("policy_comparison") or {}).get("variant_count", 0)),
+        ]
+    )
+
+    route_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('route_class') or 'unknown'))}</td>"
+        f"<td>{int(item.get('sent') or 0)}</td>"
+        f"<td>{html.escape(str(item.get('precision') or 0))}%</td>"
+        f"<td>{html.escape(str(item.get('false_positive_rate') or 0))}%</td>"
+        f"<td>{html.escape(str(item.get('conversion_rate') or 0))}%</td>"
+        "</tr>"
+        for item in route_quality[:8]
+    ) or "<tr><td colspan='5'>No route data</td></tr>"
+
+    family_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('family') or 'unknown'))}</td>"
+        f"<td>{int(item.get('count') or 0)}</td>"
+        f"<td>{html.escape(str(item.get('positive_rate') or 0))}%</td>"
+        f"<td>{html.escape(str(item.get('negative_rate') or 0))}%</td>"
+        "</tr>"
+        for item in gate_families[:10]
+    ) or "<tr><td colspan='4'>No gate-family data</td></tr>"
+
+    borderline_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('token') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('route_class') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('evaluation_bucket') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('outcome_label') or 'pending'))}</td>"
+        "</tr>"
+        for item in borderline_cases[:10]
+    ) or "<tr><td colspan='4'>No borderline cases</td></tr>"
+
+    threshold_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('reason') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('action') or 'hold'))}</td>"
+        f"<td>{html.escape(str(item.get('confidence') or 'low'))}</td>"
+        f"<td>{int(item.get('sample_size') or 0)}</td>"
+        "</tr>"
+        for item in threshold_effectiveness[:10]
+    ) or "<tr><td colspan='4'>No threshold guidance</td></tr>"
+
+    missed_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('token') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('miss_bucket') or 'missed_runner'))}</td>"
+        f"<td>{html.escape(str(item.get('decision_name') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('market_cap_change_pct') or '-'))}</td>"
+        "</tr>"
+        for item in (missed.get("missed_runners") or [])[:10]
+    ) or "<tr><td colspan='4'>No missed runners</td></tr>"
+
+    variant_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('policy_key') or 'unknown'))}</td>"
+        f"<td>{int(item.get('sent') or 0)}</td>"
+        f"<td>{html.escape(str(item.get('precision') or 0))}%</td>"
+        f"<td>{html.escape(str(item.get('false_positive_rate') or 0))}%</td>"
+        f"<td>{html.escape(str(item.get('coverage') or 0))}%</td>"
+        "</tr>"
+        for item in variants[:8]
+    ) or "<tr><td colspan='5'>No variant comparison data</td></tr>"
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live Validation Dashboard</title>
+  <style>
+    :root {{
+      --bg: #081119;
+      --panel: rgba(11, 24, 38, 0.9);
+      --panel-2: rgba(18, 34, 52, 0.96);
+      --line: rgba(116, 153, 186, 0.16);
+      --text: #edf5fb;
+      --muted: #8ca4b8;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      color: var(--text);
+      font-family: "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(230, 167, 74, .12), transparent 26%),
+        radial-gradient(circle at bottom right, rgba(46, 111, 201, .18), transparent 28%),
+        linear-gradient(180deg, #071018 0%, #09131c 100%);
+    }}
+    .shell {{ max-width: 1380px; margin: 0 auto; padding: 24px 18px 36px; }}
+    .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 22px; padding: 20px; box-shadow: 0 18px 50px rgba(0,0,0,.35); }}
+    .grid {{ display:grid; gap:16px; grid-template-columns: repeat(4, minmax(0,1fr)); margin-top: 18px; }}
+    .wide-grid {{ display:grid; gap:16px; grid-template-columns: 1fr 1fr; margin-top: 18px; }}
+    .metric-card {{ background: var(--panel-2); border: 1px solid var(--line); border-radius: 18px; padding: 14px 16px; }}
+    .metric-card span {{ display:block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; margin-bottom: 6px; }}
+    .metric-card strong {{ font-size: 24px; }}
+    h1 {{ margin: 0 0 8px; font-size: 32px; }}
+    h2 {{ margin: 0 0 14px; font-size: 14px; letter-spacing: .12em; color: var(--muted); text-transform: uppercase; }}
+    p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
+    table {{ width:100%; border-collapse: collapse; }}
+    th, td {{ text-align:left; padding: 12px 10px; border-bottom: 1px solid var(--line); font-size: 14px; }}
+    th {{ color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .10em; }}
+    @media (max-width: 1020px) {{
+      .grid, .wide-grid {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="panel">
+      <h1>Live Validation Dashboard</h1>
+      <p>Post-optimization validation view across routed opportunities, missed runners, threshold pressure, and policy variants over the last {int(summary.get("lookback_hours") or 0)} hours.</p>
+    </section>
+    <div class="grid">{overview_cards}</div>
+    <div class="wide-grid">
+      <section class="panel">
+        <h2>Route Quality</h2>
+        <table><thead><tr><th>Route</th><th>Sent</th><th>Precision</th><th>False Positives</th><th>Conversion</th></tr></thead><tbody>{route_rows}</tbody></table>
+      </section>
+      <section class="panel">
+        <h2>Gate Families</h2>
+        <table><thead><tr><th>Family</th><th>Count</th><th>Positive Rate</th><th>Negative Rate</th></tr></thead><tbody>{family_rows}</tbody></table>
+      </section>
+    </div>
+    <div class="wide-grid">
+      <section class="panel">
+        <h2>Missed Runners</h2>
+        <table><thead><tr><th>Token</th><th>Bucket</th><th>Decision</th><th>MC %</th></tr></thead><tbody>{missed_rows}</tbody></table>
+      </section>
+      <section class="panel">
+        <h2>Policy Variants</h2>
+        <table><thead><tr><th>Policy</th><th>Sent</th><th>Precision</th><th>False Positives</th><th>Coverage</th></tr></thead><tbody>{variant_rows}</tbody></table>
+      </section>
+    </div>
+    <div class="wide-grid">
+      <section class="panel">
+        <h2>Threshold Effectiveness</h2>
+        <table><thead><tr><th>Reason</th><th>Action</th><th>Confidence</th><th>Sample</th></tr></thead><tbody>{threshold_rows}</tbody></table>
+      </section>
+      <section class="panel">
+        <h2>Borderline Review</h2>
+        <table><thead><tr><th>Token</th><th>Route</th><th>Bucket</th><th>Outcome</th></tr></thead><tbody>{borderline_rows}</tbody></table>
+      </section>
+    </div>
+  </div>
+</body>
+</html>"""
 
 
 def render_diagnostics_html(hours: int = 24) -> str:

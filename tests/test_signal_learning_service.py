@@ -2716,3 +2716,254 @@ def test_ingest_signal_event_and_decision_persist_rows(tmp_path, monkeypatch):
     assert decision_result["signal_id"] == signal_result["signal_id"]
     assert signal_count == 1
     assert decision_count == 1
+
+
+def test_live_validation_summary_tracks_alert_outcomes_and_buckets(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    candidate = Event(
+        type="candidate",
+        source="engine",
+        token="token-live-candidate",
+        confidence=0.62,
+        ts=1_773_900_000,
+        extra={"lifecycle": "dex", "attention_score": 0.58, "risk_score": 0.18},
+    )
+    candidate_id = sls.record_signal_event(candidate, external_ref="msg-live-1")
+    sls.record_signal_decision(
+        token=candidate.token,
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_ready",
+        action_taken="emit",
+        signal_id=candidate_id,
+        attention_score=0.58,
+        risk_score=0.18,
+        confidence_score=0.62,
+        lifecycle="dex",
+        policy_name="live_policy",
+        policy_version="live-v1",
+        features={
+            "route_tier": "candidate",
+            "candidate_send_eligible": True,
+            "tracked_wallet_hits": 1,
+        },
+        ts_value=1_773_900_000,
+    )
+
+    skipped_id = sls.record_signal_decision(
+        token="token-live-missed",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_gate_skip",
+        action_taken="hold",
+        reasons=["attention<0.20", "buyers_low"],
+        attention_score=0.19,
+        risk_score=0.16,
+        confidence_score=0.44,
+        lifecycle="dex",
+        policy_name="live_policy",
+        policy_version="live-v1",
+        features={"route_tier": "sniper", "sniper_blockers": ["buyers_low"]},
+        ts_value=1_773_900_030,
+    )
+
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                candidate_id,
+                60,
+                1_773_903_600,
+                "dex",
+                22000,
+                7000,
+                6000,
+                65.0,
+                18.0,
+                48.0,
+                90,
+                30,
+                35.0,
+                10.0,
+                20.0,
+                "worked",
+                json.dumps({"outcome_label": "worked"}),
+            ),
+        )
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                skipped_id,
+                60,
+                1_773_903_900,
+                "dex",
+                48000,
+                12000,
+                9500,
+                62.0,
+                40.0,
+                95.0,
+                180,
+                55,
+                140.0,
+                30.0,
+                60.0,
+                "strong_continuation",
+                json.dumps({"outcome_label": "strong_continuation"}),
+            ),
+        )
+
+    summary = sls.get_live_validation_summary(hours=10_000, limit=50)
+
+    assert summary["sent_alerts"] == 1
+    assert summary["route_counts"]["candidate"] >= 1
+    assert (
+        summary["evaluation_buckets"].get("decent_signal", 0)
+        + summary["evaluation_buckets"].get("too_early_but_valid", 0)
+    ) >= 1
+    assert summary["missed_runner_analysis"]["missed_runner_count"] >= 1
+    assert summary["missed_runner_analysis"]["missed_runners"][0]["miss_bucket"] == "missed_sniper"
+    assert summary["policy_comparison"]["variant_count"] >= 1
+    assert summary["alerts"][0]["thresholds_used"]["policy_name"] == "live_policy"
+
+
+def test_live_validation_records_mark_unsent_decision_shells(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    signal_id = sls.record_signal_decision(
+        token="token-shell-only",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_gate_skip",
+        reasons=["attention<0.20"],
+        attention_score=0.12,
+        risk_score=0.20,
+        confidence_score=0.28,
+        lifecycle="dex",
+        policy_name="live_policy",
+        policy_version="live-v2",
+        ts_value=1_773_910_000,
+    )
+
+    records = sls.get_live_validation_records(hours=10_000, limit=20)
+    record = next(item for item in records if item["signal_id"] == signal_id)
+
+    assert record["sent_to_discord"] is False
+    assert record["final_route_class"] == "reject"
+    assert record["thresholds_used"]["policy_version"] == "live-v2"
+    assert "parameter_fingerprint" in record
+
+
+def test_policy_validation_comparison_ranks_variants_by_live_quality(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    good_event = Event(
+        type="heating_up",
+        source="engine",
+        token="token-good-variant",
+        confidence=0.84,
+        ts=1_773_920_000,
+        extra={"lifecycle": "dex", "attention_score": 0.82, "risk_score": 0.14},
+    )
+    good_id = sls.record_signal_event(good_event)
+    sls.record_signal_decision(
+        token=good_event.token,
+        event_type="heating_up",
+        stage="heating_up",
+        decision="heating_sent",
+        action_taken="emit",
+        signal_id=good_id,
+        attention_score=0.82,
+        risk_score=0.14,
+        confidence_score=0.84,
+        lifecycle="dex",
+        policy_name="policy_a",
+        policy_version="v1",
+        features={"route_tier": "sniper", "sniper_ready": True},
+        ts_value=1_773_920_000,
+    )
+
+    bad_event = Event(
+        type="promoted",
+        source="engine",
+        token="token-bad-variant",
+        confidence=0.71,
+        ts=1_773_920_100,
+        extra={"lifecycle": "dex", "attention_score": 0.65, "risk_score": 0.41},
+    )
+    bad_id = sls.record_signal_event(bad_event)
+    sls.record_signal_decision(
+        token=bad_event.token,
+        event_type="promoted",
+        stage="promoted",
+        decision="promoted_sent",
+        action_taken="emit",
+        signal_id=bad_id,
+        attention_score=0.65,
+        risk_score=0.41,
+        confidence_score=0.71,
+        lifecycle="dex",
+        policy_name="policy_b",
+        policy_version="v9",
+        features={"route_tier": "promoted"},
+        ts_value=1_773_920_100,
+    )
+
+    with sls._connect() as c:
+        for signal_id, outcome_label, mc_change in ((good_id, "strong_continuation", 120.0), (bad_id, "failed", -35.0)):
+            c.execute(
+                """
+                INSERT INTO signal_snapshots (
+                    signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                    volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                    txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                    outcome_label, snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    60,
+                    1_773_923_600,
+                    "dex",
+                    30000,
+                    8000,
+                    7000,
+                    70.0,
+                    10.0,
+                    45.0,
+                    100,
+                    30,
+                    mc_change,
+                    12.0,
+                    18.0,
+                    outcome_label,
+                    json.dumps({"outcome_label": outcome_label}),
+                ),
+            )
+
+    comparison = sls.get_policy_validation_comparison(hours=10_000, limit=10)
+
+    assert comparison["variant_count"] >= 2
+    assert comparison["variants"][0]["policy_key"] == "policy_a@v1"
+    assert comparison["variants"][0]["precision"] >= comparison["variants"][1]["precision"]

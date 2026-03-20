@@ -17,6 +17,9 @@ from app.services.signal_learning_service import (
     get_engine_health_digest,
     get_policy_automation_status,
     get_diagnostics_summary,
+    get_live_validation_records,
+    get_live_validation_summary,
+    get_missed_runner_analysis,
     ingest_signal_decision,
     ingest_signal_event,
     get_learning_digest,
@@ -33,11 +36,13 @@ from app.services.signal_learning_service import (
     list_policy_rollout_events,
     get_policy_trace_summary,
     get_policy_replay,
+    get_policy_validation_comparison,
     resolve_live_policy,
     run_policy_automation_cycle,
     run_policy_replay,
     render_engine_health_html,
     render_diagnostics_html,
+    render_live_validation_html,
     render_learning_digest_html,
     render_learning_report_html,
     update_policy_approval_status,
@@ -796,3 +801,40 @@ def learning_ops_digest_send(payload: dict[str, object] = Body(default={})):
 @router.get("/learning/diagnostics/dashboard")
 def learning_diagnostics_dashboard(hours: int = 24):
     return HTMLResponse(content=render_diagnostics_html(hours=max(1, hours)))
+
+
+@router.get("/learning/validation/summary")
+def learning_validation_summary(hours: int = 72, limit: int = 200):
+    return get_live_validation_summary(hours=max(1, hours), limit=max(1, limit))
+
+
+@router.get("/learning/validation/dashboard")
+def learning_validation_dashboard(hours: int = 72, limit: int = 200):
+    return HTMLResponse(content=render_live_validation_html(hours=max(1, hours), limit=max(1, limit)))
+
+
+@router.get("/learning/validation/alerts")
+def learning_validation_alerts(
+    hours: int = 72,
+    limit: int = 100,
+    route_class: str | None = None,
+    sent_only: bool = False,
+):
+    return {
+        "alerts": get_live_validation_records(
+            hours=max(1, hours),
+            limit=max(1, limit),
+            route_class=route_class,
+            sent_only=sent_only,
+        )
+    }
+
+
+@router.get("/learning/validation/missed")
+def learning_validation_missed(hours: int = 168, limit: int = 50):
+    return get_missed_runner_analysis(hours=max(1, hours), limit=max(1, limit))
+
+
+@router.get("/learning/validation/policies")
+def learning_validation_policies(hours: int = 168, limit: int = 12):
+    return get_policy_validation_comparison(hours=max(1, hours), limit=max(1, limit))

@@ -278,6 +278,81 @@ def test_learning_policy_routes_return_traces_and_shadow_eval(tmp_path, monkeypa
     assert traces_payload["traces"][0]["action_taken"] == "emit"
     assert traces_payload["traces"][0]["policy_version"] == "policy-live-1"
 
+
+def test_learning_validation_routes_return_summary_and_dashboard(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    signal_id = sls.record_signal_decision(
+        token="token-validation-route",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_gate_skip",
+        reasons=["attention<0.20"],
+        attention_score=0.19,
+        risk_score=0.21,
+        confidence_score=0.40,
+        lifecycle="dex",
+        policy_name="route-policy",
+        policy_version="route-v1",
+        ts_value=1_773_940_000,
+    )
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                60,
+                1_773_943_600,
+                "dex",
+                50000,
+                11000,
+                9000,
+                65.0,
+                12.0,
+                60.0,
+                120,
+                40,
+                100.0,
+                25.0,
+                35.0,
+                "strong_continuation",
+                '{"outcome_label":"strong_continuation"}',
+            ),
+        )
+
+    client = TestClient(main.app)
+
+    summary_response = client.get("/learning/validation/summary?hours=10000&limit=20")
+    assert summary_response.status_code == 200
+    summary_payload = summary_response.json()
+    assert "missed_runner_analysis" in summary_payload
+    assert "policy_comparison" in summary_payload
+
+    alerts_response = client.get("/learning/validation/alerts?hours=10000&limit=20")
+    assert alerts_response.status_code == 200
+    assert "alerts" in alerts_response.json()
+
+    missed_response = client.get("/learning/validation/missed?hours=10000&limit=20")
+    assert missed_response.status_code == 200
+    assert missed_response.json()["missed_runner_count"] >= 1
+
+    policies_response = client.get("/learning/validation/policies?hours=10000&limit=20")
+    assert policies_response.status_code == 200
+    assert policies_response.json()["variant_count"] >= 1
+
+    dashboard_response = client.get("/learning/validation/dashboard?hours=10000&limit=20")
+    assert dashboard_response.status_code == 200
+    assert "Live Validation Dashboard" in dashboard_response.text
+
     shadow_response = client.get(
         "/learning/policy/shadow?hours=10000&stage=candidate&candidate_attention_min=0.80&policy_version=shadow-2"
     )
