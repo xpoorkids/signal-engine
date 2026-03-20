@@ -8,6 +8,7 @@ from typing import Deque, Dict, Optional, Tuple, Any
 import requests
 
 from worker.config import HELIUS_API_KEY, HELIUS_RPC_URL
+from worker.signal_policy import elite_score_policy
 
 
 def _now() -> float:
@@ -189,35 +190,39 @@ class EliteTracker:
         liq_locked: Optional[bool],
         hard_fail: bool,
     ) -> int:
+        policy = elite_score_policy()
         if hard_fail:
-            return -999
+            return policy.hard_fail_score
         capital_score = 1
-        if buy_size_sol >= 3:
-            capital_score = 5
-        elif buy_size_sol >= 1:
-            capital_score = 3
-        elif buy_size_sol >= 0.2:
-            capital_score = 2
+        if buy_size_sol >= policy.capital_large_buy_sol:
+            capital_score = policy.capital_large_score
+        elif buy_size_sol >= policy.capital_medium_buy_sol:
+            capital_score = policy.capital_medium_score
+        elif buy_size_sol >= policy.capital_small_buy_sol:
+            capital_score = policy.capital_small_score
 
         velocity_score = 0
-        if unique_10s >= 5:
-            velocity_score = 5
-        elif unique_10s == 4:
-            velocity_score = 3
-        elif unique_10s == 3:
-            velocity_score = 2
+        if unique_10s >= policy.velocity_high_unique_10s:
+            velocity_score = policy.velocity_high_score
+        elif unique_10s == policy.velocity_mid_unique_10s:
+            velocity_score = policy.velocity_mid_score
+        elif unique_10s == policy.velocity_low_unique_10s:
+            velocity_score = policy.velocity_low_score
 
         distribution_score = 0
-        if top_wallet_share >= 0.70 and unique_wallets_30s <= 2:
-            distribution_score = -3
-        elif unique_wallets_30s >= 4:
-            distribution_score = 1
+        if (
+            top_wallet_share >= policy.concentrated_top_wallet_share
+            and unique_wallets_30s <= policy.concentrated_unique_wallets_30s_max
+        ):
+            distribution_score = policy.concentrated_penalty
+        elif unique_wallets_30s >= policy.broad_distribution_unique_wallets_30s_min:
+            distribution_score = policy.broad_distribution_bonus
 
         safety_bonus = 0
-        if liq_usd > 50000:
-            safety_bonus += 1
+        if liq_usd > policy.safety_liquidity_bonus_usd:
+            safety_bonus += policy.safety_liquidity_bonus
         if liq_locked is True:
-            safety_bonus += 1
+            safety_bonus += policy.safety_locked_bonus
 
         elite = (capital_score * 2) + (velocity_score * 2) + distribution_score + safety_bonus
         print(
@@ -235,11 +240,12 @@ class EliteTracker:
         unique_buyers_5m: int,
         liq_usd: float,
     ) -> Optional[int]:
+        policy = elite_score_policy()
         st = self.get_state(token)
         now = _now()
         if st.blacklist_until and now < st.blacklist_until:
             return int(st.blacklist_until - now)
-        spike = attention >= 0.35
+        spike = attention >= policy.decay_watch_attention_min
         if spike and st.decay_watch_started == 0:
             st.decay_watch_started = now
             st.decay_start_unique_5m = unique_buyers_5m
@@ -247,15 +253,18 @@ class EliteTracker:
             st.decay_start_liq = liq_usd
             print(f"[decay-watch] token={token} started=1", flush=True)
             return None
-        if st.decay_watch_started and now - st.decay_watch_started <= 20:
+        if st.decay_watch_started and now - st.decay_watch_started <= policy.decay_window_sec:
             no_new_buyers = unique_buyers_5m <= st.decay_start_unique_5m
-            burst_drop = burst_10s < (st.decay_start_burst_10s * 0.5)
-            liq_drop = liq_usd > 0 and liq_usd < (st.decay_start_liq * 0.75)
+            burst_drop = burst_10s < (st.decay_start_burst_10s * policy.decay_burst_drop_multiplier)
+            liq_drop = liq_usd > 0 and liq_usd < (st.decay_start_liq * policy.decay_liquidity_drop_multiplier)
             if no_new_buyers and (burst_drop or liq_drop):
-                st.blacklist_until = now + 600
-                print(f"[momentum-fail] token={token} reason=no_follow_through blacklist=600", flush=True)
-                return 600
-        if st.decay_watch_started and now - st.decay_watch_started > 20:
+                st.blacklist_until = now + policy.decay_blacklist_ttl_sec
+                print(
+                    f"[momentum-fail] token={token} reason=no_follow_through blacklist={policy.decay_blacklist_ttl_sec}",
+                    flush=True,
+                )
+                return policy.decay_blacklist_ttl_sec
+        if st.decay_watch_started and now - st.decay_watch_started > policy.decay_window_sec:
             st.decay_watch_started = 0
         return None
 

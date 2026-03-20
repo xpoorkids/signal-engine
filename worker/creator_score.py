@@ -4,6 +4,7 @@ import time
 from typing import Dict, Any
 
 from app.services.state_service import get_creator_stats
+from worker.signal_policy import creator_score_policy
 
 
 def compute_creator_score(
@@ -13,6 +14,7 @@ def compute_creator_score(
     prior_profitable: bool | None = None,
     wallet_age_days: float | None = None,
 ) -> Dict[str, Any]:
+    policy = creator_score_policy()
     if not creator:
         return {"score": 0.0, "reasons": ["creator_unknown"], "stats": {}}
 
@@ -27,27 +29,30 @@ def compute_creator_score(
     if age_days is None:
         age_days = (now - first_seen) / 86400 if first_seen else 0.0
 
-    score = 0.5
+    score = policy.base_score
     reasons = []
 
-    if deploys_24h > 5:
-        score -= 0.3
-        reasons.append("deploys_24h>5")
-    if deploys_lifetime < 2:
-        score -= 0.2
-        reasons.append("deploys_lifetime<2")
+    if deploys_24h > policy.deploys_24h_penalty_threshold:
+        score -= policy.deploys_24h_penalty
+        reasons.append(f"deploys_24h>{policy.deploys_24h_penalty_threshold}")
+    if deploys_lifetime < policy.deploys_lifetime_penalty_threshold:
+        score -= policy.deploys_lifetime_penalty
+        reasons.append(f"deploys_lifetime<{policy.deploys_lifetime_penalty_threshold}")
     if funded_by_cluster is True:
-        score -= 0.4
+        score -= policy.funded_by_cluster_penalty
         reasons.append("funded_by_cluster")
 
     if prior_profitable is True:
-        score += 0.3
+        score += policy.prior_profitable_bonus
         reasons.append("prior_profitable")
-    if age_days and age_days > 30:
-        score += 0.2
-        reasons.append("wallet_age>30d")
-    if deploys_24h <= 1 and deploys_lifetime <= 5:
-        score += 0.2
+    if age_days and age_days > policy.wallet_age_bonus_days:
+        score += policy.wallet_age_bonus
+        reasons.append(f"wallet_age>{int(policy.wallet_age_bonus_days)}d")
+    if (
+        deploys_24h <= policy.low_frequency_deploys_24h_max
+        and deploys_lifetime <= policy.low_frequency_deploys_lifetime_max
+    ):
+        score += policy.low_frequency_bonus
         reasons.append("low_deploy_frequency")
 
     score = max(0.0, min(1.0, score))

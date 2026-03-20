@@ -20,6 +20,7 @@ from worker.config import (
 from worker.events import Event
 from worker.metadata import fetch_token_metadata
 from worker.config import RADAR_QUIET_RISK_MAX
+from worker.signal_policy import discord_presentation_policy
 
 
 AMBER = 0xF4C430
@@ -229,30 +230,37 @@ def _clean_text(value: str | None) -> str:
 
 
 def _score_band(score: float | None, *, invert: bool = False) -> str:
+    policy = discord_presentation_policy()
     if score is None:
         return "Unavailable"
     value = 1.0 - score if invert else score
-    if value >= 0.80:
+    if value >= policy.score_band_high:
         return "High"
-    if value >= 0.60:
+    if value >= policy.score_band_constructive:
         return "Constructive"
-    if value >= 0.40:
+    if value >= policy.score_band_mixed:
         return "Mixed"
     return "Weak"
 
 
 def _summary_blurb(attention_score: float | None, risk_score: float | None, lifecycle: str) -> str:
+    policy = discord_presentation_policy()
     if attention_score is None:
         return "Signal quality incomplete. Monitor for fresh market structure."
-    if risk_score is not None and risk_score >= 0.70:
+    if risk_score is not None and risk_score >= policy.summary_risk_elevated:
         return "Risk is elevated. Treat this as a defensive watch unless structure improves."
-    if lifecycle == "dex" and attention_score >= 0.80 and risk_score is not None and risk_score <= 0.20:
+    if (
+        lifecycle == "dex"
+        and attention_score >= policy.summary_dex_attention_high
+        and risk_score is not None
+        and risk_score <= policy.summary_dex_risk_low
+    ):
         return "Coordination and structure align. Tradable setup with confirmed liquidity."
-    if attention_score >= 0.70:
+    if attention_score >= policy.summary_attention_high:
         return "Early coordination detected. Watch for continued buyer breadth and stable liquidity."
-    if risk_score is not None and risk_score >= 0.50:
+    if risk_score is not None and risk_score >= policy.summary_watch_risk:
         return "Watch-only: interest is present, but risk remains elevated. Keep sizing defensive."
-    if lifecycle == "dex" and attention_score >= 0.50:
+    if lifecycle == "dex" and attention_score >= policy.summary_dex_attention_constructive:
         return "Constructive setup with improving flow. Wait for cleaner confirmation."
     return "Market is forming. Wait for stronger participation or cleaner structure."
 
@@ -289,6 +297,7 @@ def _market_snapshot(metrics: dict) -> list[str]:
 
 
 def _flow_bias_label(buys: int | None, sells: int | None) -> str | None:
+    policy = discord_presentation_policy()
     if buys is None and sells is None:
         return None
     buy_count = buys or 0
@@ -297,35 +306,41 @@ def _flow_bias_label(buys: int | None, sells: int | None) -> str | None:
     if total <= 0:
         return None
     imbalance = (buy_count - sell_count) / total
-    if imbalance >= 0.20:
+    if imbalance >= policy.flow_bias_buy_imbalance:
         return "Buy-side"
-    if imbalance <= -0.20:
+    if imbalance <= policy.flow_bias_sell_imbalance:
         return "Sell pressure"
     return "Balanced"
 
 
 def _momentum_label(attention_score: float | None, metrics: dict) -> str:
+    policy = discord_presentation_policy()
     chg5 = to_optional_float(metrics.get("price_change_m5"))
     vol5 = to_optional_float(metrics.get("volume_m5"))
     if attention_score is None:
         return "Not computed"
-    if attention_score >= 0.80 and chg5 is not None and chg5 >= 20:
+    if (
+        attention_score >= policy.momentum_confirm_attention
+        and chg5 is not None
+        and chg5 >= policy.momentum_confirm_price_change_5m
+    ):
         return "Confirming"
-    if attention_score >= 0.60 and vol5 is not None and vol5 > 0:
+    if attention_score >= policy.momentum_early_attention and vol5 is not None and vol5 > 0:
         return "Early"
-    if attention_score >= 0.45:
+    if attention_score >= policy.confidence_dot_yellow_min:
         return "Mixed"
     return "Unconfirmed"
 
 
 def _risk_band(risk_score: float | None) -> str:
+    policy = discord_presentation_policy()
     if risk_score is None:
         return "Unavailable"
-    if risk_score < 0.20:
+    if risk_score < policy.risk_band_low_max:
         return "Low"
-    if risk_score < 0.45:
+    if risk_score < policy.risk_band_mixed_max:
         return "Mixed"
-    if risk_score < 0.70:
+    if risk_score < policy.risk_band_elevated_max:
         return "Elevated"
     return "High"
 
@@ -342,23 +357,25 @@ def _status_dot(color: str) -> str:
 
 
 def _risk_dot(risk_score: float | None) -> str:
+    policy = discord_presentation_policy()
     if risk_score is None:
         return _status_dot("white")
-    if risk_score < 0.20:
+    if risk_score < policy.risk_band_low_max:
         return _status_dot("green")
-    if risk_score < 0.45:
+    if risk_score < policy.risk_band_mixed_max:
         return _status_dot("yellow")
-    if risk_score < 0.70:
+    if risk_score < policy.risk_band_elevated_max:
         return _status_dot("yellow")
     return _status_dot("red")
 
 
 def _confidence_dot(confidence: float | None) -> str:
+    policy = discord_presentation_policy()
     if confidence is None:
         return _status_dot("white")
-    if confidence >= 0.80:
+    if confidence >= policy.confidence_dot_green_min:
         return _status_dot("green")
-    if confidence >= 0.45:
+    if confidence >= policy.confidence_dot_yellow_min:
         return _status_dot("yellow")
     return _status_dot("red")
 
@@ -384,23 +401,29 @@ def _momentum_dot(label: str) -> str:
 
 
 def _confidence_band(confidence: float | None) -> str:
+    policy = discord_presentation_policy()
     if confidence is None:
         return "Unavailable"
-    if confidence >= 0.80:
+    if confidence >= policy.confidence_band_high_min:
         return "High conviction"
-    if confidence >= 0.65:
+    if confidence >= policy.confidence_band_strong_min:
         return "Strong"
-    if confidence >= 0.45:
+    if confidence >= policy.confidence_band_moderate_min:
         return "Moderate"
     return "Low"
 
 
 def _quality_tier(attention_score: float | None, risk_score: float | None, elite_score: int | None) -> str:
+    policy = discord_presentation_policy()
     if elite_score is None or attention_score is None:
         return "Experimental"
-    if elite_score >= 10 and attention_score >= 0.75 and (risk_score is None or risk_score <= 0.30):
+    if (
+        elite_score >= policy.quality_tier_a_elite_min
+        and attention_score >= policy.quality_tier_a_attention_min
+        and (risk_score is None or risk_score <= policy.quality_tier_a_risk_max)
+    ):
         return "Tier A"
-    if elite_score >= 7 and attention_score >= 0.55:
+    if elite_score >= policy.quality_tier_b_elite_min and attention_score >= policy.quality_tier_b_attention_min:
         return "Tier B"
     return "Tier C"
 
@@ -616,7 +639,8 @@ def _market_tile_fields(metrics: dict, liq_mc: str) -> list[dict]:
 
 
 def get_signal_color(signal_type: str, risk_score: float | None) -> int:
-    if signal_type == "risk_alert" or (risk_score is not None and risk_score >= 0.70):
+    policy = discord_presentation_policy()
+    if signal_type == "risk_alert" or (risk_score is not None and risk_score >= policy.risk_alert_threshold):
         return DARK_RED
     if signal_type in ("breakout", "promoted"):
         return 0x2ECC71
@@ -626,13 +650,18 @@ def get_signal_color(signal_type: str, risk_score: float | None) -> int:
 
 
 def _signal_type(e: Event, attention_score: float | None, risk_score: float | None) -> str:
+    policy = discord_presentation_policy()
     if e.type == "promoted":
         return "promoted"
-    if risk_score is not None and risk_score >= 0.70:
+    if risk_score is not None and risk_score >= policy.risk_alert_threshold:
         return "risk_alert"
-    if attention_score is not None and attention_score >= 0.80 and (risk_score is None or risk_score <= 0.35):
+    if (
+        attention_score is not None
+        and attention_score >= policy.breakout_attention_min
+        and (risk_score is None or risk_score <= policy.breakout_risk_max)
+    ):
         return "breakout"
-    if attention_score is not None and attention_score >= 0.55:
+    if attention_score is not None and attention_score >= policy.setup_attention_min:
         return "setup"
     return "watch"
 
@@ -715,15 +744,16 @@ def _finalize_fields(fields: list[dict]) -> list[dict]:
 
 
 def _candidate_header(attention_score: float | None, risk_score: float | None) -> str:
+    policy = discord_presentation_policy()
     if attention_score is None:
         return "SE // MONITOR"
-    if attention_score >= 0.85:
+    if attention_score >= policy.candidate_header_breakout_attention_min:
         regime = "BREAKOUT"
-    elif attention_score >= 0.70:
+    elif attention_score >= policy.candidate_header_setup_attention_min:
         regime = "SETUP"
     elif risk_score is not None and risk_score < RADAR_QUIET_RISK_MAX:
         regime = "WATCH"
-    elif risk_score is not None and risk_score < 0.50:
+    elif risk_score is not None and risk_score < policy.candidate_header_setup_risk_max:
         regime = "SETUP"
     else:
         regime = "SETUP"
@@ -731,7 +761,8 @@ def _candidate_header(attention_score: float | None, risk_score: float | None) -
 
 
 def _promoted_header(final_score: float) -> str:
-    if final_score >= 0.80:
+    policy = discord_presentation_policy()
+    if final_score >= policy.promoted_header_strong_min:
         regime = "STRONG"
     elif final_score >= 0.75:
         regime = "NORMAL"
@@ -741,13 +772,19 @@ def _promoted_header(final_score: float) -> str:
 
 
 def _conviction_label(attention_score: float | None, risk_score: float | None, lifecycle: str) -> str:
+    policy = discord_presentation_policy()
     if attention_score is None:
         return "Not computed"
-    if lifecycle == "dex" and attention_score >= 0.85 and risk_score is not None and risk_score <= 0.15:
+    if (
+        lifecycle == "dex"
+        and attention_score >= policy.conviction_confirmed_attention_min
+        and risk_score is not None
+        and risk_score <= policy.conviction_confirmed_risk_max
+    ):
         return "Momentum confirmed"
-    if attention_score >= 0.80:
+    if attention_score >= policy.conviction_strong_attention_min:
         return "Strong coordination"
-    if attention_score >= 0.65:
+    if attention_score >= policy.conviction_early_attention_min:
         return "Early follow-through"
     return "Developing flow"
 
@@ -818,6 +855,7 @@ def _pretty_reason(reason: str) -> str:
 
 
 def _security_lines(e: Event, metrics: dict, risk_score: float | None) -> str:
+    policy = discord_presentation_policy()
     extra = e.extra if isinstance(e.extra, dict) else {}
     risk_meta = get_metric_meta(extra, "risk_score")
     if risk_score is None:
@@ -826,7 +864,15 @@ def _security_lines(e: Event, metrics: dict, risk_score: float | None) -> str:
         lines = [f"- Risk Score: {format_metric_number(risk_score, decimals=2)} ({_score_band(risk_score, invert=True)})"]
     elite = extra.get("elite_score")
     if elite is not None:
-        elite_band = "Elite" if elite >= 10 else "Strong" if elite >= 8 else "Developing" if elite >= 5 else "Weak"
+        elite_band = (
+            "Elite"
+            if elite >= policy.elite_band_elite_min
+            else "Strong"
+            if elite >= policy.elite_band_strong_min
+            else "Developing"
+            if elite >= policy.elite_band_developing_min
+            else "Weak"
+        )
         lines.append(f"- Elite Score: {elite} ({elite_band})")
     lifecycle = metrics.get("lifecycle")
     if lifecycle:

@@ -138,18 +138,13 @@ from worker.config import (
     KOL_WALLETS,
     NARRATIVE_KEYWORDS,
 )
-from worker.signal_policy import candidate_signal_policy
+from worker.signal_policy import attention_scoring_policy, candidate_signal_policy
 from worker.token_state import _ts
 from app.services.state_service import get_dynamic_tracked_wallets, get_dynamic_kol_wallets
 from worker.x_signal import fetch_x_signal
 
 DEXSCREENER_ORDERS_URL = "https://api.dexscreener.com/orders/v1/solana/{token}"
 DEX_CACHE_TTL_SEC = 30
-
-BURST_COUNT_60S_THRESHOLD = 20
-UNIQUE_BUYERS_5M_THRESHOLD = 25
-DEXSCREENER_BOOST_THRESHOLD = 1
-PUMPORTAL_TRADE_BURST_THRESHOLD = 20
 
 _DEX_CACHE: Dict[str, tuple[float, Any]] = {}
 
@@ -187,13 +182,14 @@ def _narrative_hits(e: Any) -> list[str]:
 
 
 def burst_weight_from_sol(sol: float) -> int:
-    if sol < 0.2:
-        return 1
-    if sol < 1.0:
-        return 2
-    if sol < 3.0:
-        return 3
-    return 5
+    policy = attention_scoring_policy()
+    if sol < policy.burst_weight_small_buy_sol:
+        return policy.burst_weight_small_value
+    if sol < policy.burst_weight_medium_buy_sol:
+        return policy.burst_weight_medium_value
+    if sol < policy.burst_weight_large_buy_sol:
+        return policy.burst_weight_large_value
+    return policy.burst_weight_extreme_value
 
 
 
@@ -233,7 +229,8 @@ def register_buyer(mint: str, buyer: str, sol_spent: float | None = None) -> int
     unique_30s = len(counts)
     top_share = (max(counts.values()) / total) if total else 0.0
     wash_policy = candidate_signal_policy()
-    wash_suppress = 0.30 if (
+    score_policy = attention_scoring_policy()
+    wash_suppress = score_policy.anti_wash_penalty if (
         top_share >= wash_policy.anti_wash_top_wallet_share
         and unique_30s <= wash_policy.anti_wash_unique_wallets_30s
     ) else 0.0
@@ -245,12 +242,12 @@ def register_buyer(mint: str, buyer: str, sol_spent: float | None = None) -> int
         )
 
     accel_boost = 0.0
-    if unique_10s == 3:
-        accel_boost = 0.10
-    elif unique_10s == 4:
-        accel_boost = 0.15
-    elif unique_10s >= 5:
-        accel_boost = 0.20
+    if unique_10s == score_policy.acceleration_unique_3_min:
+        accel_boost = score_policy.acceleration_unique_3_boost
+    elif unique_10s == score_policy.acceleration_unique_4_min:
+        accel_boost = score_policy.acceleration_unique_4_boost
+    elif unique_10s >= score_policy.acceleration_unique_5_min:
+        accel_boost = score_policy.acceleration_unique_5_boost
     print(f"[acceleration] token={mint} unique_10s={unique_10s} boost={accel_boost}", flush=True)
 
     return weight
@@ -263,16 +260,17 @@ def _acceleration_boost(mint: str) -> float:
         return 0.0
     now = time.time()
     st = _ts(mint)
+    policy = attention_scoring_policy()
     while st.buyers_10s and now - st.buyers_10s[0][1] > 10:
         st.buyers_10s.popleft()
     unique_10s = len(set(b for b, _ in st.buyers_10s))
     boost = 0.0
-    if unique_10s == 3:
-        boost = 0.10
-    elif unique_10s == 4:
-        boost = 0.15
-    elif unique_10s >= 5:
-        boost = 0.20
+    if unique_10s == policy.acceleration_unique_3_min:
+        boost = policy.acceleration_unique_3_boost
+    elif unique_10s == policy.acceleration_unique_4_min:
+        boost = policy.acceleration_unique_4_boost
+    elif unique_10s >= policy.acceleration_unique_5_min:
+        boost = policy.acceleration_unique_5_boost
     return boost
 
 
@@ -294,11 +292,12 @@ def _anti_wash_multiplier(mint: str) -> float:
     unique_wallets = len(by_wallet)
     top_wallet_share = max(by_wallet.values()) / total if total else 0.0
     wash_policy = candidate_signal_policy()
+    score_policy = attention_scoring_policy()
     if (
         top_wallet_share >= wash_policy.anti_wash_top_wallet_share
         and unique_wallets <= wash_policy.anti_wash_unique_wallets_30s
     ):
-        return 0.70
+        return score_policy.anti_wash_multiplier
     return 1.0
 
 
@@ -505,6 +504,7 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
     buyers_5m = metrics["unique_buyers_5m"]
     buyers_15m = metrics["unique_buyers_15m"]
     burst_60s = metrics["burst_count_60s"]
+    policy = attention_scoring_policy()
     st = _ts(token) if token else None
     if st is not None:
         now = time.time()
@@ -517,15 +517,26 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
             metrics["unique_wallets_30s"] = len(by_wallet)
             metrics["top_wallet_share_30s"] = (max(by_wallet.values()) / len(st.buys_30s)) if st.buys_30s else 0.0
 
-    local_buyers = min(0.32, (min(buyers_5m, 4) * 0.045) + (max(buyers_5m - 4, 0) * 0.02))
-    local_burst = min(0.24, (min(burst_60s, 8) * 0.015) + (max(burst_60s - 8, 0) * 0.0075))
-    local_15m = min(0.22, min(buyers_15m, 18) * 0.012)
+    local_buyers = min(
+        policy.local_buyers_max_score,
+        (min(buyers_5m, policy.local_buyers_primary_count) * policy.local_buyers_primary_step)
+        + (max(buyers_5m - policy.local_buyers_primary_count, 0) * policy.local_buyers_secondary_step),
+    )
+    local_burst = min(
+        policy.local_burst_max_score,
+        (min(burst_60s, policy.local_burst_primary_count) * policy.local_burst_primary_step)
+        + (max(burst_60s - policy.local_burst_primary_count, 0) * policy.local_burst_secondary_step),
+    )
+    local_15m = min(
+        policy.local_buyers_15m_max_score,
+        min(buyers_15m, policy.local_buyers_15m_cap_count) * policy.local_buyers_15m_step,
+    )
     local = local_buyers + local_burst + local_15m
-    if buyers_5m >= 3:
+    if buyers_5m >= policy.buyer_breadth_reason_min:
         _append_reason(reasons, f"5m buyer breadth: {buyers_5m}")
-    if burst_60s >= 8:
+    if burst_60s >= policy.burst_reason_min:
         _append_reason(reasons, f"1m burst strength: {burst_60s}")
-    if buyers_15m >= 8:
+    if buyers_15m >= policy.buyer_breadth_15m_reason_min:
         _append_reason(reasons, f"15m buyer breadth: {buyers_15m}")
 
     # DexScreener boosts/orders
@@ -535,8 +546,8 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         _append_reason(reasons, "source_unavailable:dexscreener")
     else:
         metrics["dexscreener_boosts_count"] = boosts
-        if boosts >= DEXSCREENER_BOOST_THRESHOLD:
-            dex_boost = 0.20
+        if boosts >= policy.dexscreener_boost_threshold:
+            dex_boost = policy.dexscreener_boost_score
             _append_reason(reasons, f"DexScreener boost activity: {boosts}")
 
     # Birdeye trending (optional)
@@ -549,7 +560,7 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         metrics["birdeye_trending"] = be.get("rank") is not None
         metrics["birdeye_rank"] = be.get("rank")
         if be.get("rank") is not None:
-            birdeye_score = 0.10
+            birdeye_score = policy.birdeye_trending_score
             _append_reason(reasons, f"Birdeye trending rank: #{be.get('rank')}")
 
     # PumpPortal trade burst (optional)
@@ -559,8 +570,8 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         if token:
             _PUMPPORTAL.track_token(token)
             metrics["pumportal_trade_burst"] = _PUMPPORTAL.trade_burst(token, window_sec=60)
-            if metrics["pumportal_trade_burst"] >= PUMPORTAL_TRADE_BURST_THRESHOLD:
-                pumpportal_score = 0.20
+            if metrics["pumportal_trade_burst"] >= policy.pumpportal_burst_threshold:
+                pumpportal_score = policy.pumpportal_burst_score
                 _append_reason(reasons, f"PumpPortal trade burst: {metrics['pumportal_trade_burst']}")
     else:
         if ENABLE_PUMPORTAL:
@@ -576,17 +587,17 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         metrics["tracked_wallet_hits"] = tracked_hits
         metrics["kol_wallet_hits"] = kol_hits
         if tracked_hits > 0:
-            tracked_score += min(0.15, tracked_hits * 0.05)
+            tracked_score += min(policy.tracked_wallet_max_score, tracked_hits * policy.tracked_wallet_step)
             _append_reason(reasons, f"Smart wallet flow: {tracked_hits}")
         if kol_hits > 0:
-            tracked_score += min(0.20, kol_hits * 0.10)
+            tracked_score += min(policy.kol_wallet_max_score, kol_hits * policy.kol_wallet_step)
             _append_reason(reasons, f"KOL wallet flow: {kol_hits}")
 
     narrative_score = 0.0
     hits = _narrative_hits(e)
     if hits:
         metrics["narrative_hits"] = hits[:3]
-        narrative_score = min(0.10, len(hits) * 0.05)
+        narrative_score = min(policy.narrative_max_score, len(hits) * policy.narrative_step)
         _append_reason(reasons, f"Narrative alignment: {', '.join(hits[:2])}")
 
     x_score = 0.0
@@ -595,11 +606,17 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         and token
         and (
             tracked_score > 0.0
-            or (dex_boost > 0.0 and local >= 0.25)
-            or (narrative_score > 0.0 and local >= 0.25)
-            or (birdeye_score > 0.0 and local >= 0.20)
+            or (dex_boost > 0.0 and local >= policy.x_local_gate_with_boost)
+            or (narrative_score > 0.0 and local >= policy.x_local_gate_with_boost)
+            or (birdeye_score > 0.0 and local >= policy.x_local_gate_with_birdeye)
             or pumpportal_score > 0.0
-            or (local >= 0.32 and (buyers_5m >= 4 or burst_60s >= 10))
+            or (
+                local >= policy.x_local_gate_strong
+                and (
+                    buyers_5m >= policy.x_query_min_buyers_5m
+                    or burst_60s >= policy.x_query_min_burst_60s
+                )
+            )
         )
     )
     if should_query_x:
@@ -613,12 +630,12 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
             metrics["x_tweet_count"] = int(x_data.get("tweet_count") or 0)
             metrics["x_unique_authors"] = int(x_data.get("unique_authors") or 0)
             metrics["x_likes"] = int(x_data.get("likes") or 0)
-            if metrics["x_tweet_count"] >= 3:
-                x_score += 0.05
-            if metrics["x_unique_authors"] >= 3:
-                x_score += 0.05
-            if metrics["x_likes"] >= 20:
-                x_score += 0.05
+            if metrics["x_tweet_count"] >= policy.x_mentions_threshold:
+                x_score += policy.x_mentions_score
+            if metrics["x_unique_authors"] >= policy.x_authors_threshold:
+                x_score += policy.x_authors_score
+            if metrics["x_likes"] >= policy.x_likes_threshold:
+                x_score += policy.x_likes_score
             if x_score > 0:
                 _append_reason(
                     reasons,

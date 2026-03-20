@@ -273,7 +273,15 @@ from worker.alert_gate import evaluate_alert_gate, admission_check_candidate
 from worker.creator_score import compute_creator_score
 from worker.progression import metrics_improved
 from worker.recheck import schedule_rechecks, update_stop_counters, min_liquidity_gate
-from worker.signal_policy import candidate_send_reasons, promotion_confirmation_target, classify_route_signal
+from worker.signal_policy import (
+    attention_scoring_policy,
+    candidate_lifecycle_policy,
+    candidate_send_reasons,
+    candidate_signal_policy,
+    promotion_confirmation_target,
+    classify_route_signal,
+    route_signal_policy,
+)
 from app.services.signal_metrics import compute_confidence_score, metric_state
 from app.services.signal_learning_service import classify_policy_regime, record_signal_decision, resolve_live_policy
 from app.services.state_service import (
@@ -763,7 +771,6 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         burst_10s = 0
         unique_30s = 0
         top_share = 0.0
-        wash_suppress = 0.0
         now_wall = time.time()
         try:
             while st.buyers_10s and now_wall - st.buyers_10s[0][1] > 10:
@@ -783,7 +790,6 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             total = len(st.buys_30s)
             unique_30s = len(counts)
             top_share = (max(counts.values()) / total) if total else 0.0
-            wash_suppress = 0.30 if (top_share >= 0.70 and unique_30s <= 2) else 0.0
         except Exception:
             pass
 
@@ -919,17 +925,19 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             return [e]
 
         if liquidity_unknown:
+            route_policy = route_signal_policy()
+            candidate_policy = candidate_signal_policy()
             route_like_support = bool(
-                (attention_score or 0.0) >= 0.55
+                (attention_score or 0.0) >= route_policy.sniper_min_attention
                 or int(attn_metrics.get("tracked_wallet_hits") or 0) > 0
                 or int(attn_metrics.get("kol_wallet_hits") or 0) > 0
-                or int(attn_metrics.get("unique_buyers_5m") or 0) >= 4
+                or int(attn_metrics.get("unique_buyers_5m") or 0) >= max(candidate_policy.min_unique_buyers_5m + 1, 4)
             )
             if (
                 ENGINE_MODE == "balanced"
-                and unique_10s >= 2
-                and burst_10s >= 6
-                and elite_score >= 8
+                and unique_10s >= route_policy.sniper_min_unique_10s
+                and burst_10s >= route_policy.sniper_min_burst_10s
+                and elite_score >= route_policy.sniper_min_elite
                 and route_like_support
             ):
                 print(
@@ -1032,15 +1040,16 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 )
             )
 
+        attention_policy = attention_scoring_policy()
         accel_boost = 0.0
-        if unique_10s == 3:
-            accel_boost = 0.10
-        elif unique_10s == 4:
-            accel_boost = 0.15
-        elif unique_10s >= 5:
-            accel_boost = 0.20
+        if unique_10s == attention_policy.acceleration_unique_3_min:
+            accel_boost = attention_policy.acceleration_unique_3_boost
+        elif unique_10s == attention_policy.acceleration_unique_4_min:
+            accel_boost = attention_policy.acceleration_unique_4_boost
+        elif unique_10s >= attention_policy.acceleration_unique_5_min:
+            accel_boost = attention_policy.acceleration_unique_5_boost
 
-        if elite_score >= SNIPER_MIN_ELITE_SCORE or accel_boost >= 0.10:
+        if elite_score >= SNIPER_MIN_ELITE_SCORE or accel_boost >= attention_policy.acceleration_unique_3_boost:
             if st.spike_started_at == 0:
                 st.spike_started_at = now_wall
                 st.last_unique_buyers = unique_10s
@@ -1273,17 +1282,18 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     lifecycle,
                 )
                 # Determine recheck stage
+                lifecycle_policy = candidate_lifecycle_policy()
                 stage = "A"
                 if (
-                    (attention_score or 0.0) >= 0.25
-                    or (attn_metrics.get("unique_buyers_5m") or 0) >= 5
+                    (attention_score or 0.0) >= lifecycle_policy.candidate_stage_b_attention_min
+                    or (attn_metrics.get("unique_buyers_5m") or 0) >= lifecycle_policy.candidate_stage_b_unique_buyers_5m_min
                     or ("liquidity" in improved_keys)
                 ):
                     stage = "B"
                 if (
-                    e.confidence >= 0.50
+                    e.confidence >= lifecycle_policy.candidate_stage_c_confidence_min
                     or extra.get("candidate_send")
-                    or float(creator_score_info.get("score") or 0.0) >= 0.5
+                    or float(creator_score_info.get("score") or 0.0) >= lifecycle_policy.candidate_stage_c_creator_min
                 ):
                     stage = "C"
 
@@ -1302,10 +1312,17 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     if flat_stop:
                         logger.info("[recheck-stop] token=%s reason=flat_metrics", e.token)
                     age_sec = now_ts - int(cand_state.get("first_seen_at") or now_ts)
-                    if age_sec > 30 * 86400:
+                    if age_sec > lifecycle_policy.recheck_stop_max_age_days * 86400:
                         logger.info("[recheck-stop] token=%s reason=age>30d", e.token)
-                    if age_sec > 7 * 86400 and float(cand_state.get("max_confidence") or 0.0) < 0.40:
-                        logger.info("[recheck-stop] token=%s reason=never_crossed_0.40", e.token)
+                    if (
+                        age_sec > lifecycle_policy.recheck_stop_never_crossed_days * 86400
+                        and float(cand_state.get("max_confidence") or 0.0) < lifecycle_policy.recheck_stop_never_crossed_confidence_min
+                    ):
+                        logger.info(
+                            "[recheck-stop] token=%s reason=never_crossed_%.2f",
+                            e.token,
+                            lifecycle_policy.recheck_stop_never_crossed_confidence_min,
+                        )
 
                 # Schedule rechecks
                 if not should_mute(e.token):
@@ -1425,7 +1442,8 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             )
 
         # Remove legacy heating_up sends; progression is handled via candidate updates.
-        if 0.55 <= e.confidence < 0.80:
+        lifecycle_policy = candidate_lifecycle_policy()
+        if lifecycle_policy.heating_review_confidence_min <= e.confidence < lifecycle_policy.heating_review_confidence_max:
             gate_pass, gate_reasons = evaluate_alert_gate(
                 "heating_up",
                 extra.get("dex_summary") if isinstance(extra, dict) else None,
