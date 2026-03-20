@@ -37,10 +37,12 @@ class CandidateSignalPolicy:
     min_unique_buyers_5m: int
     min_burst_count_60s: int
     min_confirmation_signals: int
+    min_send_confirmation_signals: int
     min_market_support_liq_usd: float
     creator_attention_floor: float
     creator_attention_target: float
     strong_attention_threshold: float
+    exceptional_attention_threshold: float
     strong_creator_threshold: float
     anti_wash_top_wallet_share: float
     anti_wash_unique_wallets_30s: int
@@ -86,10 +88,12 @@ def candidate_signal_policy() -> CandidateSignalPolicy:
         min_unique_buyers_5m=_env_int("SIGNAL_ENGINE_CANDIDATE_MIN_UNIQUE_BUYERS_5M", 3),
         min_burst_count_60s=_env_int("SIGNAL_ENGINE_CANDIDATE_MIN_BURST_60S", 6),
         min_confirmation_signals=_env_int("SIGNAL_ENGINE_CANDIDATE_MIN_CONFIRMATIONS", 2),
+        min_send_confirmation_signals=_env_int("SIGNAL_ENGINE_CANDIDATE_MIN_SEND_CONFIRMATIONS", 3),
         min_market_support_liq_usd=_env_float("SIGNAL_ENGINE_CANDIDATE_MIN_MARKET_SUPPORT_LIQ_USD", 12000.0),
         creator_attention_floor=_env_float("SIGNAL_ENGINE_CANDIDATE_CREATOR_ATTENTION_FLOOR", 0.35),
         creator_attention_target=_env_float("SIGNAL_ENGINE_CANDIDATE_CREATOR_ATTENTION_TARGET", 0.42),
         strong_attention_threshold=_env_float("SIGNAL_ENGINE_CANDIDATE_STRONG_ATTENTION_THRESHOLD", 0.58),
+        exceptional_attention_threshold=_env_float("SIGNAL_ENGINE_CANDIDATE_EXCEPTIONAL_ATTENTION_THRESHOLD", 0.72),
         strong_creator_threshold=_env_float("SIGNAL_ENGINE_CANDIDATE_STRONG_CREATOR_THRESHOLD", 0.65),
         anti_wash_top_wallet_share=_env_float("SIGNAL_ENGINE_ANTI_WASH_TOP_WALLET_SHARE", 0.70),
         anti_wash_unique_wallets_30s=_env_int("SIGNAL_ENGINE_ANTI_WASH_MAX_UNIQUE_WALLETS_30S", 2),
@@ -120,7 +124,7 @@ def route_signal_policy() -> RouteSignalPolicy:
         sniper_min_burst_10s=_env_int("SIGNAL_ENGINE_SNIPER_MIN_BURST_10S", 6),
         sniper_min_elite=_env_int("SIGNAL_ENGINE_SNIPER_MIN_ELITE", 8),
         sniper_min_confirmations=_env_int("SIGNAL_ENGINE_SNIPER_MIN_CONFIRMATIONS", 2),
-        heating_min_confirmations=_env_int("SIGNAL_ENGINE_HEATING_MIN_CONFIRMATIONS", 1),
+        heating_min_confirmations=_env_int("SIGNAL_ENGINE_HEATING_MIN_CONFIRMATIONS", 2),
     )
 
 
@@ -150,6 +154,9 @@ def candidate_confirmation_signals(
     burst_60s = int(metrics.get("burst_count_60s") or 0)
     tracked_hits = int(metrics.get("tracked_wallet_hits") or 0)
     kol_hits = int(metrics.get("kol_wallet_hits") or 0)
+    x_mentions = int(metrics.get("x_tweet_count") or 0)
+    x_authors = int(metrics.get("x_unique_authors") or 0)
+    narrative_hits = metrics.get("narrative_hits") if isinstance(metrics.get("narrative_hits"), list) else []
     top_wallet_share = float(metrics.get("top_wallet_share_30s") or 0.0)
     unique_wallets_30s = int(metrics.get("unique_wallets_30s") or 0)
 
@@ -163,6 +170,10 @@ def candidate_confirmation_signals(
         confirmations.append("kol_wallet_flow")
     if attention_score >= policy.strong_attention_threshold:
         confirmations.append("strong_attention")
+    if x_mentions >= 5 and x_authors >= 3:
+        confirmations.append("social_support")
+    if narrative_hits:
+        confirmations.append("narrative_alignment")
 
     liq = 0.0
     buys5m = 0
@@ -207,10 +218,19 @@ def candidate_send_reasons(
         extra=extra,
         dex_summary=dex_summary,
     )
+    confirmation_set = set(confirmations)
+    quality_confirmed = bool(
+        {"tracked_wallet_flow", "kol_wallet_flow", "market_support", "social_support", "narrative_alignment"} & confirmation_set
+    )
 
     has_creator_support = creator_score >= policy.strong_creator_threshold and attn >= policy.creator_attention_floor
     has_attention_only = attn >= policy.strong_attention_threshold
     has_balanced_quality = creator_score >= policy.creator_attention_target and attn >= policy.creator_attention_target
+
+    if len(confirmations) < policy.min_send_confirmation_signals and attn < policy.exceptional_attention_threshold:
+        reasons.append(f"send_confirmation_signals<{policy.min_send_confirmation_signals}")
+    if not quality_confirmed and attn < policy.exceptional_attention_threshold:
+        reasons.append("quality_confirmation_missing")
 
     eligible = (has_attention_only or has_creator_support or has_balanced_quality) and not reasons
     if not (has_attention_only or has_creator_support or has_balanced_quality):
@@ -294,6 +314,8 @@ def classify_route_signal(
     buys5m = int(dex_summary.get("txns_m5_buys") or 0) if isinstance(dex_summary, dict) else 0
     tracked_hits = int(metrics.get("tracked_wallet_hits") or 0)
     kol_hits = int(metrics.get("kol_wallet_hits") or 0)
+    buyers_5m = int(metrics.get("unique_buyers_5m") or 0)
+    burst_60s = int(metrics.get("burst_count_60s") or 0)
     x_mentions = int(metrics.get("x_tweet_count") or 0)
     x_authors = int(metrics.get("x_unique_authors") or 0)
     attention = float(attention_score or 0.0)
@@ -306,6 +328,10 @@ def classify_route_signal(
         confirmations.append("tracked_wallet_flow")
     if kol_hits > 0:
         confirmations.append("kol_wallet_flow")
+    if buyers_5m >= 4:
+        confirmations.append("buyer_breadth")
+    if burst_60s >= 8:
+        confirmations.append("burst_strength")
     if liq >= policy.heating_min_liq_usd and buys5m >= 10:
         confirmations.append("market_support")
     if attention >= policy.heating_min_attention:
@@ -323,6 +349,8 @@ def classify_route_signal(
         and elite_score >= policy.sniper_min_elite
         and attention >= policy.sniper_min_attention
         and len(confirmations) >= policy.sniper_min_confirmations
+        and bool({"buyer_breadth", "burst_strength"} & set(confirmations))
+        and bool({"tracked_wallet_flow", "kol_wallet_flow", "market_support", "social_support"} & set(confirmations))
     ):
         route_tier = "sniper"
     elif not blockers and len(confirmations) >= policy.heating_min_confirmations and (
@@ -330,6 +358,9 @@ def classify_route_signal(
         or elite_score >= max(7, policy.sniper_min_elite - 1)
         or tracked_hits > 0
         or kol_hits > 0
+    ) and (
+        bool({"buyer_breadth", "burst_strength"} & set(confirmations))
+        or bool({"tracked_wallet_flow", "kol_wallet_flow", "market_support", "social_support"} & set(confirmations))
     ):
         route_tier = "heating_up"
     else:
@@ -343,6 +374,10 @@ def classify_route_signal(
             blockers.append(f"attention<{policy.heating_min_attention:.2f}")
         if len(confirmations) < policy.heating_min_confirmations:
             blockers.append(f"route_confirmations<{policy.heating_min_confirmations}")
+        if not ({"buyer_breadth", "burst_strength"} & set(confirmations)):
+            blockers.append("route_flow_confirmation_missing")
+        if not ({"tracked_wallet_flow", "kol_wallet_flow", "market_support", "social_support"} & set(confirmations)):
+            blockers.append("route_quality_confirmation_missing")
 
     return {
         "tier": route_tier,
@@ -356,6 +391,8 @@ def classify_route_signal(
             "burst_10s": burst_10s,
             "tracked_wallet_hits": tracked_hits,
             "kol_wallet_hits": kol_hits,
+            "unique_buyers_5m": buyers_5m,
+            "burst_count_60s": burst_60s,
             "liquidity_usd": liq,
             "txns_m5_buys": buys5m,
             "x_tweet_count": x_mentions,

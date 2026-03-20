@@ -47,6 +47,28 @@ def test_candidate_send_reasons_reject_concentrated_wallet_flow_without_support(
     assert "buyer_breadth" in confirmations
 
 
+def test_candidate_send_reasons_reject_low_quality_attention_only_setup():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.60,
+        creator_score=0.70,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 3,
+                "burst_count_60s": 6,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+                "unique_wallets_30s": 4,
+                "top_wallet_share_30s": 0.20,
+            }
+        },
+        dex_summary={"liquidity_usd": 6000.0, "txns_m5_buys": 6},
+    )
+
+    assert eligible is False
+    assert "quality_confirmation_missing" in reasons
+    assert "strong_attention" in confirmations
+
+
 def test_promotion_confirmation_target_scales_with_signal_strength():
     strong_target, strong_reasons = promotion_confirmation_target(
         confidence_score=0.90,
@@ -90,7 +112,7 @@ def test_classify_route_signal_distinguishes_sniper_from_watch():
         unique_10s=3,
         burst_10s=8,
         hard_fail_from_authority_checks=False,
-        extra={"attention_metrics": {"tracked_wallet_hits": 1}},
+        extra={"attention_metrics": {"tracked_wallet_hits": 1, "unique_buyers_5m": 5, "burst_count_60s": 9}},
         dex_summary={"liquidity_usd": 25000.0, "txns_m5_buys": 14},
     )
     watch = classify_route_signal(
@@ -107,6 +129,21 @@ def test_classify_route_signal_distinguishes_sniper_from_watch():
     assert "tracked_wallet_flow" in sniper["confirmations"]
     assert watch["tier"] == "watch"
     assert watch["blockers"]
+
+
+def test_classify_route_signal_keeps_strong_non_sniper_setup_as_heating_up():
+    route = classify_route_signal(
+        attention_score=0.58,
+        elite_score=7,
+        unique_10s=2,
+        burst_10s=6,
+        hard_fail_from_authority_checks=False,
+        extra={"attention_metrics": {"tracked_wallet_hits": 0, "unique_buyers_5m": 4, "burst_count_60s": 8}},
+        dex_summary={"liquidity_usd": 22000.0, "txns_m5_buys": 12},
+    )
+
+    assert route["tier"] == "heating_up"
+    assert "market_support" in route["confirmations"]
 
 
 def test_heating_delivery_decision_trusts_sniper_route():

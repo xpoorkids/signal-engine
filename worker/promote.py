@@ -1230,12 +1230,14 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     policy_version=candidate_policy.get("policy_version"),
                 )
                 logger.info(
-                    "[candidate-progress] token=%s improved=%s keys=%s confirmations=%s send_reasons=%s",
+                    "[candidate-progress] token=%s improved=%s keys=%s confirmations=%s send_reasons=%s route_tier=%s route_blockers=%s",
                     e.token,
                     improved,
                     improved_keys,
                     confirmation_signals,
                     send_reasons,
+                    str((extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}).get("tier") or ""),
+                    (extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}).get("blockers") or [],
                 )
                 upsert_candidate_state(
                     e.token,
