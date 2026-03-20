@@ -1,6 +1,7 @@
 from worker.events import Event
 from worker import runner
 import asyncio
+from worker.promote import _apply_route_precedence
 
 
 def test_should_send_heating_up_logs_structured_skip(caplog):
@@ -196,6 +197,47 @@ def test_non_candidate_cooldown_key_separates_sniper_from_heating():
     assert sniper_key == "sniper:token-8"
     assert heating_key == "heating_up:token-8"
     assert promoted_key == "promoted:token-8"
+
+
+def test_apply_route_precedence_drops_candidate_when_sniper_exists():
+    candidate = Event(type="candidate", source="engine", token="token-prec-1")
+    sniper = Event(
+        type="heating_up",
+        source="engine",
+        token="token-prec-1",
+        extra={"route_decision": {"tier": "sniper"}},
+    )
+
+    resolved = _apply_route_precedence([candidate, sniper])
+
+    assert [event.type for event in resolved] == ["heating_up"]
+
+
+def test_apply_route_precedence_keeps_only_promoted_when_present():
+    candidate = Event(type="candidate", source="engine", token="token-prec-2")
+    sniper = Event(
+        type="heating_up",
+        source="engine",
+        token="token-prec-2",
+        extra={"route_decision": {"tier": "sniper"}},
+    )
+    promoted = Event(type="promoted", source="engine", token="token-prec-2")
+
+    resolved = _apply_route_precedence([candidate, sniper, promoted])
+
+    assert [event.type for event in resolved] == ["promoted"]
+
+
+def test_derived_event_priority_prefers_promoted_then_sniper_then_candidate():
+    events = [
+        Event(type="candidate", source="engine", token="token-prec-3"),
+        Event(type="promoted", source="engine", token="token-prec-3"),
+        Event(type="heating_up", source="engine", token="token-prec-3", extra={"route_decision": {"tier": "sniper"}}),
+    ]
+
+    ordered = sorted(events, key=runner._derived_event_priority, reverse=True)
+
+    assert [event.type for event in ordered] == ["promoted", "heating_up", "candidate"]
 
 
 def test_event_loop_only_records_wallet_signal_after_successful_delivery(monkeypatch):

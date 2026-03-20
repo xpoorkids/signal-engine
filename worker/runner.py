@@ -277,6 +277,21 @@ def _non_candidate_cooldown_key(de: Event) -> tuple[str | None, int]:
     return f"{de.type}:{de.token}", HEATING_UP_ALERT_COOLDOWN_SEC
 
 
+def _derived_event_priority(de: Event) -> int:
+    extra = de.extra if isinstance(de.extra, dict) else {}
+    route = extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}
+    tier = str(route.get("tier") or "").strip().lower()
+    if de.type == "promoted":
+        return 4
+    if de.type == "heating_up" and tier == "sniper":
+        return 3
+    if de.type == "candidate":
+        return 2
+    if de.type == "heating_up":
+        return 1
+    return 0
+
+
 def _persist_non_candidate_delivery(de: Event, delivered: bool) -> str | None:
     if not delivered:
         log_event(logger, logging.WARNING, "dispatch-skip-persist", type=de.type, token=de.token, reason="delivery_failed")
@@ -332,7 +347,7 @@ async def event_loop(q: asyncio.Queue) -> None:
                 q.task_done()
                 continue
 
-            derived = await process_event(state, e)
+            derived = sorted(await process_event(state, e), key=_derived_event_priority, reverse=True)
             for de in derived:
                 if de.type in ("heating_up", "promoted"):
                     cooldown_key, cooldown_sec = _non_candidate_cooldown_key(de)

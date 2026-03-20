@@ -363,6 +363,50 @@ def _candidate_send_decision(
     return eligible, reasons, confirmations
 
 
+def _route_precedence_rank(event: Event) -> int:
+    extra = event.extra if isinstance(event.extra, dict) else {}
+    route = extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}
+    tier = str(route.get("tier") or "").strip().lower()
+    if event.type == "promoted":
+        return 4
+    if event.type == "heating_up" and tier == "sniper":
+        return 3
+    if event.type == "candidate":
+        return 2
+    if event.type == "heating_up":
+        return 1
+    return 0
+
+
+def _apply_route_precedence(events: list[Event]) -> list[Event]:
+    if not events:
+        return events
+    by_token: dict[str, list[Event]] = {}
+    passthrough: list[Event] = []
+    for event in events:
+        token = str(event.token or "").strip()
+        if not token:
+            passthrough.append(event)
+            continue
+        by_token.setdefault(token, []).append(event)
+
+    resolved: list[Event] = list(passthrough)
+    for token, token_events in by_token.items():
+        has_promoted = any(event.type == "promoted" for event in token_events)
+        has_sniper_heating = any(
+            event.type == "heating_up"
+            and str((((event.extra if isinstance(event.extra, dict) else {}) or {}).get("route_decision") or {}).get("tier") or "").strip().lower() == "sniper"
+            for event in token_events
+        )
+        for event in token_events:
+            if has_promoted and event.type != "promoted":
+                continue
+            if has_sniper_heating and event.type == "candidate":
+                continue
+            resolved.append(event)
+    return sorted(resolved, key=_route_precedence_rank, reverse=True)
+
+
 def _token_is_tradeable_target(meta: dict | None, dex_summary: Dict[str, Any] | None) -> bool:
     if dex_summary:
         return True
@@ -1691,4 +1735,4 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             )
             _record_decision(e, stage="promoted", decision="promoted_sent", action_taken="emit", reasons=["promotion_gate_passed"], attention_score=attention_score, risk_score=risk_score, confidence_score=e.confidence, creator_score=creator_score, lifecycle="dex", policy_name=promoted_policy.get("policy_name"), policy_version=promoted_policy.get("policy_version"))
 
-    return out
+    return _apply_route_precedence(out)
