@@ -1,5 +1,5 @@
 from worker.alert_gate import admission_check_candidate
-from worker.promote import _candidate_send_eligible
+from worker.promote import _candidate_send_eligible, _wallet_distribution_fail_reasons
 from app.services import signal_learning_service as sls
 
 
@@ -88,3 +88,19 @@ def test_default_policy_descriptor_relaxes_candidate_gate_defaults(monkeypatch):
 
     assert descriptor["candidate_gate_attention_min"] == 0.14
     assert descriptor["candidate_gate_min_age_sec"] == 15
+
+
+def test_wallet_distribution_fail_reasons_flags_bundle_and_concentration():
+    reasons = _wallet_distribution_fail_reasons(
+        {
+            "risk": "high",
+            "top_holder_pct": 0.16,
+        },
+        total_buys_30s=8,
+        unique_wallets_30s=2,
+        top_wallet_share=0.75,
+    )
+
+    assert "wallet_distribution_high_risk" in reasons
+    assert "wallet_top_holder_concentration" in reasons
+    assert "bundle_pattern_detected" in reasons

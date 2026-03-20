@@ -70,3 +70,43 @@ def test_score_route_persists_contract_before_symbol(monkeypatch):
     score({})
 
     assert appended["token"] == "D69bugFJG4y3kmJxiLPTMuqqK3e3PnJHQCcQvALgpump"
+
+
+def test_pick_contract_address_does_not_fall_back_to_excluded_quote():
+    pair = {
+        "baseToken": {
+            "address": "7vfCXTUXx5W7D3eK7oN7htTz3h6m5r3WQYgbR1fRpump",
+            "symbol": "TEST",
+        },
+        "quoteToken": {
+            "address": "So11111111111111111111111111111111111111112",
+            "symbol": "SOL",
+        },
+    }
+
+    assert _pick_contract_address(pair) == "7vfCXTUXx5W7D3eK7oN7htTz3h6m5r3WQYgbR1fRpump"
+
+
+def test_score_route_does_not_persist_symbol_as_token(monkeypatch):
+    appended = []
+
+    def _fake_score_token(_: dict) -> dict:
+        return {
+            "status": "WATCH",
+            "score": 0.8,
+            "reasons": ["watch"],
+            "candidate": {
+                "symbol": "BUG",
+                "chain": "sol",
+            },
+        }
+
+    def _fake_append_watch_event(payload: dict) -> None:
+        appended.append(payload)
+
+    monkeypatch.setattr("app.routes.score.score_token", _fake_score_token)
+    monkeypatch.setattr("app.routes.score.append_watch_event", _fake_append_watch_event)
+
+    score({})
+
+    assert appended == []

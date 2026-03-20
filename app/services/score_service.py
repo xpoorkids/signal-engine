@@ -7,23 +7,33 @@ USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 EXCLUDED_QUOTES = {WSOL_MINT, USDC_MINT, USDT_MINT}
 
 
+def _clean_address(value: object) -> str:
+    return str(value or "").strip()
+
+
 def _pick_contract_address(pair: dict) -> str | None:
     base = pair.get("baseToken") if isinstance(pair.get("baseToken"), dict) else {}
     quote = pair.get("quoteToken") if isinstance(pair.get("quoteToken"), dict) else {}
 
-    base_addr = str(base.get("address") or "").strip()
-    quote_addr = str(quote.get("address") or "").strip()
+    base_addr = _clean_address(base.get("address"))
+    quote_addr = _clean_address(quote.get("address"))
 
     if base_addr and quote_addr:
         if base_addr in EXCLUDED_QUOTES and quote_addr not in EXCLUDED_QUOTES:
             return quote_addr
         if quote_addr in EXCLUDED_QUOTES and base_addr not in EXCLUDED_QUOTES:
             return base_addr
+        if base_addr == quote_addr:
+            return base_addr
         if base_addr.endswith("pump") and not quote_addr.endswith("pump"):
             return base_addr
         if quote_addr.endswith("pump") and not base_addr.endswith("pump"):
             return quote_addr
 
+    if base_addr and base_addr not in EXCLUDED_QUOTES:
+        return base_addr
+    if quote_addr and quote_addr not in EXCLUDED_QUOTES:
+        return quote_addr
     return base_addr or quote_addr or None
 
 

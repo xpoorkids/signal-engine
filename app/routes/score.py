@@ -37,17 +37,19 @@ def score(payload: dict):
     # Persist WATCH decisions for daily summary + learning
     if result.get("status") == "WATCH":
         c = result.get("candidate", {}) or {}
-        append_watch_event({
-            "token": c.get("address") or c.get("mint") or c.get("token") or c.get("symbol"),
-            "chain": c.get("chain", "sol"),
-            "status": "WATCH",
-            "score": result.get("score"),
-            "reasons": result.get("reasons", []),
-            "rug_risk": result.get("rug_risk"),
-            "rug_flags": result.get("rug_flags", []),
-            "liquidity": c.get("liquidity"),
-            "volume_delta": c.get("volume_delta"),
-            "social_velocity": c.get("social_velocity"),
-        })
+        token = c.get("address") or c.get("mint") or c.get("token")
+        if token:
+            append_watch_event({
+                "token": token,
+                "chain": c.get("chain", "sol"),
+                "status": "WATCH",
+                "score": result.get("score"),
+                "reasons": result.get("reasons", []),
+                "rug_risk": result.get("rug_risk"),
+                "rug_flags": result.get("rug_flags", []),
+                "liquidity": c.get("liquidity"),
+                "volume_delta": c.get("volume_delta"),
+                "social_velocity": c.get("social_velocity"),
+            })
 
     return result

@@ -260,6 +260,7 @@ from worker.config import (
     PROM_MIN_LIQ_USD,
     PROMOTION_MIN_ATTENTION,
     PROMOTION_MAX_RISK,
+    TRADE_VALIDATION_MAX_WALLET_TOP_HOLDER_PCT,
 )
 from worker.confidence import CONF_WEIGHTS, CAPS, bump
 from worker.wallet_risk import score_wallet_risk
@@ -295,6 +296,38 @@ from app.services.wallet_service import wallet_risk_score
 
 logger = logging.getLogger(__name__)
 logger.info("[PROMOTE FILE LOADED]")
+
+
+def _wallet_distribution_fail_reasons(
+    wallet_risk: dict[str, Any] | None,
+    *,
+    total_buys_30s: int,
+    unique_wallets_30s: int,
+    top_wallet_share: float,
+) -> list[str]:
+    reasons: list[str] = []
+    payload = wallet_risk if isinstance(wallet_risk, dict) else {}
+    wallet_level = str(payload.get("risk") or "").strip().lower()
+    try:
+        top_holder_pct = float(payload.get("top_holder_pct"))
+    except Exception:
+        top_holder_pct = None
+
+    if wallet_level == "high":
+        reasons.append("wallet_distribution_high_risk")
+    if (
+        top_holder_pct is not None
+        and top_holder_pct >= TRADE_VALIDATION_MAX_WALLET_TOP_HOLDER_PCT
+    ):
+        reasons.append("wallet_top_holder_concentration")
+    if total_buys_30s >= 6 and unique_wallets_30s <= 2 and top_wallet_share >= 0.70:
+        reasons.append("bundle_pattern_detected")
+
+    deduped: list[str] = []
+    for reason in reasons:
+        if reason not in deduped:
+            deduped.append(reason)
+    return deduped
 
 
 def _candidate_send_eligible(
@@ -741,6 +774,16 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             pass
 
         token_wallet_risk = wallet_risk_score(e.token)
+        distribution_fail_reasons = _wallet_distribution_fail_reasons(
+            token_wallet_risk,
+            total_buys_30s=len(st.buys_30s),
+            unique_wallets_30s=unique_30s,
+            top_wallet_share=top_share,
+        )
+        for reason in distribution_fail_reasons:
+            print(f"[risk-gate] token={e.token} reason={reason}", flush=True)
+        if distribution_fail_reasons:
+            hard_fail = True
         if ENABLE_FORENSICS:
             risk_score, risk_reasons, risk_flags, risk_metric = analyze_risk(
                 e,
@@ -779,6 +822,17 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             extra["risk_flags"] = risk_flags
             extra["token_wallet_risk"] = token_wallet_risk
             extra["metric_states"] = dict(e.extra.get("metric_states") or {})
+            if distribution_fail_reasons:
+                for reason in distribution_fail_reasons:
+                    if reason not in risk_reasons:
+                        risk_reasons.append(reason)
+                if (
+                    "wallet_top_holder_concentration" in distribution_fail_reasons
+                    or "wallet_distribution_high_risk" in distribution_fail_reasons
+                ):
+                    risk_flags["holder_concentration"] = True
+                if "bundle_pattern_detected" in distribution_fail_reasons:
+                    risk_flags["wallet_cluster"] = True
 
         top_holder_ratio = None
         try:
