@@ -352,9 +352,9 @@ async def event_loop(q: asyncio.Queue) -> None:
                     if de.type == "heating_up" and not _should_send_heating_up(de):
                         continue
                     buyer = de.extra.get("buyer") if isinstance(de.extra, dict) else None
-                    if isinstance(buyer, str) and buyer:
-                        record_wallet_signal(buyer, de.token or "", de.type)
                     delivered = send_discord(de)
+                    if delivered and isinstance(buyer, str) and buyer:
+                        record_wallet_signal(buyer, de.token or "", de.type)
                     signal_id = _persist_non_candidate_delivery(de, delivered)
                     if delivered and signal_id and de.type == "promoted":
                         maybe_open_shadow_position(de)

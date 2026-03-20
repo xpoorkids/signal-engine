@@ -1,5 +1,6 @@
 from worker.events import Event
 from worker import runner
+import asyncio
 
 
 def test_should_send_heating_up_logs_structured_skip(caplog):
@@ -195,3 +196,37 @@ def test_non_candidate_cooldown_key_separates_sniper_from_heating():
     assert sniper_key == "sniper:token-8"
     assert heating_key == "heating_up:token-8"
     assert promoted_key == "promoted:token-8"
+
+
+def test_event_loop_only_records_wallet_signal_after_successful_delivery(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    recorded_wallets: list[tuple[str, str, str]] = []
+    persisted: list[bool] = []
+    
+    async def _process_event(*_args, **_kwargs):
+        return [Event(type="heating_up", source="engine", token="token-9", extra={"buyer": "wallet-1", "route_decision": {"tier": "sniper"}})]
+
+    async def _run_once():
+        task = asyncio.create_task(runner.event_loop(queue))
+        await queue.put(Event(type="trade_buy", source="test", token="token-9", signature="sig-1"))
+        await queue.join()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    monkeypatch.setattr(runner, "state_init", lambda: None)
+    monkeypatch.setattr(runner, "learning_init", lambda: None)
+    monkeypatch.setattr(runner, "is_sig_new", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(runner, "process_event", _process_event)
+    monkeypatch.setattr(runner, "_should_send_heating_up", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(runner, "can_alert", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(runner, "send_discord", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(runner, "_persist_non_candidate_delivery", lambda *_args, **_kwargs: persisted.append(False))
+    monkeypatch.setattr(runner, "record_wallet_signal", lambda buyer, token, event_type: recorded_wallets.append((buyer, token, event_type)))
+
+    asyncio.run(_run_once())
+
+    assert persisted == [False]
+    assert recorded_wallets == []

@@ -613,6 +613,10 @@ def candidate_send_reasons(
     dex_summary: dict[str, Any] | None,
 ) -> tuple[bool, list[str], list[str]]:
     policy = candidate_signal_policy()
+    payload = extra if isinstance(extra, dict) else {}
+    route = payload.get("route_decision") if isinstance(payload.get("route_decision"), dict) else {}
+    route_tier = str(route.get("tier") or "").strip().lower()
+    route_confidence = float(route.get("route_confidence") or 0.0)
     attn = float(attention_score or 0.0)
     reasons, confirmations = candidate_confirmation_signals(
         attention_score=attn,
@@ -620,17 +624,33 @@ def candidate_send_reasons(
         dex_summary=dex_summary,
     )
     confirmation_set = set(confirmations)
-    quality_confirmed = bool(
-        {"tracked_wallet_flow", "kol_wallet_flow", "market_support", "social_support", "narrative_alignment"} & confirmation_set
+    hard_quality_confirmed = bool(
+        {"tracked_wallet_flow", "kol_wallet_flow", "market_support"} & confirmation_set
     )
+    soft_quality_confirmed = bool(
+        {"social_support", "narrative_alignment"} & confirmation_set
+    )
+    flow_strength_confirmed = {"buyer_breadth", "burst_strength"}.issubset(confirmation_set)
+    route_fast_lane = route_tier == "sniper" or (route_tier == "heating_up" and route_confidence >= 0.75)
 
     has_creator_support = creator_score >= policy.strong_creator_threshold and attn >= policy.creator_attention_floor
     has_attention_only = attn >= policy.strong_attention_threshold
     has_balanced_quality = creator_score >= policy.creator_attention_target and attn >= policy.creator_attention_target
 
-    if len(confirmations) < policy.min_send_confirmation_signals and attn < policy.exceptional_attention_threshold:
+    if (
+        len(confirmations) < policy.min_send_confirmation_signals
+        and not (
+            attn >= policy.exceptional_attention_threshold
+            and flow_strength_confirmed
+            and (hard_quality_confirmed or route_fast_lane)
+        )
+    ):
         reasons.append(f"send_confirmation_signals<{policy.min_send_confirmation_signals}")
-    if not quality_confirmed and attn < policy.exceptional_attention_threshold:
+    if not (
+        hard_quality_confirmed
+        or (soft_quality_confirmed and flow_strength_confirmed)
+        or route_fast_lane
+    ):
         reasons.append("quality_confirmation_missing")
 
     eligible = (has_attention_only or has_creator_support or has_balanced_quality) and not reasons
@@ -742,12 +762,17 @@ def classify_route_signal(
         confirmations.append("social_support")
 
     flow_confirmations = [item for item in confirmations if item in {"buyer_breadth", "burst_strength"}]
+    flow_strength_confirmed = len(flow_confirmations) >= 2
     quality_confirmations = [
         item
         for item in confirmations
         if item in {"tracked_wallet_flow", "kol_wallet_flow", "market_support", "social_support"}
     ]
-    support_confirmations = [item for item in confirmations if item in {"attention_support", "social_support"}]
+    hard_quality_confirmations = [
+        item
+        for item in confirmations
+        if item in {"tracked_wallet_flow", "kol_wallet_flow", "market_support"}
+    ]
     core_sniper_met = (
         unique_10s >= policy.sniper_min_unique_10s
         and burst_10s >= policy.sniper_min_burst_10s
@@ -775,6 +800,7 @@ def classify_route_signal(
             + min(len(confirmations) / max(policy.sniper_fast_track_confirmations, 1), 1.2) * 0.12
             + (0.06 if flow_confirmations else 0.0)
             + (0.04 if quality_confirmations else 0.0)
+            - (0.05 if not hard_quality_confirmations else 0.0)
         ),
     )
 
@@ -802,14 +828,23 @@ def classify_route_signal(
         and sniper_ready
     ):
         route_tier = "sniper"
-    elif not blockers and len(confirmations) >= policy.heating_min_confirmations and (
-        attention >= policy.heating_min_attention
-        or elite_score >= max(7, policy.sniper_min_elite - 1)
-        or tracked_hits > 0
-        or kol_hits > 0
-    ) and (
-        bool(flow_confirmations)
-        or bool(quality_confirmations)
+    elif (
+        not blockers
+        and len(confirmations) >= policy.heating_min_confirmations
+        and (
+            attention >= policy.heating_min_attention
+            or elite_score >= max(7, policy.sniper_min_elite - 1)
+            or tracked_hits > 0
+            or kol_hits > 0
+        )
+        and (
+            bool(hard_quality_confirmations)
+            or (
+                flow_strength_confirmed
+                and attention >= policy.sniper_min_attention
+                and elite_score >= max(7, policy.sniper_min_elite - 1)
+            )
+        )
     ):
         route_tier = "heating_up"
         if core_sniper_met and not sniper_ready:
@@ -841,7 +876,7 @@ def classify_route_signal(
         route_tier == "heating_up"
         and core_sniper_met
         and route_confidence >= 0.70
-        and support_confirmations
+        and hard_quality_confirmations
     ):
         age_bypass_eligible = True
         age_bypass_ttl_sec = policy.heating_age_bypass_ttl_sec

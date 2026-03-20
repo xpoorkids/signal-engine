@@ -69,6 +69,33 @@ def test_candidate_send_reasons_reject_low_quality_attention_only_setup():
     assert "strong_attention" in confirmations
 
 
+def test_candidate_send_reasons_allow_fast_lane_heating_setup_with_flow_strength():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.74,
+        creator_score=0.40,
+        extra={
+            "route_decision": {
+                "tier": "heating_up",
+                "route_confidence": 0.81,
+            },
+            "attention_metrics": {
+                "unique_buyers_5m": 5,
+                "burst_count_60s": 8,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+                "unique_wallets_30s": 5,
+                "top_wallet_share_30s": 0.22,
+            }
+        },
+        dex_summary={"liquidity_usd": 10000.0, "txns_m5_buys": 7},
+    )
+
+    assert eligible is True
+    assert reasons == []
+    assert "buyer_breadth" in confirmations
+    assert "burst_strength" in confirmations
+
+
 def test_promotion_confirmation_target_scales_with_signal_strength():
     strong_target, strong_reasons = promotion_confirmation_target(
         confidence_score=0.90,
@@ -167,6 +194,37 @@ def test_classify_route_signal_marks_near_sniper_for_short_age_bypass():
     assert route["age_bypass_eligible"] is True
     assert route["age_bypass_reason"] == "near_sniper_route"
     assert route["age_bypass_ttl_sec"] > 0
+
+
+def test_classify_route_signal_blocks_social_only_near_sniper_age_bypass():
+    route = classify_route_signal(
+        attention_score=0.63,
+        elite_score=8,
+        unique_10s=3,
+        burst_10s=7,
+        hard_fail_from_authority_checks=False,
+        extra={"attention_metrics": {"x_tweet_count": 14, "x_unique_authors": 12}},
+        dex_summary={"liquidity_usd": 10000.0, "txns_m5_buys": 4},
+    )
+
+    assert route["tier"] == "watch"
+    assert route["age_bypass_eligible"] is False
+    assert "route_flow_confirmation_missing" in route["blockers"]
+
+
+def test_classify_route_signal_keeps_heating_up_when_flow_is_strong_without_hard_quality():
+    route = classify_route_signal(
+        attention_score=0.66,
+        elite_score=8,
+        unique_10s=3,
+        burst_10s=7,
+        hard_fail_from_authority_checks=False,
+        extra={"attention_metrics": {"unique_buyers_5m": 5, "burst_count_60s": 9}},
+        dex_summary={"liquidity_usd": 9000.0, "txns_m5_buys": 7},
+    )
+
+    assert route["tier"] == "heating_up"
+    assert route["age_bypass_eligible"] is False
 
 
 def test_heating_delivery_decision_trusts_sniper_route():
