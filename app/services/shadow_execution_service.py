@@ -36,6 +36,7 @@ from worker.execution_lifecycle import (
     plan_shadow_submission_transition,
 )
 from worker.submission_simulator import create_submission_plan, advance_submission_plan
+from worker.transaction_builder import build_execution_request, build_transaction_intent
 
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,7 @@ class ShadowPosition:
     stop_loss_pct: float
     max_hold_minutes: int
     decision_context: dict[str, Any]
+    transaction_intent: dict[str, Any]
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -154,9 +156,9 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
-def _build_decision_context(event) -> dict[str, Any]:
+def _build_decision_context(event, *, transaction_intent: dict[str, Any] | None = None) -> dict[str, Any]:
     extra = event.extra if isinstance(event.extra, dict) else {}
-    return {
+    context = {
         "event_type": event.type,
         "source": event.source,
         "token": event.token,
@@ -170,6 +172,9 @@ def _build_decision_context(event) -> dict[str, Any]:
         "dex_summary": extra.get("dex_summary") if isinstance(extra.get("dex_summary"), dict) else {},
         "trade_validation": extra.get("trade_validation") if isinstance(extra.get("trade_validation"), dict) else {},
     }
+    if isinstance(transaction_intent, dict) and transaction_intent:
+        context["transaction_intent"] = transaction_intent
+    return context
 
 
 def _ensure_column(c: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -242,6 +247,7 @@ def init() -> None:
                 exit_reason TEXT,
                 exit_price_usd REAL,
                 exit_value_usd REAL,
+                transaction_intent_json TEXT NOT NULL DEFAULT '{}',
                 validation_json TEXT NOT NULL,
                 payload_json TEXT NOT NULL
             )
@@ -296,6 +302,7 @@ def init() -> None:
         _ensure_column(c, "shadow_positions", "latest_net_pnl_pct", "REAL")
         _ensure_column(c, "shadow_positions", "latest_net_pnl_usd", "REAL")
         _ensure_column(c, "shadow_positions", "latest_exit_fee_usd", "REAL")
+        _ensure_column(c, "shadow_positions", "transaction_intent_json", "TEXT NOT NULL DEFAULT '{}'")
         _ensure_column(c, "shadow_position_marks", "net_exit_value_usd", "REAL")
         _ensure_column(c, "shadow_position_marks", "net_pnl_pct", "REAL")
         _ensure_column(c, "shadow_position_marks", "net_pnl_usd", "REAL")
@@ -333,14 +340,25 @@ def open_shadow_position(event) -> str | None:
         )
         return None
 
-    buy_quote = validation.get("buy_quote") if isinstance(validation.get("buy_quote"), dict) else {}
+    try:
+        execution_request = build_execution_request(event=event, validation=validation)
+        transaction_intent = build_transaction_intent(execution_request)
+    except ValueError as ex:
+        logger.warning(
+            "[shadow-exec-skip] token=%s reason=transaction_intent_invalid error=%s",
+            event.token,
+            ex,
+        )
+        return None
+
+    intent_payload = transaction_intent.as_dict()
     entry_plan = plan_shadow_entry_transition(STATE_ENTRY_RECORDED)
     submission_plan = create_submission_plan(now_ts=now)
     signal_id = str(extra.get("_signal_id") or "").strip() or None
-    position_size_tokens = float(buy_quote.get("expected_output_tokens") or 0.0)
-    entry_exec_price = float(buy_quote.get("execution_price_usd") or 0.0)
+    position_size_tokens = float(transaction_intent.amounts.expected_output_tokens)
+    entry_exec_price = float(transaction_intent.amounts.quoted_execution_price_usd)
     entry_mid_price = float((extra.get("dex_summary") or {}).get("price_usd") or 0.0)
-    entry_fee_usd = _calculate_entry_fee_usd(float(validation.get("intended_size_usd") or 0.0))
+    entry_fee_usd = _calculate_entry_fee_usd(float(transaction_intent.amounts.intended_size_usd))
     if position_size_tokens <= 0 or entry_exec_price <= 0:
         logger.warning("[shadow-exec-skip] token=%s reason=missing_entry_quote", event.token)
         return None
@@ -368,19 +386,20 @@ def open_shadow_position(event) -> str | None:
             submission_ack_ts_ms=submission_plan.ack_ts,
             submission_landing_ts_ms=submission_plan.landing_ts,
             submission_expires_ts_ms=submission_plan.expires_ts,
-            intended_size_usd=float(validation.get("intended_size_usd") or 0.0),
+            intended_size_usd=float(transaction_intent.amounts.intended_size_usd),
             position_size_tokens=position_size_tokens,
-            pair_address=str(validation.get("pair_address") or "") or None,
-            dex_id=str(validation.get("dex_id") or "") or None,
+            pair_address=transaction_intent.route.pair_address,
+            dex_id=transaction_intent.route.dex_id,
             entry_mid_price_usd=entry_mid_price or None,
             entry_exec_price_usd=entry_exec_price,
             entry_fee_usd=entry_fee_usd,
-            expected_buy_slippage_bps=float(buy_quote.get("slippage_bps") or 0.0),
-            expected_sell_slippage_bps=float(((validation.get("sell_quote") or {}) if isinstance(validation.get("sell_quote"), dict) else {}).get("slippage_bps") or 0.0),
+            expected_buy_slippage_bps=float(transaction_intent.slippage.expected_buy_slippage_bps),
+            expected_sell_slippage_bps=float(transaction_intent.slippage.expected_sell_slippage_bps),
             take_profit_pct=_take_profit_pct(),
             stop_loss_pct=_stop_loss_pct(),
             max_hold_minutes=_max_hold_minutes(),
-            decision_context=_build_decision_context(event),
+            decision_context=_build_decision_context(event, transaction_intent=intent_payload),
+            transaction_intent=intent_payload,
         )
         payload = position.as_dict()
         c.execute(
@@ -395,8 +414,8 @@ def open_shadow_position(event) -> str | None:
                 expected_sell_slippage_bps, take_profit_pct, stop_loss_pct, max_hold_minutes,
                 latest_price_usd, latest_liquidity_usd, latest_exit_value_usd, latest_pnl_pct,
                 latest_pnl_usd, latest_net_exit_value_usd, latest_net_pnl_pct, latest_net_pnl_usd, latest_exit_fee_usd,
-                peak_pnl_pct, trough_pnl_pct, validation_json, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                peak_pnl_pct, trough_pnl_pct, transaction_intent_json, validation_json, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position_id,
@@ -438,6 +457,7 @@ def open_shadow_position(event) -> str | None:
                 0.0,
                 0.0,
                 0.0,
+                _json_dumps(intent_payload),
                 _json_dumps(validation),
                 _json_dumps(payload),
             ),
@@ -454,10 +474,10 @@ def open_shadow_position(event) -> str | None:
                 now,
                 entry_mid_price or entry_exec_price,
                 float((extra.get("dex_summary") or {}).get("liquidity_usd") or 0.0),
-                float(validation.get("intended_size_usd") or 0.0),
+                float(transaction_intent.amounts.intended_size_usd),
                 0.0,
                 0.0,
-                float(validation.get("intended_size_usd") or 0.0),
+                float(transaction_intent.amounts.intended_size_usd),
                 ((0.0 - position.entry_fee_usd) / position.intended_size_usd * 100.0) if position.intended_size_usd > 0 else 0.0,
                 0.0 - position.entry_fee_usd,
                 0.0,
@@ -476,17 +496,23 @@ def open_shadow_position(event) -> str | None:
         position_id=position_id,
         observed_ts=now,
         plan=plan_shadow_submission_transition(entry_plan.next_state, submission_status=submission_plan.status).as_dict(),
-        payload={"token": event.token, "position_id": position_id, "submission": submission_plan.as_dict()},
+        payload={
+            "token": event.token,
+            "position_id": position_id,
+            "transaction_intent_id": transaction_intent.intent_id,
+            "submission": submission_plan.as_dict(),
+        },
     )
     logger.info(
-        "[shadow-exec-open] token=%s position_id=%s signal_id=%s size_usd=%.2f entry_exec=%.8f qty=%.8f pair=%s entry_fee_usd=%.4f state=%s submission_status=%s quote_expires_ts=%s",
+        "[shadow-exec-open] token=%s position_id=%s signal_id=%s intent_id=%s size_usd=%.2f entry_exec=%.8f qty=%.8f pair=%s entry_fee_usd=%.4f state=%s submission_status=%s quote_expires_ts=%s",
         event.token,
         position_id,
         signal_id or "",
-        float(validation.get("intended_size_usd") or 0.0),
+        transaction_intent.intent_id,
+        float(transaction_intent.amounts.intended_size_usd),
         entry_exec_price,
         position_size_tokens,
-        validation.get("pair_address") or "",
+        transaction_intent.route.pair_address or "",
         entry_fee_usd,
         position.execution_state,
         submission_plan.status,
@@ -513,7 +539,8 @@ def _fetch_open_positions(limit: int = 25) -> list[ShadowPosition]:
                    submission_requested_ts_ms, submission_ack_ts_ms, submission_landing_ts_ms, submission_expires_ts_ms,
                    intended_size_usd, position_size_tokens, pair_address, dex_id,
                    entry_mid_price_usd, entry_exec_price_usd, expected_buy_slippage_bps,
-                   expected_sell_slippage_bps, take_profit_pct, stop_loss_pct, max_hold_minutes, entry_fee_usd, payload_json
+                   expected_sell_slippage_bps, take_profit_pct, stop_loss_pct, max_hold_minutes, entry_fee_usd,
+                   transaction_intent_json, payload_json
             FROM shadow_positions
             WHERE status='open'
             ORDER BY updated_ts ASC
@@ -524,12 +551,19 @@ def _fetch_open_positions(limit: int = 25) -> list[ShadowPosition]:
     positions: list[ShadowPosition] = []
     for row in rows:
         payload = {}
+        transaction_intent = {}
         try:
             payload = json.loads(row["payload_json"] or "{}")
             if not isinstance(payload, dict):
                 payload = {}
         except Exception:
             payload = {}
+        try:
+            transaction_intent = json.loads(row["transaction_intent_json"] or "{}")
+            if not isinstance(transaction_intent, dict):
+                transaction_intent = {}
+        except Exception:
+            transaction_intent = {}
         positions.append(
             ShadowPosition(
                 position_id=str(row["position_id"]),
@@ -560,6 +594,7 @@ def _fetch_open_positions(limit: int = 25) -> list[ShadowPosition]:
                 stop_loss_pct=float(row["stop_loss_pct"] or 0.0),
                 max_hold_minutes=int(row["max_hold_minutes"] or 0),
                 decision_context=payload.get("decision_context") if isinstance(payload.get("decision_context"), dict) else {},
+                transaction_intent=transaction_intent,
             )
         )
     return positions
@@ -713,7 +748,12 @@ async def refresh_open_position(position: ShadowPosition) -> None:
             position_id=position_id,
             observed_ts=now,
             plan=submission_transition.as_dict(),
-            payload={"token": token, "position_id": position_id, "submission": submission_plan.as_dict()},
+            payload={
+                "token": token,
+                "position_id": position_id,
+                "transaction_intent_id": str((position.transaction_intent or {}).get("intent_id") or ""),
+                "submission": submission_plan.as_dict(),
+            },
         )
         logger.info(
             "[shadow-submit-transition] token=%s position_id=%s request_id=%s status=%s state=%s",
@@ -818,6 +858,7 @@ async def refresh_open_position(position: ShadowPosition) -> None:
     payload = {
         "token": token,
         "position_id": position_id,
+        "transaction_intent_id": str((position.transaction_intent or {}).get("intent_id") or ""),
         "execution": {
             "state": next_state,
             "transition_chain": transition_chain,
