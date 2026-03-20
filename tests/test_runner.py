@@ -136,3 +136,27 @@ def test_should_send_heating_up_blocks_watch_route():
     )
 
     assert runner._should_send_heating_up(event) is False
+
+
+def test_non_candidate_cooldown_key_separates_sniper_from_heating():
+    sniper = Event(
+        type="heating_up",
+        source="test",
+        token="token-8",
+        extra={"route_decision": {"tier": "sniper"}},
+    )
+    heating = Event(
+        type="heating_up",
+        source="test",
+        token="token-8",
+        extra={"route_decision": {"tier": "heating_up"}},
+    )
+    promoted = Event(type="promoted", source="test", token="token-8")
+
+    sniper_key, _ = runner._non_candidate_cooldown_key(sniper)
+    heating_key, _ = runner._non_candidate_cooldown_key(heating)
+    promoted_key, _ = runner._non_candidate_cooldown_key(promoted)
+
+    assert sniper_key == "sniper:token-8"
+    assert heating_key == "heating_up:token-8"
+    assert promoted_key == "promoted:token-8"

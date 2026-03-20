@@ -72,11 +72,15 @@ class RouteSignalPolicy:
     heating_min_liq_usd: float
     heating_min_x_mentions: int
     heating_min_x_authors: int
+    heating_age_bypass_ttl_sec: int
     sniper_min_attention: float
     sniper_min_unique_10s: int
     sniper_min_burst_10s: int
     sniper_min_elite: int
     sniper_min_confirmations: int
+    sniper_fast_track_attention: float
+    sniper_fast_track_confirmations: int
+    sniper_age_bypass_ttl_sec: int
     heating_min_confirmations: int
 
     def as_dict(self) -> dict[str, Any]:
@@ -119,11 +123,15 @@ def route_signal_policy() -> RouteSignalPolicy:
         heating_min_liq_usd=_env_float("SIGNAL_ENGINE_HEATING_MIN_LIQ_USD", 15000.0),
         heating_min_x_mentions=_env_int("SIGNAL_ENGINE_HEATING_MIN_X_MENTIONS", 10),
         heating_min_x_authors=_env_int("SIGNAL_ENGINE_HEATING_MIN_X_AUTHORS", 10),
+        heating_age_bypass_ttl_sec=_env_int("SIGNAL_ENGINE_HEATING_AGE_BYPASS_TTL_SECONDS", 12),
         sniper_min_attention=_env_float("SIGNAL_ENGINE_SNIPER_MIN_ATTENTION", 0.55),
         sniper_min_unique_10s=_env_int("SIGNAL_ENGINE_SNIPER_MIN_UNIQUE_10S", 2),
         sniper_min_burst_10s=_env_int("SIGNAL_ENGINE_SNIPER_MIN_BURST_10S", 6),
         sniper_min_elite=_env_int("SIGNAL_ENGINE_SNIPER_MIN_ELITE", 8),
         sniper_min_confirmations=_env_int("SIGNAL_ENGINE_SNIPER_MIN_CONFIRMATIONS", 2),
+        sniper_fast_track_attention=_env_float("SIGNAL_ENGINE_SNIPER_FAST_TRACK_ATTENTION", 0.65),
+        sniper_fast_track_confirmations=_env_int("SIGNAL_ENGINE_SNIPER_FAST_TRACK_CONFIRMATIONS", 3),
+        sniper_age_bypass_ttl_sec=_env_int("SIGNAL_ENGINE_SNIPER_AGE_BYPASS_TTL_SECONDS", 20),
         heating_min_confirmations=_env_int("SIGNAL_ENGINE_HEATING_MIN_CONFIRMATIONS", 2),
     )
 
@@ -322,6 +330,7 @@ def classify_route_signal(
 
     confirmations: list[str] = []
     blockers: list[str] = []
+    sniper_blockers: list[str] = []
     route_tier = "watch"
 
     if tracked_hits > 0:
@@ -339,18 +348,65 @@ def classify_route_signal(
     if x_mentions >= policy.heating_min_x_mentions and x_authors >= policy.heating_min_x_authors:
         confirmations.append("social_support")
 
-    if hard_fail_from_authority_checks:
-        blockers.append("authority_hard_fail")
-
-    if (
-        not blockers
-        and unique_10s >= policy.sniper_min_unique_10s
+    flow_confirmations = [item for item in confirmations if item in {"buyer_breadth", "burst_strength"}]
+    quality_confirmations = [
+        item
+        for item in confirmations
+        if item in {"tracked_wallet_flow", "kol_wallet_flow", "market_support", "social_support"}
+    ]
+    support_confirmations = [item for item in confirmations if item in {"attention_support", "social_support"}]
+    core_sniper_met = (
+        unique_10s >= policy.sniper_min_unique_10s
         and burst_10s >= policy.sniper_min_burst_10s
         and elite_score >= policy.sniper_min_elite
         and attention >= policy.sniper_min_attention
+    )
+    sniper_ready = (
+        core_sniper_met
         and len(confirmations) >= policy.sniper_min_confirmations
-        and bool({"buyer_breadth", "burst_strength"} & set(confirmations))
-        and bool({"tracked_wallet_flow", "kol_wallet_flow", "market_support", "social_support"} & set(confirmations))
+        and bool(flow_confirmations)
+        and bool(quality_confirmations)
+    )
+    sniper_fast_track = (
+        sniper_ready
+        and attention >= policy.sniper_fast_track_attention
+        and len(confirmations) >= policy.sniper_fast_track_confirmations
+    )
+    route_confidence = min(
+        1.0,
+        (
+            min(attention / max(policy.sniper_min_attention, 0.01), 1.2) * 0.24
+            + min(max(elite_score, 0) / max(policy.sniper_min_elite, 1), 1.2) * 0.22
+            + min(unique_10s / max(policy.sniper_min_unique_10s, 1), 1.4) * 0.16
+            + min(burst_10s / max(policy.sniper_min_burst_10s, 1), 1.4) * 0.16
+            + min(len(confirmations) / max(policy.sniper_fast_track_confirmations, 1), 1.2) * 0.12
+            + (0.06 if flow_confirmations else 0.0)
+            + (0.04 if quality_confirmations else 0.0)
+        ),
+    )
+
+    if hard_fail_from_authority_checks:
+        blockers.append("authority_hard_fail")
+        sniper_blockers.append("authority_hard_fail")
+
+    if unique_10s < policy.sniper_min_unique_10s:
+        sniper_blockers.append(f"unique_10s<{policy.sniper_min_unique_10s}")
+    if burst_10s < policy.sniper_min_burst_10s:
+        sniper_blockers.append(f"burst_10s<{policy.sniper_min_burst_10s}")
+    if elite_score < policy.sniper_min_elite:
+        sniper_blockers.append(f"elite<{policy.sniper_min_elite}")
+    if attention < policy.sniper_min_attention:
+        sniper_blockers.append(f"sniper_attention<{policy.sniper_min_attention:.2f}")
+    if len(confirmations) < policy.sniper_min_confirmations:
+        sniper_blockers.append(f"sniper_confirmations<{policy.sniper_min_confirmations}")
+    if not flow_confirmations:
+        sniper_blockers.append("sniper_flow_confirmation_missing")
+    if not quality_confirmations:
+        sniper_blockers.append("sniper_quality_confirmation_missing")
+
+    if (
+        not blockers
+        and sniper_ready
     ):
         route_tier = "sniper"
     elif not blockers and len(confirmations) >= policy.heating_min_confirmations and (
@@ -359,10 +415,12 @@ def classify_route_signal(
         or tracked_hits > 0
         or kol_hits > 0
     ) and (
-        bool({"buyer_breadth", "burst_strength"} & set(confirmations))
-        or bool({"tracked_wallet_flow", "kol_wallet_flow", "market_support", "social_support"} & set(confirmations))
+        bool(flow_confirmations)
+        or bool(quality_confirmations)
     ):
         route_tier = "heating_up"
+        if core_sniper_met and not sniper_ready:
+            blockers.extend(item for item in sniper_blockers if item not in blockers)
     else:
         if unique_10s < policy.sniper_min_unique_10s:
             blockers.append(f"unique_10s<{policy.sniper_min_unique_10s}")
@@ -374,15 +432,40 @@ def classify_route_signal(
             blockers.append(f"attention<{policy.heating_min_attention:.2f}")
         if len(confirmations) < policy.heating_min_confirmations:
             blockers.append(f"route_confirmations<{policy.heating_min_confirmations}")
-        if not ({"buyer_breadth", "burst_strength"} & set(confirmations)):
+        if not flow_confirmations:
             blockers.append("route_flow_confirmation_missing")
-        if not ({"tracked_wallet_flow", "kol_wallet_flow", "market_support", "social_support"} & set(confirmations)):
+        if not quality_confirmations:
             blockers.append("route_quality_confirmation_missing")
+
+    age_bypass_eligible = False
+    age_bypass_ttl_sec = 0
+    age_bypass_reason = ""
+    if route_tier == "sniper":
+        age_bypass_eligible = True
+        age_bypass_ttl_sec = policy.sniper_age_bypass_ttl_sec
+        age_bypass_reason = "sniper_route"
+    elif (
+        route_tier == "heating_up"
+        and core_sniper_met
+        and route_confidence >= 0.70
+        and support_confirmations
+    ):
+        age_bypass_eligible = True
+        age_bypass_ttl_sec = policy.heating_age_bypass_ttl_sec
+        age_bypass_reason = "near_sniper_route"
 
     return {
         "tier": route_tier,
         "confirmations": confirmations,
         "blockers": blockers,
+        "sniper_blockers": sniper_blockers,
+        "sniper_ready": sniper_ready,
+        "sniper_fast_track": sniper_fast_track,
+        "sniper_near_miss": bool(core_sniper_met and not sniper_ready),
+        "route_confidence": route_confidence,
+        "age_bypass_eligible": age_bypass_eligible,
+        "age_bypass_ttl_sec": age_bypass_ttl_sec,
+        "age_bypass_reason": age_bypass_reason,
         "policy": policy.as_dict(),
         "metrics": {
             "attention_score": attention,
@@ -407,8 +490,9 @@ def heating_delivery_decision(extra: dict[str, Any] | None) -> tuple[bool, list[
     tier = str(route.get("tier") or "")
     confirmations = route.get("confirmations") if isinstance(route.get("confirmations"), list) else []
     blockers = route.get("blockers") if isinstance(route.get("blockers"), list) else []
+    route_confidence = float(route.get("route_confidence") or 0.0)
     if tier == "sniper":
-        return True, ["sniper_route", *confirmations]
-    if tier == "heating_up" and confirmations:
-        return True, confirmations
+        return True, ["sniper_route", f"route_confidence:{route_confidence:.2f}", *confirmations]
+    if tier == "heating_up" and confirmations and route_confidence >= 0.55:
+        return True, [f"route_confidence:{route_confidence:.2f}", *confirmations]
     return False, blockers or ["route_not_heating_ready"]

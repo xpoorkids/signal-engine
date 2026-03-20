@@ -127,6 +127,10 @@ def test_classify_route_signal_distinguishes_sniper_from_watch():
 
     assert sniper["tier"] == "sniper"
     assert "tracked_wallet_flow" in sniper["confirmations"]
+    assert sniper["sniper_ready"] is True
+    assert sniper["age_bypass_eligible"] is True
+    assert sniper["age_bypass_ttl_sec"] > 0
+    assert sniper["route_confidence"] >= 0.70
     assert watch["tier"] == "watch"
     assert watch["blockers"]
 
@@ -146,6 +150,25 @@ def test_classify_route_signal_keeps_strong_non_sniper_setup_as_heating_up():
     assert "market_support" in route["confirmations"]
 
 
+def test_classify_route_signal_marks_near_sniper_for_short_age_bypass():
+    route = classify_route_signal(
+        attention_score=0.61,
+        elite_score=8,
+        unique_10s=3,
+        burst_10s=7,
+        hard_fail_from_authority_checks=False,
+        extra={"attention_metrics": {"tracked_wallet_hits": 0, "x_tweet_count": 14, "x_unique_authors": 12}},
+        dex_summary={"liquidity_usd": 22000.0, "txns_m5_buys": 12},
+    )
+
+    assert route["tier"] == "heating_up"
+    assert route["sniper_near_miss"] is True
+    assert "sniper_flow_confirmation_missing" in route["blockers"]
+    assert route["age_bypass_eligible"] is True
+    assert route["age_bypass_reason"] == "near_sniper_route"
+    assert route["age_bypass_ttl_sec"] > 0
+
+
 def test_heating_delivery_decision_trusts_sniper_route():
     allowed, reasons = heating_delivery_decision(
         {
@@ -153,6 +176,7 @@ def test_heating_delivery_decision_trusts_sniper_route():
                 "tier": "sniper",
                 "confirmations": ["tracked_wallet_flow", "market_support"],
                 "blockers": [],
+                "route_confidence": 0.91,
             }
         }
     )

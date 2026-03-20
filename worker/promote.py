@@ -243,10 +243,7 @@ from worker.config import (
     MIN_BUY_SOL_FOR_ATTENTION_LONG,
     LONG_MIN_UNIQUE_BUYERS_5M,
     LONG_MIN_ELITE_SCORE,
-    SNIPER_MIN_UNIQUE_10S,
-    SNIPER_MIN_BURST10S,
     SNIPER_MIN_ELITE_SCORE,
-    AGE_BYPASS_TTL_SECONDS,
     DISCORD_WEBHOOK_URL,
     DECAY_WINDOW_SECONDS,
     BLACKLIST_SECONDS,
@@ -922,13 +919,24 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             return [e]
 
         if liquidity_unknown:
+            route_like_support = bool(
+                (attention_score or 0.0) >= 0.55
+                or int(attn_metrics.get("tracked_wallet_hits") or 0) > 0
+                or int(attn_metrics.get("kol_wallet_hits") or 0) > 0
+                or int(attn_metrics.get("unique_buyers_5m") or 0) >= 4
+            )
             if (
                 ENGINE_MODE == "balanced"
                 and unique_10s >= 2
                 and burst_10s >= 6
                 and elite_score >= 8
+                and route_like_support
             ):
-                print(f"[liq-unknown-bypass] token={e.token}", flush=True)
+                print(
+                    f"[liq-unknown-bypass] token={e.token} attention={attention_score} tracked_hits={int(attn_metrics.get('tracked_wallet_hits') or 0)} "
+                    f"kol_hits={int(attn_metrics.get('kol_wallet_hits') or 0)} unique_buyers_5m={int(attn_metrics.get('unique_buyers_5m') or 0)}",
+                    flush=True,
+                )
             else:
                 hard_fail = True
 
@@ -936,21 +944,11 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             return out
 
         age_bypassed = False
-        if ENGINE_MODE == "balanced":
-            if (
-                elite_score >= SNIPER_MIN_ELITE_SCORE
-                and unique_10s >= SNIPER_MIN_UNIQUE_10S
-                and burst_10s >= SNIPER_MIN_BURST10S
-            ):
-                st.age_bypass_until = now_wall + AGE_BYPASS_TTL_SECONDS
-                print(
-                    f"[age-bypass] token={e.token} elite={elite_score} unique_10s={unique_10s} burst10s={burst_10s} ttl={AGE_BYPASS_TTL_SECONDS}",
-                    flush=True,
-                )
-            age_bypassed = now_wall <= st.age_bypass_until
-        elif ENGINE_MODE == "long_term":
+        if ENGINE_MODE == "long_term":
             st.age_bypass_until = 0.0
             age_bypassed = False
+        else:
+            age_bypassed = now_wall <= st.age_bypass_until
         extra["age_bypass_until"] = st.age_bypass_until if age_bypassed else 0.0
         route_decision = classify_route_signal(
             attention_score=attention_score,
@@ -963,36 +961,62 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         )
         extra["route_decision"] = route_decision
         route_tier = str(route_decision.get("tier") or "watch")
+        route_confidence = float(route_decision.get("route_confidence") or 0.0)
+        age_bypass_eligible = bool(route_decision.get("age_bypass_eligible"))
+        age_bypass_ttl_sec = int(route_decision.get("age_bypass_ttl_sec") or 0)
+        age_bypass_reason = str(route_decision.get("age_bypass_reason") or "").strip()
+        if ENGINE_MODE == "balanced" and age_bypass_eligible and age_bypass_ttl_sec > 0:
+            desired_until = now_wall + age_bypass_ttl_sec
+            if desired_until > st.age_bypass_until:
+                st.age_bypass_until = desired_until
+                print(
+                    f"[age-bypass] token={e.token} tier={route_tier} ttl={age_bypass_ttl_sec} confidence={route_confidence:.2f} reason={age_bypass_reason}",
+                    flush=True,
+                )
+            age_bypassed = now_wall <= st.age_bypass_until
+            extra["age_bypass_until"] = st.age_bypass_until
+        else:
+            age_bypassed = now_wall <= st.age_bypass_until
+            extra["age_bypass_until"] = st.age_bypass_until if age_bypassed else 0.0
         logger.info(
-            "[route-decision] token=%s tier=%s confirmations=%s blockers=%s",
+            "[route-decision] token=%s tier=%s confidence=%.2f sniper_ready=%s fast_track=%s age_bypass_eligible=%s ttl=%s confirmations=%s blockers=%s sniper_blockers=%s",
             e.token,
             route_tier,
+            route_confidence,
+            bool(route_decision.get("sniper_ready")),
+            bool(route_decision.get("sniper_fast_track")),
+            age_bypass_eligible,
+            age_bypass_ttl_sec,
             route_decision.get("confirmations") or [],
             route_decision.get("blockers") or [],
+            route_decision.get("sniper_blockers") or [],
         )
         sniper_conditions_met = ENGINE_MODE == "balanced" and route_tier == "sniper"
         heating_conditions_met = ENGINE_MODE == "balanced" and route_tier in {"sniper", "heating_up"}
         if heating_conditions_met:
-            if now_wall > st.age_bypass_until:
-                st.age_bypass_until = now_wall + AGE_BYPASS_TTL_SECONDS
+            if age_bypass_eligible and age_bypass_ttl_sec > 0 and now_wall > st.age_bypass_until:
+                st.age_bypass_until = now_wall + age_bypass_ttl_sec
                 extra["age_bypass_until"] = st.age_bypass_until
             logger.info(
-                "[route-emit] token=%s tier=%s elite=%s unique_10s=%s burst10s=%s attention=%s confirmations=%s",
+                "[route-emit] token=%s tier=%s confidence=%.2f elite=%s unique_10s=%s burst10s=%s attention=%s confirmations=%s age_bypass_until=%s",
                 e.token,
                 route_tier,
+                route_confidence,
                 elite_score,
                 unique_10s,
                 burst_10s,
                 attention_score,
                 route_decision.get("confirmations") or [],
+                int(st.age_bypass_until or 0),
             )
             if route_tier == "sniper":
                 print(
-                    f"[discord-sniper] token={e.token} elite={elite_score} unique_10s={unique_10s} burst10s={burst_10s}",
+                    f"[discord-sniper] token={e.token} confidence={route_confidence:.2f} elite={elite_score} unique_10s={unique_10s} burst10s={burst_10s} "
+                    f"confirmations={route_decision.get('confirmations') or []}",
                     flush=True,
                 )
                 print(
-                    f"[discord-send-attempt] tier=sniper url_set={1 if bool(DISCORD_WEBHOOK_URL) else 0} token={e.token}",
+                    f"[discord-send-attempt] tier=sniper url_set={1 if bool(DISCORD_WEBHOOK_URL) else 0} token={e.token} confidence={route_confidence:.2f}",
                     flush=True,
                 )
             out.append(

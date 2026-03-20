@@ -255,6 +255,19 @@ def _should_send_heating_up(de: Event) -> bool:
     return allow
 
 
+def _non_candidate_cooldown_key(de: Event) -> tuple[str | None, int]:
+    if not de.token:
+        return None, ALERT_COOLDOWN_SEC
+    if de.type == "promoted":
+        return f"promoted:{de.token}", ALERT_COOLDOWN_SEC
+    extra = de.extra if isinstance(de.extra, dict) else {}
+    route = extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}
+    tier = str(route.get("tier") or "").strip().lower()
+    if de.type == "heating_up" and tier == "sniper":
+        return f"sniper:{de.token}", HEATING_UP_ALERT_COOLDOWN_SEC
+    return f"{de.type}:{de.token}", HEATING_UP_ALERT_COOLDOWN_SEC
+
+
 def _persist_non_candidate_delivery(de: Event, delivered: bool) -> str | None:
     if not delivered:
         logger.warning("[dispatch-skip-persist] type=%s token=%s reason=delivery_failed", de.type, de.token)
@@ -302,19 +315,23 @@ async def event_loop(q: asyncio.Queue) -> None:
             derived = await process_event(state, e)
             for de in derived:
                 if de.type in ("heating_up", "promoted"):
-                    cooldown_sec = HEATING_UP_ALERT_COOLDOWN_SEC if de.type == "heating_up" else ALERT_COOLDOWN_SEC
-                    if de.token and can_alert(state, f"{de.type}:{de.token}", cooldown_sec):
-                        if isinstance(de.extra, dict) and de.extra.get("candidate_send") is False:
-                            continue
-                        if de.type == "heating_up" and not _should_send_heating_up(de):
-                            continue
-                        buyer = de.extra.get("buyer") if isinstance(de.extra, dict) else None
-                        if isinstance(buyer, str) and buyer:
-                            record_wallet_signal(buyer, de.token or "", de.type)
-                        delivered = send_discord(de)
-                        signal_id = _persist_non_candidate_delivery(de, delivered)
-                        if delivered and signal_id and de.type == "promoted":
-                            maybe_open_shadow_position(de)
+                    cooldown_key, cooldown_sec = _non_candidate_cooldown_key(de)
+                    if de.token and cooldown_key and not can_alert(state, cooldown_key, cooldown_sec):
+                        route = de.extra.get("route_decision") if isinstance(de.extra, dict) and isinstance(de.extra.get("route_decision"), dict) else {}
+                        print(
+                            f"[dispatch-cooldown-skip] type={de.type} token={de.token} tier={route.get('tier') or ''} key={cooldown_key}",
+                            flush=True,
+                        )
+                        continue
+                    if de.type == "heating_up" and not _should_send_heating_up(de):
+                        continue
+                    buyer = de.extra.get("buyer") if isinstance(de.extra, dict) else None
+                    if isinstance(buyer, str) and buyer:
+                        record_wallet_signal(buyer, de.token or "", de.type)
+                    delivered = send_discord(de)
+                    signal_id = _persist_non_candidate_delivery(de, delivered)
+                    if delivered and signal_id and de.type == "promoted":
+                        maybe_open_shadow_position(de)
                 elif de.type == "candidate":
                     if de.token and not can_alert(state, f"candidate:{de.token}", CANDIDATE_ALERT_COOLDOWN_SEC):
                         print(f"[candidate-cooldown-skip] token={de.token}", flush=True)
