@@ -146,6 +146,24 @@ def test_learning_engine_health_includes_write_config(tmp_path, monkeypatch):
     assert payload["write_config"]["mode"] == "local"
 
 
+def test_learning_engine_health_reports_idle_for_healthy_quiet_worker(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN", "secret-token")
+    sls.init()
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/learning/internal/heartbeat",
+        headers={"X-Signal-Engine-Token": "secret-token"},
+        json={"service_role": "worker", "heartbeat_ts": 2_000_000_000, "metadata": {}},
+    )
+    assert response.status_code == 200
+
+    health = client.get("/learning/health?hours=1").json()
+    assert health["status"] == "idle"
+
+
 def test_learning_internal_ingest_routes_persist_rows(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
@@ -197,7 +215,7 @@ def test_learning_internal_ingest_routes_persist_rows(tmp_path, monkeypatch):
     assert heartbeat_response.status_code == 200
 
     health = client.get("/learning/health?hours=1").json()
-    assert health["status"] == "idle"
+    assert health["status"] == "processing"
     assert health["worker_heartbeat"]["status"] == "healthy"
     assert health["worker_heartbeat"]["metadata"]["deploy_sha"] == "abc123"
 
