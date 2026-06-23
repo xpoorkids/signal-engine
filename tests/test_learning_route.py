@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from app import main
 from app.services import signal_learning_service as sls
+from worker.events import Event
 
 
 def test_learning_report_route_returns_latest(tmp_path, monkeypatch):
@@ -68,6 +69,21 @@ def test_learning_report_route_404_when_missing(tmp_path, monkeypatch):
     assert digest_response.status_code == 404
     digest_dashboard_response = client.get("/learning/report/latest/digest/dashboard")
     assert digest_dashboard_response.status_code == 404
+
+
+def test_learning_history_summary_route_returns_aggregate(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+    sls.record_signal_event(
+        Event(type="candidate", source="test", token="token-history-route", ts=1_800_000_000)
+    )
+    monkeypatch.setattr(sls.time, "time", lambda: 1_800_000_100)
+
+    response = TestClient(main.app).get("/learning/history/summary")
+
+    assert response.status_code == 200
+    assert response.json()["signals"]["total"] == 1
 
 
 def test_learning_diagnostics_route_returns_summary(tmp_path, monkeypatch):

@@ -162,6 +162,47 @@ def test_record_signal_event_updates_existing_external_ref(tmp_path, monkeypatch
     assert row[3] == 0.28
 
 
+def test_historical_corpus_summary_aggregates_duplicates_and_feature_coverage(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    event = Event(
+        type="trade_buy",
+        source="test",
+        token="token-history",
+        ts=1_800_000_000,
+        extra={"attention_score": 0.4, "risk_score": 0.2},
+    )
+    signal_id = sls.record_signal_event(event)
+    for _ in range(2):
+        sls.record_signal_decision(
+            token=event.token,
+            event_type=event.type,
+            stage="routing",
+            decision="hard_fail",
+            reasons=["wallet_distribution_high_risk"],
+            signal_id=signal_id,
+            ts_value=1_800_000_000,
+        )
+    monkeypatch.setattr(sls.time, "time", lambda: 1_800_000_100)
+
+    summary = sls.get_historical_corpus_summary()
+
+    assert summary["signals"]["total"] == 1
+    assert summary["signals"]["distinct_tokens"] == 1
+    assert summary["decisions"]["total"] == 2
+    assert summary["decisions"]["distinct_signal_stage_decisions"] == 1
+    assert summary["decisions"]["repeated_decisions"] == 1
+    assert summary["decisions"]["repeat_rate"] == 50.0
+    assert summary["decisions"]["top_reasons"][0] == {
+        "reason": "wallet_distribution_high_risk",
+        "count": 2,
+    }
+    assert summary["feature_coverage"]["attention_pct"] == 100.0
+    assert summary["feature_coverage"]["market_cap_pct"] == 0.0
+
+
 def test_generate_daily_learning_report_summarizes_outcomes(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

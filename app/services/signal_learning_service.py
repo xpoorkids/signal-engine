@@ -571,6 +571,148 @@ def get_learning_storage_status() -> dict[str, Any]:
     }
 
 
+def get_historical_corpus_summary(hours: int | None = None) -> dict[str, Any]:
+    """Aggregate the corpus in SQLite without loading millions of rows."""
+    _ensure_schema()
+    now = int(time.time())
+    cutoff = now - max(1, int(hours)) * 3600 if hours is not None else 0
+    with _connect() as c:
+        signal_row = c.execute(
+            """
+            SELECT COUNT(1), COUNT(DISTINCT token), MIN(alert_ts), MAX(alert_ts),
+                   SUM(CASE WHEN market_cap_usd IS NOT NULL THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN liquidity_usd IS NOT NULL THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN volume_m5_usd IS NOT NULL THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN attention_score IS NOT NULL THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN risk_score IS NOT NULL THEN 1 ELSE 0 END)
+            FROM signals
+            WHERE alert_ts >= ?
+            """,
+            (cutoff,),
+        ).fetchone()
+        decision_row = c.execute(
+            """
+            SELECT COUNT(1), COUNT(DISTINCT signal_id),
+                   COUNT(DISTINCT COALESCE(signal_id, '') || '|' || COALESCE(stage, '') || '|' || decision),
+                   MIN(created_ts), MAX(created_ts)
+            FROM signal_decisions
+            WHERE created_ts >= ?
+            """,
+            (cutoff,),
+        ).fetchone()
+        decisions = [
+            {"decision": str(row[0] or "unknown"), "count": int(row[1] or 0)}
+            for row in c.execute(
+                """
+                SELECT decision, COUNT(1)
+                FROM signal_decisions
+                WHERE created_ts >= ?
+                GROUP BY decision
+                ORDER BY COUNT(1) DESC
+                LIMIT 20
+                """,
+                (cutoff,),
+            ).fetchall()
+        ]
+        stages = [
+            {"stage": str(row[0] or "unknown"), "count": int(row[1] or 0)}
+            for row in c.execute(
+                """
+                SELECT stage, COUNT(1)
+                FROM signal_decisions
+                WHERE created_ts >= ?
+                GROUP BY stage
+                ORDER BY COUNT(1) DESC
+                LIMIT 20
+                """,
+                (cutoff,),
+            ).fetchall()
+        ]
+        event_types = [
+            {"event_type": str(row[0] or "unknown"), "count": int(row[1] or 0)}
+            for row in c.execute(
+                """
+                SELECT event_type, COUNT(1)
+                FROM signals
+                WHERE alert_ts >= ?
+                GROUP BY event_type
+                ORDER BY COUNT(1) DESC
+                LIMIT 20
+                """,
+                (cutoff,),
+            ).fetchall()
+        ]
+        reasons = [
+            {"reason": str(row[0] or "unknown"), "count": int(row[1] or 0)}
+            for row in c.execute(
+                """
+                SELECT json_each.value, COUNT(1)
+                FROM signal_decisions, json_each(signal_decisions.reasons_json)
+                WHERE signal_decisions.created_ts >= ?
+                GROUP BY json_each.value
+                ORDER BY COUNT(1) DESC
+                LIMIT 20
+                """,
+                (cutoff,),
+            ).fetchall()
+        ]
+
+    signal_total = int(signal_row[0] or 0)
+    decision_total = int(decision_row[0] or 0)
+    distinct_decision_states = int(decision_row[2] or 0)
+
+    def coverage(count: Any) -> float:
+        return round((int(count or 0) / signal_total) * 100.0, 2) if signal_total else 0.0
+
+    return {
+        "lookback_hours": int(hours) if hours is not None else None,
+        "generated_ts": now,
+        "signals": {
+            "total": signal_total,
+            "distinct_tokens": int(signal_row[1] or 0),
+            "first_ts": signal_row[2],
+            "last_ts": signal_row[3],
+            "event_types": event_types,
+        },
+        "decisions": {
+            "total": decision_total,
+            "distinct_signals": int(decision_row[1] or 0),
+            "distinct_signal_stage_decisions": distinct_decision_states,
+            "repeated_decisions": max(0, decision_total - distinct_decision_states),
+            "repeat_rate": round(
+                ((decision_total - distinct_decision_states) / decision_total) * 100.0,
+                2,
+            )
+            if decision_total
+            else 0.0,
+            "first_ts": decision_row[3],
+            "last_ts": decision_row[4],
+            "by_decision": decisions,
+            "by_stage": stages,
+            "top_reasons": reasons,
+        },
+        "feature_coverage": {
+            "market_cap_pct": coverage(signal_row[4]),
+            "liquidity_pct": coverage(signal_row[5]),
+            "volume_m5_pct": coverage(signal_row[6]),
+            "attention_pct": coverage(signal_row[7]),
+            "risk_pct": coverage(signal_row[8]),
+        },
+        "usage_guidance": {
+            "safe_uses": [
+                "measure route and blocker concentration",
+                "measure duplicate decision pressure",
+                "measure feature completeness",
+                "prioritize data-quality and pipeline improvements",
+            ],
+            "unsafe_without_outcomes": [
+                "estimate historical win rate",
+                "relax or tighten a blocker based only on frequency",
+            ],
+        },
+    }
+
+
 def ingest_runtime_heartbeat(payload: dict[str, Any]) -> dict[str, Any]:
     _ensure_schema()
     service_role = str(payload.get("service_role") or "unknown").strip().lower() or "unknown"

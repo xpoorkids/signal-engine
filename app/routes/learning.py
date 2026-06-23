@@ -15,6 +15,7 @@ from app.services.signal_learning_service import (
     execute_regime_policy_action,
     generate_policy_candidates,
     get_engine_health_digest,
+    get_historical_corpus_summary,
     get_policy_automation_status,
     get_diagnostics_summary,
     get_live_validation_records,
@@ -408,6 +409,11 @@ def learning_engine_health(hours: int = 6):
 @router.get("/learning/health/dashboard")
 def learning_engine_health_dashboard(hours: int = 6):
     return HTMLResponse(content=render_engine_health_html(hours=max(1, hours)))
+
+
+@router.get("/learning/history/summary")
+def learning_history_summary(hours: int | None = None):
+    return get_historical_corpus_summary(hours=max(1, hours) if hours is not None else None)
 
 
 @router.post("/learning/internal/signals")
