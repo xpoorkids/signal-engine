@@ -78,8 +78,9 @@ def _learning_write_mode() -> str:
     explicit = os.getenv("SIGNAL_ENGINE_LEARNING_WRITE_MODE", "").strip().lower()
     if explicit in {"local", "remote", "mirror"}:
         return explicit
-    shared_env_set = bool(os.getenv("SIGNAL_ENGINE_DB_PATH", "").strip() or os.getenv("STATE_ENGINE_DB_PATH", "").strip())
-    if _learning_process_role() == "worker" and not shared_env_set and _learning_write_base_url():
+    # Identical filesystem paths do not imply shared storage across separately
+    # deployed services. Prefer the engine endpoint unless local is explicit.
+    if _learning_process_role() == "worker" and _learning_write_base_url():
         return "remote"
     return "local"
 

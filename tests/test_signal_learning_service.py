@@ -2697,6 +2697,18 @@ def test_record_signal_decision_uses_remote_write_for_worker_when_configured(tmp
     assert calls[0][0] == "/learning/internal/decisions"
 
 
+def test_worker_auto_write_mode_prefers_remote_even_with_local_db_path(monkeypatch):
+    monkeypatch.setenv("SIGNAL_ENGINE_PROCESS_ROLE", "worker")
+    monkeypatch.setenv("SIGNAL_ENGINE_DB_PATH", "/var/data/engine.db")
+    monkeypatch.setenv("SIGNAL_ENGINE_PUBLIC_BASE_URL", "https://engine.example.com")
+    monkeypatch.delenv("SIGNAL_ENGINE_LEARNING_WRITE_MODE", raising=False)
+
+    config = sls._learning_write_config()
+
+    assert config["mode"] == "remote"
+    assert config["remote_enabled"] is True
+
+
 def test_ingest_signal_event_and_decision_persist_rows(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
