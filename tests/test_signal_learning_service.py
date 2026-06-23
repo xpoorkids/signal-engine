@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 
+import httpx
+import pytest
+
 from app.services import signal_learning_service as sls
 from worker.events import Event
 
@@ -2707,6 +2710,59 @@ def test_worker_auto_write_mode_prefers_remote_even_with_local_db_path(monkeypat
 
     assert config["mode"] == "remote"
     assert config["remote_enabled"] is True
+
+
+def test_internal_learning_write_retries_transient_gateway_failure(monkeypatch):
+    monkeypatch.setenv("SIGNAL_ENGINE_PUBLIC_BASE_URL", "https://engine.example.com")
+    responses = [
+        httpx.Response(502, request=httpx.Request("POST", "https://engine.example.com")),
+        httpx.Response(
+            200,
+            request=httpx.Request("POST", "https://engine.example.com"),
+            json={"recorded": True},
+        ),
+    ]
+    sleeps: list[float] = []
+
+    monkeypatch.setattr(sls.httpx, "post", lambda *args, **kwargs: responses.pop(0))
+    monkeypatch.setattr(sls.time, "sleep", sleeps.append)
+
+    result = sls._post_internal_learning_write(
+        "/learning/internal/heartbeat",
+        {"service_role": "worker"},
+    )
+
+    assert result == {"recorded": True}
+    assert sleeps == [0.5]
+
+
+def test_internal_learning_write_does_not_retry_auth_failure(monkeypatch):
+    monkeypatch.setenv("SIGNAL_ENGINE_PUBLIC_BASE_URL", "https://engine.example.com")
+    calls = 0
+
+    def forbidden(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            403,
+            request=httpx.Request("POST", "https://engine.example.com"),
+        )
+
+    monkeypatch.setattr(sls.httpx, "post", forbidden)
+    monkeypatch.setattr(
+        sls.time,
+        "sleep",
+        lambda delay: pytest.fail(f"unexpected retry delay: {delay}"),
+    )
+
+    assert (
+        sls._post_internal_learning_write(
+            "/learning/internal/heartbeat",
+            {"service_role": "worker"},
+        )
+        is None
+    )
+    assert calls == 1
 
 
 def test_ingest_signal_event_and_decision_persist_rows(tmp_path, monkeypatch):

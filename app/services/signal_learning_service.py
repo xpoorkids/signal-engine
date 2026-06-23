@@ -35,6 +35,8 @@ _SCHEMA_READY = False
 DEFAULT_POLICY_NAME = "deterministic_engine"
 DEFAULT_POLICY_VERSION = "deterministic-v1"
 _REMOTE_WRITE_TIMEOUT = 5.0
+_REMOTE_WRITE_MAX_ATTEMPTS = 4
+_REMOTE_WRITE_RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 _POSITIVE_OUTCOME_LABELS = {"worked", "strong_continuation"}
 _NEGATIVE_OUTCOME_LABELS = {"failed", "faded"}
 
@@ -115,19 +117,64 @@ def _post_internal_learning_write(endpoint: str, payload: dict[str, Any]) -> dic
     base_url = _learning_write_base_url()
     if not base_url:
         return None
-    try:
-        response = httpx.post(
-            f"{base_url}{endpoint}",
-            json=payload,
-            headers=_internal_write_headers(),
-            timeout=_REMOTE_WRITE_TIMEOUT,
-        )
-        response.raise_for_status()
-        body = response.json()
-        return body if isinstance(body, dict) else None
-    except Exception:
-        logger.exception("[signal-learning] remote_write_failed endpoint=%s base_url=%s", endpoint, base_url)
-        return None
+    url = f"{base_url}{endpoint}"
+    for attempt in range(1, _REMOTE_WRITE_MAX_ATTEMPTS + 1):
+        try:
+            response = httpx.post(
+                url,
+                json=payload,
+                headers=_internal_write_headers(),
+                timeout=_REMOTE_WRITE_TIMEOUT,
+            )
+            if (
+                response.status_code in _REMOTE_WRITE_RETRYABLE_STATUS_CODES
+                and attempt < _REMOTE_WRITE_MAX_ATTEMPTS
+            ):
+                delay_seconds = 0.5 * (2 ** (attempt - 1))
+                logger.warning(
+                    "[signal-learning] remote_write_retry endpoint=%s status_code=%s attempt=%s/%s delay_seconds=%.1f",
+                    endpoint,
+                    response.status_code,
+                    attempt,
+                    _REMOTE_WRITE_MAX_ATTEMPTS,
+                    delay_seconds,
+                )
+                time.sleep(delay_seconds)
+                continue
+            response.raise_for_status()
+            body = response.json()
+            return body if isinstance(body, dict) else None
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            if attempt < _REMOTE_WRITE_MAX_ATTEMPTS:
+                delay_seconds = 0.5 * (2 ** (attempt - 1))
+                logger.warning(
+                    "[signal-learning] remote_write_retry endpoint=%s error_type=%s attempt=%s/%s delay_seconds=%.1f",
+                    endpoint,
+                    type(exc).__name__,
+                    attempt,
+                    _REMOTE_WRITE_MAX_ATTEMPTS,
+                    delay_seconds,
+                )
+                time.sleep(delay_seconds)
+                continue
+            logger.error(
+                "[signal-learning] remote_write_failed endpoint=%s base_url=%s error_type=%s attempts=%s",
+                endpoint,
+                base_url,
+                type(exc).__name__,
+                attempt,
+            )
+            return None
+        except Exception as exc:
+            logger.error(
+                "[signal-learning] remote_write_failed endpoint=%s base_url=%s error_type=%s attempts=%s",
+                endpoint,
+                base_url,
+                type(exc).__name__,
+                attempt,
+            )
+            return None
+    return None
 
 
 def init() -> None:
