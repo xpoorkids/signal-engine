@@ -165,6 +165,7 @@ def test_record_signal_event_updates_existing_external_ref(tmp_path, monkeypatch
 def test_historical_corpus_summary_aggregates_duplicates_and_feature_coverage(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_DECISION_DEDUP_WINDOW_SECONDS", "0")
     sls.init()
 
     event = Event(
@@ -202,6 +203,56 @@ def test_historical_corpus_summary_aggregates_duplicates_and_feature_coverage(tm
     }
     assert summary["feature_coverage"]["attention_pct"] == 100.0
     assert summary["feature_coverage"]["market_cap_pct"] == 0.0
+
+
+def test_duplicate_signal_decisions_are_suppressed_within_short_window(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_DECISION_DEDUP_WINDOW_SECONDS", "60")
+    sls.init()
+
+    event = Event(type="trade_buy", source="test", token="token-dedup", ts=1_800_000_000)
+    signal_id = sls.record_signal_event(event)
+    for offset in (0, 30):
+        sls.record_signal_decision(
+            token=event.token,
+            event_type=event.type,
+            stage="routing",
+            decision="hard_fail",
+            reasons=["wallet_top_holder_concentration"],
+            signal_id=signal_id,
+            ts_value=1_800_000_000 + offset,
+        )
+
+    with sls._connect() as c:
+        count = c.execute("SELECT COUNT(1) FROM signal_decisions WHERE signal_id=?", (signal_id,)).fetchone()[0]
+
+    assert count == 1
+
+
+def test_duplicate_signal_decisions_are_recorded_after_dedup_window(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_DECISION_DEDUP_WINDOW_SECONDS", "60")
+    sls.init()
+
+    event = Event(type="trade_buy", source="test", token="token-dedup-later", ts=1_800_000_000)
+    signal_id = sls.record_signal_event(event)
+    for offset in (0, 61):
+        sls.record_signal_decision(
+            token=event.token,
+            event_type=event.type,
+            stage="routing",
+            decision="hard_fail",
+            reasons=["wallet_top_holder_concentration"],
+            signal_id=signal_id,
+            ts_value=1_800_000_000 + offset,
+        )
+
+    with sls._connect() as c:
+        count = c.execute("SELECT COUNT(1) FROM signal_decisions WHERE signal_id=?", (signal_id,)).fetchone()[0]
+
+    assert count == 2
 
 
 def test_generate_daily_learning_report_summarizes_outcomes(tmp_path, monkeypatch):

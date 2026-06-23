@@ -37,6 +37,7 @@ DEFAULT_POLICY_VERSION = "deterministic-v1"
 _REMOTE_WRITE_TIMEOUT = 5.0
 _REMOTE_WRITE_MAX_ATTEMPTS = 4
 _REMOTE_WRITE_RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+_DEFAULT_DECISION_DEDUP_WINDOW_SECONDS = 60
 _POSITIVE_OUTCOME_LABELS = {"worked", "strong_continuation"}
 _NEGATIVE_OUTCOME_LABELS = {"failed", "faded"}
 
@@ -47,6 +48,14 @@ def _snapshot_max_lag_seconds() -> int:
         return max(60, int(raw))
     except (TypeError, ValueError):
         return 3600
+
+
+def _decision_dedup_window_seconds() -> int:
+    raw = os.getenv("SIGNAL_ENGINE_DECISION_DEDUP_WINDOW_SECONDS", str(_DEFAULT_DECISION_DEDUP_WINDOW_SECONDS)).strip()
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return _DEFAULT_DECISION_DEDUP_WINDOW_SECONDS
 
 
 def _connect() -> sqlite3.Connection:
@@ -2189,7 +2198,34 @@ def _persist_signal_decision(
         attention_score=attention_score,
         risk_score=risk_score,
     )
+    reasons_json = json.dumps(reasons or [], sort_keys=True)
+    dedup_window_seconds = _decision_dedup_window_seconds()
     with _connect() as c:
+        if resolved_signal_id and dedup_window_seconds > 0:
+            duplicate = c.execute(
+                """
+                SELECT decision_id
+                FROM signal_decisions
+                WHERE signal_id=?
+                  AND stage=?
+                  AND decision=?
+                  AND COALESCE(action_taken, '')=COALESCE(?, '')
+                  AND reasons_json=?
+                  AND created_ts >= ?
+                ORDER BY created_ts DESC
+                LIMIT 1
+                """,
+                (
+                    resolved_signal_id,
+                    stage,
+                    decision,
+                    action_taken,
+                    reasons_json,
+                    created_ts - dedup_window_seconds,
+                ),
+            ).fetchone()
+            if duplicate:
+                return resolved_signal_id
         c.execute(
             """
             INSERT INTO signal_decisions (
@@ -2211,7 +2247,7 @@ def _persist_signal_decision(
                 action_taken,
                 resolved_policy["policy_name"],
                 resolved_policy["policy_version"],
-                json.dumps(reasons or []),
+                reasons_json,
                 _json_dumps(feature_map),
                 attention_score,
                 risk_score,
