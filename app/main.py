@@ -57,18 +57,35 @@ def _learning_workers_enabled() -> bool:
     return os.getenv("SIGNAL_ENGINE_ENABLE_LEARNING_WORKERS", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _snapshot_worker_enabled() -> bool:
+    if not _background_workers_enabled():
+        return False
+    # Snapshot outcomes belong to the authoritative engine database. Keep this
+    # enabled independently of the legacy combined learning-worker switch.
+    return os.getenv("SIGNAL_ENGINE_ENABLE_SNAPSHOT_WORKER", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 @app.on_event("startup")
 async def start_background_workers() -> None:
-    if _learning_workers_enabled():
-        for name, worker in (
-            ("learning_snapshots", snapshot_worker),
-            ("learning_daily_report", daily_report_worker),
-        ):
-            if name not in _BACKGROUND_TASKS or _BACKGROUND_TASKS[name].done():
-                _BACKGROUND_TASKS[name] = asyncio.create_task(worker(), name=name)
-        logger.warning("[startup] learning snapshot and report workers enabled")
+    if _snapshot_worker_enabled():
+        name = "learning_snapshots"
+        if name not in _BACKGROUND_TASKS or _BACKGROUND_TASKS[name].done():
+            _BACKGROUND_TASKS[name] = asyncio.create_task(snapshot_worker(), name=name)
+        logger.warning("[startup] learning snapshot worker enabled")
     else:
-        logger.warning("[startup] learning snapshot and report workers disabled")
+        logger.warning("[startup] learning snapshot worker disabled")
+    if _learning_workers_enabled():
+        name = "learning_daily_report"
+        if name not in _BACKGROUND_TASKS or _BACKGROUND_TASKS[name].done():
+            _BACKGROUND_TASKS[name] = asyncio.create_task(daily_report_worker(), name=name)
+        logger.warning("[startup] learning daily report worker enabled")
+    else:
+        logger.warning("[startup] learning daily report worker disabled")
     if _policy_automation_worker_enabled() and ("policy_automation" not in _BACKGROUND_TASKS or _BACKGROUND_TASKS["policy_automation"].done()):
         _BACKGROUND_TASKS["policy_automation"] = asyncio.create_task(policy_automation_worker(), name="policy_automation_worker")
         logger.warning("[startup] policy automation worker enabled")
