@@ -83,7 +83,7 @@ def test_learning_history_summary_route_returns_aggregate(tmp_path, monkeypatch)
     response = TestClient(main.app).get("/learning/history/summary")
 
     assert response.status_code == 200
-    assert response.json()["signals"]["total"] == 1
+    assert response.json()["signals"]["sample_size"] == 1
 
 
 def test_learning_diagnostics_route_returns_summary(tmp_path, monkeypatch):

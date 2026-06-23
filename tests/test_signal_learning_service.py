@@ -189,9 +189,10 @@ def test_historical_corpus_summary_aggregates_duplicates_and_feature_coverage(tm
 
     summary = sls.get_historical_corpus_summary()
 
-    assert summary["signals"]["total"] == 1
+    assert summary["sampled"] is True
+    assert summary["signals"]["sample_size"] == 1
     assert summary["signals"]["distinct_tokens_in_sample"] == 1
-    assert summary["decisions"]["total"] == 2
+    assert summary["decisions"]["sample_size"] == 2
     assert summary["decisions"]["distinct_sample_signal_stage_decisions"] == 1
     assert summary["decisions"]["sample_repeated_decisions"] == 1
     assert summary["decisions"]["sample_repeat_rate"] == 50.0

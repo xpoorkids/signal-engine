@@ -578,24 +578,17 @@ def get_historical_corpus_summary(hours: int | None = None, sample_limit: int = 
     cutoff = now - max(1, int(hours)) * 3600 if hours is not None else 0
     sample_limit = max(100, min(250_000, int(sample_limit or 10_000)))
     with _connect() as c:
-        signal_row = c.execute(
-            """
-            SELECT COUNT(1), MIN(alert_ts), MAX(alert_ts)
-            FROM signals
-            WHERE alert_ts >= ?
-            """,
-            (cutoff,),
-        ).fetchone()
         signal_sample_row = c.execute(
             """
             WITH recent_signals AS (
-                SELECT token, market_cap_usd, liquidity_usd, volume_m5_usd, attention_score, risk_score
+                SELECT token, alert_ts, market_cap_usd, liquidity_usd, volume_m5_usd, attention_score, risk_score
                 FROM signals
                 WHERE alert_ts >= ?
                 ORDER BY alert_ts DESC
                 LIMIT ?
             )
             SELECT COUNT(1), COUNT(DISTINCT token),
+                   MIN(alert_ts), MAX(alert_ts),
                    SUM(CASE WHEN market_cap_usd IS NOT NULL THEN 1 ELSE 0 END),
                    SUM(CASE WHEN liquidity_usd IS NOT NULL THEN 1 ELSE 0 END),
                    SUM(CASE WHEN volume_m5_usd IS NOT NULL THEN 1 ELSE 0 END),
@@ -605,18 +598,10 @@ def get_historical_corpus_summary(hours: int | None = None, sample_limit: int = 
             """,
             (cutoff, sample_limit),
         ).fetchone()
-        decision_row = c.execute(
-            """
-            SELECT COUNT(1), MIN(created_ts), MAX(created_ts)
-            FROM signal_decisions
-            WHERE created_ts >= ?
-            """,
-            (cutoff,),
-        ).fetchone()
         sample_row = c.execute(
             """
             WITH recent_decisions AS (
-                SELECT signal_id, stage, decision
+                SELECT signal_id, stage, decision, created_ts
                 FROM signal_decisions
                 WHERE created_ts >= ?
                 ORDER BY created_ts DESC
@@ -624,7 +609,9 @@ def get_historical_corpus_summary(hours: int | None = None, sample_limit: int = 
             )
             SELECT COUNT(1),
                    COUNT(DISTINCT signal_id),
-                   COUNT(DISTINCT COALESCE(signal_id, '') || '|' || COALESCE(stage, '') || '|' || decision)
+                   COUNT(DISTINCT COALESCE(signal_id, '') || '|' || COALESCE(stage, '') || '|' || decision),
+                   MIN(created_ts),
+                   MAX(created_ts)
             FROM recent_decisions
             """,
             (cutoff, sample_limit),
@@ -633,42 +620,60 @@ def get_historical_corpus_summary(hours: int | None = None, sample_limit: int = 
             {"decision": str(row[0] or "unknown"), "count": int(row[1] or 0)}
             for row in c.execute(
                 """
+                WITH recent_decisions AS (
+                    SELECT decision
+                    FROM signal_decisions
+                    WHERE created_ts >= ?
+                    ORDER BY created_ts DESC
+                    LIMIT ?
+                )
                 SELECT decision, COUNT(1)
-                FROM signal_decisions
-                WHERE created_ts >= ?
+                FROM recent_decisions
                 GROUP BY decision
                 ORDER BY COUNT(1) DESC
                 LIMIT 20
                 """,
-                (cutoff,),
+                (cutoff, sample_limit),
             ).fetchall()
         ]
         stages = [
             {"stage": str(row[0] or "unknown"), "count": int(row[1] or 0)}
             for row in c.execute(
                 """
+                WITH recent_decisions AS (
+                    SELECT stage
+                    FROM signal_decisions
+                    WHERE created_ts >= ?
+                    ORDER BY created_ts DESC
+                    LIMIT ?
+                )
                 SELECT stage, COUNT(1)
-                FROM signal_decisions
-                WHERE created_ts >= ?
+                FROM recent_decisions
                 GROUP BY stage
                 ORDER BY COUNT(1) DESC
                 LIMIT 20
                 """,
-                (cutoff,),
+                (cutoff, sample_limit),
             ).fetchall()
         ]
         event_types = [
             {"event_type": str(row[0] or "unknown"), "count": int(row[1] or 0)}
             for row in c.execute(
                 """
+                WITH recent_signals AS (
+                    SELECT event_type
+                    FROM signals
+                    WHERE alert_ts >= ?
+                    ORDER BY alert_ts DESC
+                    LIMIT ?
+                )
                 SELECT event_type, COUNT(1)
-                FROM signals
-                WHERE alert_ts >= ?
+                FROM recent_signals
                 GROUP BY event_type
                 ORDER BY COUNT(1) DESC
                 LIMIT 20
                 """,
-                (cutoff,),
+                (cutoff, sample_limit),
             ).fetchall()
         ]
         reasons = [
@@ -692,9 +697,7 @@ def get_historical_corpus_summary(hours: int | None = None, sample_limit: int = 
             ).fetchall()
         ]
 
-    signal_total = int(signal_row[0] or 0)
     signal_sample_total = int(signal_sample_row[0] or 0)
-    decision_total = int(decision_row[0] or 0)
     sample_decisions = int(sample_row[0] or 0)
     distinct_sample_signals = int(sample_row[1] or 0)
     distinct_sample_states = int(sample_row[2] or 0)
@@ -705,16 +708,16 @@ def get_historical_corpus_summary(hours: int | None = None, sample_limit: int = 
     return {
         "lookback_hours": int(hours) if hours is not None else None,
         "generated_ts": now,
+        "sampled": True,
+        "sample_limit": sample_limit,
         "signals": {
-            "total": signal_total,
             "sample_size": signal_sample_total,
             "distinct_tokens_in_sample": int(signal_sample_row[1] or 0),
-            "first_ts": signal_row[1],
-            "last_ts": signal_row[2],
+            "first_ts": signal_sample_row[2],
+            "last_ts": signal_sample_row[3],
             "event_types": event_types,
         },
         "decisions": {
-            "total": decision_total,
             "sample_size": sample_decisions,
             "distinct_signals_in_sample": distinct_sample_signals,
             "distinct_sample_signal_stage_decisions": distinct_sample_states,
@@ -725,19 +728,19 @@ def get_historical_corpus_summary(hours: int | None = None, sample_limit: int = 
             )
             if sample_decisions
             else 0.0,
-            "first_ts": decision_row[1],
-            "last_ts": decision_row[2],
+            "first_ts": sample_row[3],
+            "last_ts": sample_row[4],
             "by_decision": decisions,
             "by_stage": stages,
             "top_reasons": reasons,
         },
         "feature_coverage": {
             "sample_size": signal_sample_total,
-            "market_cap_pct": coverage(signal_sample_row[2]),
-            "liquidity_pct": coverage(signal_sample_row[3]),
-            "volume_m5_pct": coverage(signal_sample_row[4]),
-            "attention_pct": coverage(signal_sample_row[5]),
-            "risk_pct": coverage(signal_sample_row[6]),
+            "market_cap_pct": coverage(signal_sample_row[4]),
+            "liquidity_pct": coverage(signal_sample_row[5]),
+            "volume_m5_pct": coverage(signal_sample_row[6]),
+            "attention_pct": coverage(signal_sample_row[7]),
+            "risk_pct": coverage(signal_sample_row[8]),
         },
         "usage_guidance": {
             "safe_uses": [
