@@ -58,10 +58,10 @@ def _learning_workers_enabled() -> bool:
 
 
 def _snapshot_worker_enabled() -> bool:
-    if not _background_workers_enabled():
+    if os.getenv("PYTEST_CURRENT_TEST"):
         return False
     # Snapshot outcomes belong to the authoritative engine database. Keep this
-    # enabled independently of the legacy combined learning-worker switch.
+    # enabled independently of legacy background/learning worker switches.
     return os.getenv("SIGNAL_ENGINE_ENABLE_SNAPSHOT_WORKER", "1").strip().lower() not in {
         "0",
         "false",

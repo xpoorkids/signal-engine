@@ -23,8 +23,8 @@ def test_snapshot_worker_has_dedicated_disable_override(monkeypatch):
     assert main._snapshot_worker_enabled() is False
 
 
-def test_global_background_worker_switch_disables_snapshot_worker(monkeypatch):
+def test_snapshot_worker_ignores_legacy_global_background_switch(monkeypatch):
     _clear_worker_env(monkeypatch)
     monkeypatch.setenv("SIGNAL_ENGINE_ENABLE_BACKGROUND_WORKERS", "false")
 
-    assert main._snapshot_worker_enabled() is False
+    assert main._snapshot_worker_enabled() is True
