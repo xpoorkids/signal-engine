@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from app.routes import health, scan, score, packet, watch, review, learning
 
 from app.services.db_service import resolve_engine_db_path
-from app.services.signal_learning_service import policy_automation_worker
+from app.services.signal_learning_service import daily_report_worker, policy_automation_worker, snapshot_worker
 
 os.environ.setdefault("SIGNAL_ENGINE_PROCESS_ROLE", "engine")
 
@@ -51,8 +51,24 @@ def _policy_automation_worker_enabled() -> bool:
     return os.getenv("SIGNAL_ENGINE_ENABLE_POLICY_AUTOMATION_WORKER", "0").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _learning_workers_enabled() -> bool:
+    if not _background_workers_enabled():
+        return False
+    return os.getenv("SIGNAL_ENGINE_ENABLE_LEARNING_WORKERS", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
 @app.on_event("startup")
 async def start_background_workers() -> None:
+    if _learning_workers_enabled():
+        for name, worker in (
+            ("learning_snapshots", snapshot_worker),
+            ("learning_daily_report", daily_report_worker),
+        ):
+            if name not in _BACKGROUND_TASKS or _BACKGROUND_TASKS[name].done():
+                _BACKGROUND_TASKS[name] = asyncio.create_task(worker(), name=name)
+        logger.warning("[startup] learning snapshot and report workers enabled")
+    else:
+        logger.warning("[startup] learning snapshot and report workers disabled")
     if _policy_automation_worker_enabled() and ("policy_automation" not in _BACKGROUND_TASKS or _BACKGROUND_TASKS["policy_automation"].done()):
         _BACKGROUND_TASKS["policy_automation"] = asyncio.create_task(policy_automation_worker(), name="policy_automation_worker")
         logger.warning("[startup] policy automation worker enabled")

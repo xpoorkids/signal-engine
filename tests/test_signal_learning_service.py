@@ -57,6 +57,35 @@ def test_record_signal_event_persists_signal_and_jobs(tmp_path, monkeypatch):
     assert job_count == len(sls.SNAPSHOT_HORIZONS_MINUTES)
 
 
+def test_due_snapshot_jobs_skip_stale_work_and_report_backlog(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_SNAPSHOT_MAX_LAG_SECONDS", "3600")
+    now = 1_800_000_000
+    monkeypatch.setattr(sls.time, "time", lambda: now)
+    sls.init()
+
+    event = Event(type="candidate", source="test", token="token-stale-jobs", ts=now - 300, extra={})
+    signal_id = sls.record_signal_event(event, external_ref="stale-jobs")
+    with sls._connect() as c:
+        c.execute(
+            "UPDATE signal_snapshot_jobs SET due_ts=? WHERE signal_id=? AND horizon_minutes=5",
+            (now - 30, signal_id),
+        )
+        c.execute(
+            "UPDATE signal_snapshot_jobs SET due_ts=? WHERE signal_id=? AND horizon_minutes=15",
+            (now - 3601, signal_id),
+        )
+
+    jobs = sls._fetch_due_jobs(limit=10)
+    storage = sls.get_learning_storage_status()
+
+    assert [(job["signal_id"], job["horizon_minutes"]) for job in jobs] == [(signal_id, 5)]
+    assert storage["snapshot_job_counts"]["pending"] == len(sls.SNAPSHOT_HORIZONS_MINUTES)
+    assert storage["stale_pending_snapshot_jobs"] == 1
+    assert storage["snapshot_max_lag_seconds"] == 3600
+
+
 def test_record_signal_event_updates_existing_external_ref(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
@@ -2415,6 +2444,7 @@ def test_session_signal_quality_highlights_best_and_worst_combos(tmp_path, monke
         signal_rows = [
             ("sig-a1", "token-a1", "candidate", "asia", "worked"),
             ("sig-a2", "token-a2", "candidate", "asia", "strong_continuation"),
+            ("sig-a3", "token-a3", "candidate", "asia", "pending"),
             ("sig-u1", "token-u1", "promoted", "us_day", "failed"),
             ("sig-u2", "token-u2", "promoted", "us_day", "faded"),
         ]
@@ -2497,7 +2527,11 @@ def test_session_signal_quality_highlights_best_and_worst_combos(tmp_path, monke
 
     combos = {(item["session_bucket"], item["signal_type"]): item for item in summary["session_signal_quality"]}
     assert combos[("asia", "candidate")]["win_rate"] == 100.0
+    assert combos[("asia", "candidate")]["total"] == 3
+    assert combos[("asia", "candidate")]["resolved_total"] == 2
     assert combos[("us_day", "promoted")]["fail_rate"] == 100.0
+    assert summary["outcome_quality"]["resolved_total"] == 4
+    assert summary["outcome_quality"]["win_rate"] == 50.0
     assert any(item["title"] == "Best Session x Signal" for item in recommendations)
     assert any(item["title"] == "Weakest Session x Signal" for item in recommendations)
 

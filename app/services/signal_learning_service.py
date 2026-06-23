@@ -39,6 +39,14 @@ _POSITIVE_OUTCOME_LABELS = {"worked", "strong_continuation"}
 _NEGATIVE_OUTCOME_LABELS = {"failed", "faded"}
 
 
+def _snapshot_max_lag_seconds() -> int:
+    raw = os.getenv("SIGNAL_ENGINE_SNAPSHOT_MAX_LAG_SECONDS", "3600").strip()
+    try:
+        return max(60, int(raw))
+    except (TypeError, ValueError):
+        return 3600
+
+
 def _connect() -> sqlite3.Connection:
     return connect_sqlite(_current_db_path())
 
@@ -473,6 +481,21 @@ def get_learning_storage_status() -> dict[str, Any]:
         signal_count = int(c.execute("SELECT COUNT(1) FROM signals").fetchone()[0] or 0)
         decision_count = int(c.execute("SELECT COUNT(1) FROM signal_decisions").fetchone()[0] or 0)
         snapshot_count = int(c.execute("SELECT COUNT(1) FROM signal_snapshots").fetchone()[0] or 0)
+        job_counts = {
+            str(row[0] or "unknown"): int(row[1] or 0)
+            for row in c.execute(
+                "SELECT status, COUNT(1) FROM signal_snapshot_jobs GROUP BY status"
+            ).fetchall()
+        }
+        now = int(time.time())
+        stale_before = now - _snapshot_max_lag_seconds()
+        stale_pending_count = int(
+            c.execute(
+                "SELECT COUNT(1) FROM signal_snapshot_jobs WHERE status='pending' AND due_ts < ?",
+                (stale_before,),
+            ).fetchone()[0]
+            or 0
+        )
     return {
         "db_path": str(db_path),
         "db_path_env": (
@@ -484,6 +507,9 @@ def get_learning_storage_status() -> dict[str, Any]:
         "signal_count": signal_count,
         "decision_count": decision_count,
         "snapshot_count": snapshot_count,
+        "snapshot_job_counts": job_counts,
+        "stale_pending_snapshot_jobs": stale_pending_count,
+        "snapshot_max_lag_seconds": _snapshot_max_lag_seconds(),
         "write_config": write_config,
     }
 
@@ -3200,7 +3226,10 @@ def get_regime_action_feedback(*, hours: int = 168) -> dict[str, Any]:
 def get_regime_meta_policy(*, hours: int = 168) -> dict[str, Any]:
     config = _policy_automation_config()
     feedback = get_regime_action_feedback(hours=max(1, hours))
-    regime_summary = get_policy_regime_summary(hours=max(24, min(hours, 168)), limit=100)
+    # Honor the caller's requested analysis window. Capping this at seven days
+    # made long-window meta-policy and strategy reports silently return empty
+    # results even when their feedback queries used the full requested range.
+    regime_summary = get_policy_regime_summary(hours=max(24, hours), limit=100)
     summaries = regime_summary.get("regimes") if isinstance(regime_summary.get("regimes"), list) else []
     by_regime: dict[str, dict[str, Any]] = {}
     for item in summaries:
@@ -4588,13 +4617,15 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
     for session_name, stats in session_outcomes.items():
         total = int(stats.get("total") or 0)
         positive = int(stats.get("worked") or 0) + int(stats.get("strong_continuation") or 0)
-        negative = int(stats.get("failed") or 0)
-        win_rate = round((positive / total) * 100.0, 1) if total else 0.0
-        fail_rate = round((negative / total) * 100.0, 1) if total else 0.0
+        negative = int(stats.get("failed") or 0) + int(stats.get("faded") or 0)
+        resolved_total = positive + negative
+        win_rate = round((positive / resolved_total) * 100.0, 1) if resolved_total else 0.0
+        fail_rate = round((negative / resolved_total) * 100.0, 1) if resolved_total else 0.0
         session_quality.append(
             {
                 "session_bucket": session_name,
                 "total": total,
+                "resolved_total": resolved_total,
                 "positive": positive,
                 "negative": negative,
                 "win_rate": win_rate,
@@ -4608,15 +4639,17 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
         total = int(stats.get("total") or 0)
         positive = int(stats.get("worked") or 0) + int(stats.get("strong_continuation") or 0)
         negative = int(stats.get("failed") or 0) + int(stats.get("faded") or 0)
+        resolved_total = positive + negative
         session_signal_quality.append(
             {
                 **stats,
                 "session_bucket": session_name,
                 "signal_type": signal_type,
+                "resolved_total": resolved_total,
                 "positive": positive,
                 "negative": negative,
-                "win_rate": round((positive / total) * 100.0, 1) if total else 0.0,
-                "fail_rate": round((negative / total) * 100.0, 1) if total else 0.0,
+                "win_rate": round((positive / resolved_total) * 100.0, 1) if resolved_total else 0.0,
+                "fail_rate": round((negative / resolved_total) * 100.0, 1) if resolved_total else 0.0,
             }
         )
     session_signal_quality.sort(
@@ -4659,10 +4692,12 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
             previous_positive = int(previous.get("positive") or 0)
             current_negative = int(current.get("negative") or 0)
             previous_negative = int(previous.get("negative") or 0)
-            current_win_rate = round((current_positive / current_total) * 100.0, 1) if current_total else 0.0
-            previous_win_rate = round((previous_positive / previous_total) * 100.0, 1) if previous_total else 0.0
-            current_fail_rate = round((current_negative / current_total) * 100.0, 1) if current_total else 0.0
-            previous_fail_rate = round((previous_negative / previous_total) * 100.0, 1) if previous_total else 0.0
+            current_resolved = current_positive + current_negative
+            previous_resolved = previous_positive + previous_negative
+            current_win_rate = round((current_positive / current_resolved) * 100.0, 1) if current_resolved else 0.0
+            previous_win_rate = round((previous_positive / previous_resolved) * 100.0, 1) if previous_resolved else 0.0
+            current_fail_rate = round((current_negative / current_resolved) * 100.0, 1) if current_resolved else 0.0
+            previous_fail_rate = round((previous_negative / previous_resolved) * 100.0, 1) if previous_resolved else 0.0
             trends.append(
                 {
                     **{field: identity[idx] for idx, field in enumerate(key_fields)},
@@ -4670,6 +4705,8 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
                     "previous_date": previous.get("date"),
                     "current_total": current_total,
                     "previous_total": previous_total,
+                    "current_resolved_total": current_resolved,
+                    "previous_resolved_total": previous_resolved,
                     "current_win_rate": current_win_rate,
                     "previous_win_rate": previous_win_rate,
                     "current_fail_rate": current_fail_rate,
@@ -4730,6 +4767,10 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
         )
     )
 
+    overall_positive = sum(int(outcome_counts.get(label) or 0) for label in _POSITIVE_OUTCOME_LABELS)
+    overall_negative = sum(int(outcome_counts.get(label) or 0) for label in _NEGATIVE_OUTCOME_LABELS)
+    overall_resolved = overall_positive + overall_negative
+
     return {
         "lookback_hours": hours,
         "counts_by_decision": counts_by_decision,
@@ -4738,6 +4779,14 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
         "sessions": sessions,
         "recent_examples": recent_examples,
         "outcomes_by_label": outcome_counts,
+        "outcome_quality": {
+            "total": sum(outcome_counts.values()),
+            "resolved_total": overall_resolved,
+            "positive": overall_positive,
+            "negative": overall_negative,
+            "win_rate": round((overall_positive / overall_resolved) * 100.0, 1) if overall_resolved else 0.0,
+            "fail_rate": round((overall_negative / overall_resolved) * 100.0, 1) if overall_resolved else 0.0,
+        },
         "false_negatives": false_negatives[:15],
         "false_positives": false_positives[:15],
         "session_quality": session_quality,
@@ -6184,17 +6233,18 @@ def render_diagnostics_html(hours: int = 24) -> str:
 
 def _fetch_due_jobs(limit: int = 10) -> list[dict[str, Any]]:
     now = int(time.time())
+    stale_before = now - _snapshot_max_lag_seconds()
     with _connect() as c:
         rows = c.execute(
             """
             SELECT j.signal_id, j.horizon_minutes, s.token
             FROM signal_snapshot_jobs j
             JOIN signals s ON s.signal_id = j.signal_id
-            WHERE j.status='pending' AND j.due_ts <= ?
+            WHERE j.status='pending' AND j.due_ts >= ? AND j.due_ts <= ?
             ORDER BY j.due_ts ASC
             LIMIT ?
             """,
-            (now, limit),
+            (stale_before, now, limit),
         ).fetchall()
     return [
         {"signal_id": row[0], "horizon_minutes": row[1], "token": row[2]}
@@ -7059,20 +7109,26 @@ async def daily_report_worker() -> None:
     init()
     while True:
         try:
-            yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-            with _connect() as c:
-                row = c.execute(
-                    "SELECT report_date FROM learning_reports WHERE report_date=?",
-                    (yesterday,),
-                ).fetchone()
-            if not row:
-                report = generate_daily_learning_report(yesterday)
-                logger.info(
-                    "[signal-learning] daily_report_generated date=%s totals=%s outcomes=%s",
-                    yesterday,
-                    report.get("totals_by_type"),
-                    report.get("outcomes_by_label"),
-                )
+            now = datetime.now(timezone.utc)
+            yesterday_dt = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            yesterday = yesterday_dt.strftime("%Y-%m-%d")
+            report_ready_at = yesterday_dt + timedelta(days=1, minutes=max(SNAPSHOT_HORIZONS_MINUTES)) + timedelta(
+                seconds=_snapshot_max_lag_seconds()
+            )
+            if now >= report_ready_at:
+                with _connect() as c:
+                    row = c.execute(
+                        "SELECT report_date FROM learning_reports WHERE report_date=?",
+                        (yesterday,),
+                    ).fetchone()
+                if not row:
+                    report = generate_daily_learning_report(yesterday)
+                    logger.info(
+                        "[signal-learning] daily_report_generated date=%s totals=%s outcomes=%s",
+                        yesterday,
+                        report.get("totals_by_type"),
+                        report.get("outcomes_by_label"),
+                    )
         except Exception:
             logger.exception("[signal-learning] daily_report_failed")
         await asyncio.sleep(REPORT_POLL_SECONDS)
