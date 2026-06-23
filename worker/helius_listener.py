@@ -124,6 +124,7 @@ import websockets
 import time
 import re
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 import requests
 from collections import deque, defaultdict
@@ -174,6 +175,22 @@ HELIUS_RPC = _get_helius_rpc_url()
 
 _last_rpc_log_ts = 0.0
 LAST_WS_ACTIVITY = time.time()
+
+
+def _redact_secret_text(value: object) -> str:
+    text = str(value or "")
+    text = re.sub(r"(?i)(api-key|apikey|token)=([^&\s]+)", r"\1=[REDACTED]", text)
+    if HELIUS_KEY:
+        text = text.replace(str(HELIUS_KEY), "[REDACTED]")
+    return text
+
+
+def _endpoint_label(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+    except Exception:
+        return "configured" if url else "missing"
 
 
 def _mark_ws_activity(ts: float | None = None) -> float:
@@ -898,7 +915,7 @@ class LogSwapProcessor:
 async def listen(q: asyncio.Queue) -> None:
     if not HELIUS_KEY:
         print("[helius] missing HELIUS_API_KEY", flush=True)
-    print(f"[rpc-endpoint] url={HELIUS_RPC}", flush=True)
+    print(f"[rpc-endpoint] url={_endpoint_label(HELIUS_RPC)}", flush=True)
     logs_sub = {
         "jsonrpc": "2.0",
         "id": 99,
@@ -1330,7 +1347,7 @@ async def listen(q: asyncio.Queue) -> None:
                                 )
         except Exception as e:
             reconnect_count += 1
-            print(f"[ws-error] {e} reconnect_count={reconnect_count}", flush=True)
+            print(f"[ws-error] {_redact_secret_text(e)} reconnect_count={reconnect_count}", flush=True)
         finally:
             try:
                 if ws:
@@ -1349,6 +1366,6 @@ async def start_helius_listeners(q: asyncio.Queue) -> None:
         print("[helius] listener cancelled", flush=True)
         raise
     except Exception as e:
-        print("[helius] listener error:", e, flush=True)
+        print("[helius] listener error:", _redact_secret_text(e), flush=True)
     finally:
         print("[helius] listener stopped", flush=True)

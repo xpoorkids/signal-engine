@@ -51,3 +51,14 @@ def test_mark_ws_activity_updates_global_timestamp(monkeypatch):
 
     assert updated == 25.0
     assert listener.LAST_WS_ACTIVITY == 25.0
+
+
+def test_endpoint_logging_redacts_api_keys(monkeypatch):
+    monkeypatch.setenv("HELIUS_API_KEY", "super-secret-key")
+    listener = _load_listener(monkeypatch)
+    url = "https://mainnet.helius-rpc.com/?api-key=super-secret-key"
+
+    assert listener._endpoint_label(url) == "https://mainnet.helius-rpc.com/"
+    assert listener._redact_secret_text(f"connection failed: {url}") == (
+        "connection failed: https://mainnet.helius-rpc.com/?api-key=[REDACTED]"
+    )
