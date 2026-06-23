@@ -4916,8 +4916,12 @@ def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
     status = "quiet"
     status_detail = "The engine is processing, but recent sends are sparse."
     if total_decisions == 0 and latest_signal is None:
-        status = "cold"
-        status_detail = "No recent decision or alert activity in the selected window."
+        if worker_heartbeat and worker_heartbeat.get("status") == "healthy":
+            status = "idle"
+            status_detail = "Worker heartbeat is healthy; awaiting fresh qualifying event activity."
+        else:
+            status = "cold"
+            status_detail = "No recent decision or alert activity in the selected window."
     elif total_decisions > 0 and sent_count == 0 and skip_pressure >= 70.0:
         status = "gated"
         status_detail = "The engine is active, but gates are filtering most setups."
