@@ -123,6 +123,7 @@ import asyncio
 import websockets
 import time
 import re
+import random
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
@@ -197,6 +198,19 @@ def _mark_ws_activity(ts: float | None = None) -> float:
     value = float(ts or time.time())
     globals()["LAST_WS_ACTIVITY"] = value
     return value
+
+
+def _ws_reconnect_delay(error: object, reconnect_count: int) -> float:
+    """Return bounded backoff, with a longer floor for provider rate limits."""
+    message = str(error or "").lower()
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    rate_limited = status_code == 429 or "429" in message or "too many requests" in message
+    base_delay = min(120.0, 2.0 ** min(max(reconnect_count, 1), 7))
+    if rate_limited:
+        base_delay = max(60.0, base_delay)
+    return min(150.0, base_delay + random.uniform(0.0, min(5.0, base_delay * 0.1)))
+
 
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -940,6 +954,7 @@ async def listen(q: asyncio.Queue) -> None:
     last_emit_ts = time.time()
     last_heartbeat_ts = 0.0
     reconnect_count = 0
+    reconnect_delay = 1.0
     ws = None
     stall_timeout = 45
 
@@ -954,6 +969,7 @@ async def listen(q: asyncio.Queue) -> None:
                 max_queue=None,
             ) as ws:
                 _mark_ws_activity()
+                reconnect_delay = 1.0
                 print("[ws-connected]", flush=True)
                 if ENABLE_LOGS_SUB:
                     await ws.send(json.dumps(logs_sub))
@@ -1347,7 +1363,12 @@ async def listen(q: asyncio.Queue) -> None:
                                 )
         except Exception as e:
             reconnect_count += 1
-            print(f"[ws-error] {_redact_secret_text(e)} reconnect_count={reconnect_count}", flush=True)
+            reconnect_delay = _ws_reconnect_delay(e, reconnect_count)
+            print(
+                f"[ws-error] {_redact_secret_text(e)} reconnect_count={reconnect_count} "
+                f"retry_seconds={reconnect_delay:.1f}",
+                flush=True,
+            )
         finally:
             try:
                 if ws:
@@ -1355,7 +1376,7 @@ async def listen(q: asyncio.Queue) -> None:
             except Exception:
                 pass
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(reconnect_delay)
 
 
 async def start_helius_listeners(q: asyncio.Queue) -> None:

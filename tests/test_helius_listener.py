@@ -62,3 +62,20 @@ def test_endpoint_logging_redacts_api_keys(monkeypatch):
     assert listener._redact_secret_text(f"connection failed: {url}") == (
         "connection failed: https://mainnet.helius-rpc.com/?api-key=[REDACTED]"
     )
+
+
+def test_ws_reconnect_delay_uses_long_floor_for_rate_limit(monkeypatch):
+    listener = _load_listener(monkeypatch)
+    monkeypatch.setattr(listener.random, "uniform", lambda start, end: 0.0)
+
+    assert listener._ws_reconnect_delay("server rejected connection: HTTP 429", 1) == 60.0
+    assert listener._ws_reconnect_delay("server rejected connection: HTTP 429", 7) == 120.0
+
+
+def test_ws_reconnect_delay_exponentially_backs_off_other_errors(monkeypatch):
+    listener = _load_listener(monkeypatch)
+    monkeypatch.setattr(listener.random, "uniform", lambda start, end: 0.0)
+
+    assert listener._ws_reconnect_delay("connection refused", 1) == 2.0
+    assert listener._ws_reconnect_delay("connection refused", 2) == 4.0
+    assert listener._ws_reconnect_delay("connection refused", 20) == 120.0
