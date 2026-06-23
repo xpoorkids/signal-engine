@@ -571,34 +571,63 @@ def get_learning_storage_status() -> dict[str, Any]:
     }
 
 
-def get_historical_corpus_summary(hours: int | None = None) -> dict[str, Any]:
+def get_historical_corpus_summary(hours: int | None = None, sample_limit: int = 10_000) -> dict[str, Any]:
     """Aggregate the corpus in SQLite without loading millions of rows."""
     _ensure_schema()
     now = int(time.time())
     cutoff = now - max(1, int(hours)) * 3600 if hours is not None else 0
+    sample_limit = max(100, min(250_000, int(sample_limit or 10_000)))
     with _connect() as c:
         signal_row = c.execute(
             """
-            SELECT COUNT(1), COUNT(DISTINCT token), MIN(alert_ts), MAX(alert_ts),
-                   SUM(CASE WHEN market_cap_usd IS NOT NULL THEN 1 ELSE 0 END),
-                   SUM(CASE WHEN liquidity_usd IS NOT NULL THEN 1 ELSE 0 END),
-                   SUM(CASE WHEN volume_m5_usd IS NOT NULL THEN 1 ELSE 0 END),
-                   SUM(CASE WHEN attention_score IS NOT NULL THEN 1 ELSE 0 END),
-                   SUM(CASE WHEN risk_score IS NOT NULL THEN 1 ELSE 0 END)
+            SELECT COUNT(1), MIN(alert_ts), MAX(alert_ts)
             FROM signals
             WHERE alert_ts >= ?
             """,
             (cutoff,),
         ).fetchone()
+        signal_sample_row = c.execute(
+            """
+            WITH recent_signals AS (
+                SELECT token, market_cap_usd, liquidity_usd, volume_m5_usd, attention_score, risk_score
+                FROM signals
+                WHERE alert_ts >= ?
+                ORDER BY alert_ts DESC
+                LIMIT ?
+            )
+            SELECT COUNT(1), COUNT(DISTINCT token),
+                   SUM(CASE WHEN market_cap_usd IS NOT NULL THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN liquidity_usd IS NOT NULL THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN volume_m5_usd IS NOT NULL THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN attention_score IS NOT NULL THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN risk_score IS NOT NULL THEN 1 ELSE 0 END)
+            FROM recent_signals
+            """,
+            (cutoff, sample_limit),
+        ).fetchone()
         decision_row = c.execute(
             """
-            SELECT COUNT(1), COUNT(DISTINCT signal_id),
-                   COUNT(DISTINCT COALESCE(signal_id, '') || '|' || COALESCE(stage, '') || '|' || decision),
-                   MIN(created_ts), MAX(created_ts)
+            SELECT COUNT(1), MIN(created_ts), MAX(created_ts)
             FROM signal_decisions
             WHERE created_ts >= ?
             """,
             (cutoff,),
+        ).fetchone()
+        sample_row = c.execute(
+            """
+            WITH recent_decisions AS (
+                SELECT signal_id, stage, decision
+                FROM signal_decisions
+                WHERE created_ts >= ?
+                ORDER BY created_ts DESC
+                LIMIT ?
+            )
+            SELECT COUNT(1),
+                   COUNT(DISTINCT signal_id),
+                   COUNT(DISTINCT COALESCE(signal_id, '') || '|' || COALESCE(stage, '') || '|' || decision)
+            FROM recent_decisions
+            """,
+            (cutoff, sample_limit),
         ).fetchone()
         decisions = [
             {"decision": str(row[0] or "unknown"), "count": int(row[1] or 0)}
@@ -646,57 +675,69 @@ def get_historical_corpus_summary(hours: int | None = None) -> dict[str, Any]:
             {"reason": str(row[0] or "unknown"), "count": int(row[1] or 0)}
             for row in c.execute(
                 """
+                WITH recent_reasons AS (
+                    SELECT reasons_json
+                    FROM signal_decisions
+                    WHERE created_ts >= ?
+                    ORDER BY created_ts DESC
+                    LIMIT ?
+                )
                 SELECT json_each.value, COUNT(1)
-                FROM signal_decisions, json_each(signal_decisions.reasons_json)
-                WHERE signal_decisions.created_ts >= ?
+                FROM recent_reasons, json_each(recent_reasons.reasons_json)
                 GROUP BY json_each.value
                 ORDER BY COUNT(1) DESC
                 LIMIT 20
                 """,
-                (cutoff,),
+                (cutoff, sample_limit),
             ).fetchall()
         ]
 
     signal_total = int(signal_row[0] or 0)
+    signal_sample_total = int(signal_sample_row[0] or 0)
     decision_total = int(decision_row[0] or 0)
-    distinct_decision_states = int(decision_row[2] or 0)
+    sample_decisions = int(sample_row[0] or 0)
+    distinct_sample_signals = int(sample_row[1] or 0)
+    distinct_sample_states = int(sample_row[2] or 0)
 
     def coverage(count: Any) -> float:
-        return round((int(count or 0) / signal_total) * 100.0, 2) if signal_total else 0.0
+        return round((int(count or 0) / signal_sample_total) * 100.0, 2) if signal_sample_total else 0.0
 
     return {
         "lookback_hours": int(hours) if hours is not None else None,
         "generated_ts": now,
         "signals": {
             "total": signal_total,
-            "distinct_tokens": int(signal_row[1] or 0),
-            "first_ts": signal_row[2],
-            "last_ts": signal_row[3],
+            "sample_size": signal_sample_total,
+            "distinct_tokens_in_sample": int(signal_sample_row[1] or 0),
+            "first_ts": signal_row[1],
+            "last_ts": signal_row[2],
             "event_types": event_types,
         },
         "decisions": {
             "total": decision_total,
-            "distinct_signals": int(decision_row[1] or 0),
-            "distinct_signal_stage_decisions": distinct_decision_states,
-            "repeated_decisions": max(0, decision_total - distinct_decision_states),
-            "repeat_rate": round(
-                ((decision_total - distinct_decision_states) / decision_total) * 100.0,
+            "sample_size": sample_decisions,
+            "distinct_signals_in_sample": distinct_sample_signals,
+            "distinct_sample_signal_stage_decisions": distinct_sample_states,
+            "sample_repeated_decisions": max(0, sample_decisions - distinct_sample_states),
+            "sample_repeat_rate": round(
+                ((sample_decisions - distinct_sample_states) / sample_decisions) * 100.0,
                 2,
             )
-            if decision_total
+            if sample_decisions
             else 0.0,
-            "first_ts": decision_row[3],
-            "last_ts": decision_row[4],
+            "first_ts": decision_row[1],
+            "last_ts": decision_row[2],
             "by_decision": decisions,
             "by_stage": stages,
             "top_reasons": reasons,
         },
         "feature_coverage": {
-            "market_cap_pct": coverage(signal_row[4]),
-            "liquidity_pct": coverage(signal_row[5]),
-            "volume_m5_pct": coverage(signal_row[6]),
-            "attention_pct": coverage(signal_row[7]),
-            "risk_pct": coverage(signal_row[8]),
+            "sample_size": signal_sample_total,
+            "market_cap_pct": coverage(signal_sample_row[2]),
+            "liquidity_pct": coverage(signal_sample_row[3]),
+            "volume_m5_pct": coverage(signal_sample_row[4]),
+            "attention_pct": coverage(signal_sample_row[5]),
+            "risk_pct": coverage(signal_sample_row[6]),
         },
         "usage_guidance": {
             "safe_uses": [

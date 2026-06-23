@@ -412,8 +412,11 @@ def learning_engine_health_dashboard(hours: int = 6):
 
 
 @router.get("/learning/history/summary")
-def learning_history_summary(hours: int | None = None):
-    return get_historical_corpus_summary(hours=max(1, hours) if hours is not None else None)
+def learning_history_summary(hours: int | None = None, sample_limit: int = 10_000):
+    return get_historical_corpus_summary(
+        hours=max(1, hours) if hours is not None else None,
+        sample_limit=sample_limit,
+    )
 
 
 @router.post("/learning/internal/signals")

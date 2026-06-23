@@ -190,11 +190,11 @@ def test_historical_corpus_summary_aggregates_duplicates_and_feature_coverage(tm
     summary = sls.get_historical_corpus_summary()
 
     assert summary["signals"]["total"] == 1
-    assert summary["signals"]["distinct_tokens"] == 1
+    assert summary["signals"]["distinct_tokens_in_sample"] == 1
     assert summary["decisions"]["total"] == 2
-    assert summary["decisions"]["distinct_signal_stage_decisions"] == 1
-    assert summary["decisions"]["repeated_decisions"] == 1
-    assert summary["decisions"]["repeat_rate"] == 50.0
+    assert summary["decisions"]["distinct_sample_signal_stage_decisions"] == 1
+    assert summary["decisions"]["sample_repeated_decisions"] == 1
+    assert summary["decisions"]["sample_repeat_rate"] == 50.0
     assert summary["decisions"]["top_reasons"][0] == {
         "reason": "wallet_distribution_high_risk",
         "count": 2,
