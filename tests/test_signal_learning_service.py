@@ -83,10 +83,47 @@ def test_due_snapshot_jobs_skip_stale_work_and_report_backlog(tmp_path, monkeypa
     jobs = sls._fetch_due_jobs(limit=10)
     storage = sls.get_learning_storage_status()
 
-    assert [(job["signal_id"], job["horizon_minutes"]) for job in jobs] == [(signal_id, 5)]
+    assert [(job["signal_id"], job["horizon_minutes"]) for job in jobs] == [
+        (signal_id, 0),
+        (signal_id, 5),
+    ]
     assert storage["snapshot_job_counts"]["pending"] == len(sls.SNAPSHOT_HORIZONS_MINUTES)
     assert storage["stale_pending_snapshot_jobs"] == 1
     assert storage["snapshot_max_lag_seconds"] == 3600
+
+
+def test_snapshot_horizons_include_immediate_market_baseline():
+    assert sls.SNAPSHOT_HORIZONS_MINUTES[0] == 0
+    assert sls.SNAPSHOT_HORIZONS_MINUTES[-1] == 240
+
+
+def test_signal_baseline_uses_immediate_snapshot_when_event_metrics_are_missing(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    event = Event(type="trade_buy", source="test", token="token-baseline", ts=1_800_000_000, extra={})
+    signal_id = sls.record_signal_event(event)
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, 0, ?, 'dex', 10000, 5000, 3000, 2, 5, 10, 20, 8, NULL, NULL, NULL, 'insufficient_data', '{}')
+            """,
+            (signal_id, 1_800_000_001),
+        )
+
+    baseline = sls._get_signal_baseline(signal_id)
+
+    assert baseline is not None
+    assert baseline["market_cap_usd"] == 10000
+    assert baseline["liquidity_usd"] == 5000
+    assert baseline["volume_m5_usd"] == 3000
+    assert baseline["txns_m5_buys"] == 20
 
 
 def test_record_signal_event_updates_existing_external_ref(tmp_path, monkeypatch):

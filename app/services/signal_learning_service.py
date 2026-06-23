@@ -28,7 +28,7 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 DB_PATH = resolve_engine_db_path()
-SNAPSHOT_HORIZONS_MINUTES = (5, 15, 60, 240)
+SNAPSHOT_HORIZONS_MINUTES = (0, 5, 15, 60, 240)
 SNAPSHOT_POLL_SECONDS = 30
 REPORT_POLL_SECONDS = 600
 _SCHEMA_READY = False
@@ -6405,9 +6405,18 @@ def _get_signal_baseline(signal_id: str) -> dict[str, Any] | None:
             """,
             (signal_id,),
         ).fetchone()
+        initial_snapshot = c.execute(
+            """
+            SELECT lifecycle, market_cap_usd, liquidity_usd, volume_m5_usd, age_minutes,
+                   price_change_m5, price_change_h1, txns_m5_buys, txns_m5_sells
+            FROM signal_snapshots
+            WHERE signal_id=? AND horizon_minutes=0
+            """,
+            (signal_id,),
+        ).fetchone()
     if not row:
         return None
-    return {
+    baseline = {
         "token": row[0],
         "lifecycle": row[1],
         "market_cap_usd": row[2],
@@ -6419,6 +6428,22 @@ def _get_signal_baseline(signal_id: str) -> dict[str, Any] | None:
         "txns_m5_buys": row[8],
         "txns_m5_sells": row[9],
     }
+    if initial_snapshot:
+        snapshot_fields = (
+            "lifecycle",
+            "market_cap_usd",
+            "liquidity_usd",
+            "volume_m5_usd",
+            "age_minutes",
+            "price_change_m5",
+            "price_change_h1",
+            "txns_m5_buys",
+            "txns_m5_sells",
+        )
+        for index, field in enumerate(snapshot_fields):
+            if baseline.get(field) is None and initial_snapshot[index] is not None:
+                baseline[field] = initial_snapshot[index]
+    return baseline
 
 
 async def capture_snapshot(signal_id: str, horizon_minutes: int, token: str) -> None:
