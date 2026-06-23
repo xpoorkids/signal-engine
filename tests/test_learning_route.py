@@ -189,9 +189,21 @@ def test_learning_internal_ingest_routes_persist_rows(tmp_path, monkeypatch):
     assert decision_response.status_code == 200
     assert decision_response.json()["signal_id"] == signal_id
 
+    heartbeat_response = client.post(
+        "/learning/internal/heartbeat",
+        headers={"X-Signal-Engine-Token": "secret-token"},
+        json={"service_role": "worker", "heartbeat_ts": 2_000_000_000, "metadata": {"deploy_sha": "abc123"}},
+    )
+    assert heartbeat_response.status_code == 200
+
+    health = client.get("/learning/health?hours=1").json()
+    assert health["worker_heartbeat"]["status"] == "healthy"
+    assert health["worker_heartbeat"]["metadata"]["deploy_sha"] == "abc123"
+
     with sls._connect() as c:
         assert c.execute("SELECT COUNT(1) FROM signals WHERE signal_id=?", (signal_id,)).fetchone()[0] == 1
         assert c.execute("SELECT COUNT(1) FROM signal_decisions WHERE signal_id=?", (signal_id,)).fetchone()[0] == 1
+        assert c.execute("SELECT COUNT(1) FROM runtime_heartbeats WHERE service_role='worker'").fetchone()[0] == 1
 
 
 def test_learning_internal_ingest_rejects_bad_token(tmp_path, monkeypatch):

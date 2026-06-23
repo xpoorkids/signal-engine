@@ -230,6 +230,7 @@ from app.services.db_service import resolve_engine_db_path
 from app.services.signal_learning_service import (
     init as learning_init,
     record_signal_event,
+    record_runtime_heartbeat,
     snapshot_worker,
     daily_report_worker,
 )
@@ -428,7 +429,11 @@ async def heartbeat_loop() -> None:
     last_heartbeat = 0.0
     while True:
         if time.time() - last_heartbeat > 30:
-            logger.info("[heartbeat] worker alive")
+            persisted = record_runtime_heartbeat(
+                service_role="worker",
+                metadata={"deploy_sha": os.getenv("RENDER_GIT_COMMIT", "unknown")},
+            )
+            logger.info("[heartbeat] worker alive persisted=%s", persisted)
             last_heartbeat = time.time()
         await asyncio.sleep(1)
 

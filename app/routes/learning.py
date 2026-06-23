@@ -22,6 +22,7 @@ from app.services.signal_learning_service import (
     get_missed_runner_analysis,
     ingest_signal_decision,
     ingest_signal_event,
+    ingest_runtime_heartbeat,
     get_learning_digest,
     get_latest_learning_report,
     get_policy_regime_summary,
@@ -431,6 +432,15 @@ def learning_internal_decision_ingest(
         return ingest_signal_decision(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/learning/internal/heartbeat")
+def learning_internal_heartbeat(
+    payload: dict[str, object] = Body(...),
+    x_signal_engine_token: str | None = Header(default=None),
+):
+    _validate_internal_write_token(x_signal_engine_token)
+    return ingest_runtime_heartbeat(payload)
 
 
 @router.get("/learning/tuning/proposals")

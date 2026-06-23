@@ -216,6 +216,15 @@ def init() -> None:
         )
         c.execute(
             """
+            CREATE TABLE IF NOT EXISTS runtime_heartbeats (
+                service_role TEXT PRIMARY KEY,
+                heartbeat_ts INTEGER NOT NULL,
+                metadata_json TEXT NOT NULL
+            )
+            """
+        )
+        c.execute(
+            """
             CREATE TABLE IF NOT EXISTS tuning_approvals (
                 approval_id TEXT PRIMARY KEY,
                 created_ts INTEGER NOT NULL,
@@ -513,6 +522,37 @@ def get_learning_storage_status() -> dict[str, Any]:
         "snapshot_max_lag_seconds": _snapshot_max_lag_seconds(),
         "write_config": write_config,
     }
+
+
+def ingest_runtime_heartbeat(payload: dict[str, Any]) -> dict[str, Any]:
+    _ensure_schema()
+    service_role = str(payload.get("service_role") or "unknown").strip().lower() or "unknown"
+    heartbeat_ts = int(payload.get("heartbeat_ts") or time.time())
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    with _connect() as c:
+        c.execute(
+            """
+            INSERT INTO runtime_heartbeats (service_role, heartbeat_ts, metadata_json)
+            VALUES (?, ?, ?)
+            ON CONFLICT(service_role) DO UPDATE SET
+                heartbeat_ts=excluded.heartbeat_ts,
+                metadata_json=excluded.metadata_json
+            """,
+            (service_role, heartbeat_ts, _json_dumps(metadata)),
+        )
+    return {"service_role": service_role, "heartbeat_ts": heartbeat_ts, "recorded": True}
+
+
+def record_runtime_heartbeat(*, service_role: str, metadata: dict[str, Any] | None = None) -> bool:
+    payload = {
+        "service_role": service_role,
+        "heartbeat_ts": int(time.time()),
+        "metadata": metadata or {},
+    }
+    write_config = _learning_write_config()
+    if write_config.get("remote_enabled"):
+        return _post_internal_learning_write("/learning/internal/heartbeat", payload) is not None
+    return bool(ingest_runtime_heartbeat(payload).get("recorded"))
 
 
 def _to_float(value: Any) -> float | None:
@@ -4827,6 +4867,9 @@ def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
             """,
             (cutoff,),
         ).fetchone()
+        worker_heartbeat_row = c.execute(
+            "SELECT heartbeat_ts, metadata_json FROM runtime_heartbeats WHERE service_role='worker'"
+        ).fetchone()
 
     counts_by_decision = summary.get("counts_by_decision") if isinstance(summary.get("counts_by_decision"), dict) else {}
     sent_count = sum(int(value or 0) for key, value in counts_by_decision.items() if str(key).endswith("sent"))
@@ -4854,6 +4897,20 @@ def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
             "created_ts": latest_decision_row[1],
             "token": latest_decision_row[2],
             "age_minutes": round(max(0.0, (time.time() - int(latest_decision_row[1] or 0)) / 60.0), 1),
+        }
+
+    worker_heartbeat = None
+    if worker_heartbeat_row:
+        try:
+            heartbeat_metadata = json.loads(worker_heartbeat_row[1] or "{}")
+        except Exception:
+            heartbeat_metadata = {}
+        heartbeat_age_seconds = max(0, int(time.time()) - int(worker_heartbeat_row[0] or 0))
+        worker_heartbeat = {
+            "heartbeat_ts": int(worker_heartbeat_row[0] or 0),
+            "age_seconds": heartbeat_age_seconds,
+            "status": "healthy" if heartbeat_age_seconds <= 90 else "stale",
+            "metadata": heartbeat_metadata if isinstance(heartbeat_metadata, dict) else {},
         }
 
     status = "quiet"
@@ -4896,6 +4953,7 @@ def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
         "block_pressure": block_pressure,
         "latest_signal": latest_signal,
         "latest_decision": latest_decision,
+        "worker_heartbeat": worker_heartbeat,
         "top_skip_reasons": top_reasons,
         "storage": storage,
         "write_config": write_config,
