@@ -4,6 +4,7 @@ import asyncio
 import json
 
 from app.services import signal_learning_service as sls
+from app.services import tuning_service as ts
 from app.services.tuning_service import (
     apply_rollout_verification,
     apply_pending_rollout_verifications,
@@ -388,6 +389,32 @@ def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkey
     assert any(item["event_type"] == "required_profile_aligned" for item in aligned_notifications)
     active_notifications = list_rollout_notifications(limit=30, active_only=True)
     assert active_notifications
+
+
+def test_ops_digest_uses_fast_center(monkeypatch):
+    monkeypatch.setattr(
+        sls,
+        "get_engine_health_digest",
+        lambda **kwargs: {
+            "status": "processing",
+            "skip_pressure": 0.0,
+            "block_pressure": 0.0,
+            "storage": {"signal_count": 1, "decision_count": 1},
+        },
+    )
+    monkeypatch.setattr(
+        sls,
+        "get_diagnostics_summary",
+        lambda **kwargs: {"counts_by_decision": {"sent": 1}, "top_skip_reasons": []},
+    )
+    monkeypatch.setattr(ts, "get_tuning_rollout_summary", lambda: {"worker_engine_alignment": [], "recommended_actions": []})
+    monkeypatch.setattr(ts, "list_rollout_notifications", lambda **kwargs: [])
+    monkeypatch.setattr(ts, "get_operator_command_center", lambda **kwargs: (_ for _ in ()).throw(AssertionError("full center should not run")))
+
+    digest = get_ops_digest(hours=24)
+
+    assert digest["command_center"]["mode"] == "fast"
+    assert digest["severity"] == "info"
 
 
 def test_ops_digest_worker_runs_single_iteration(monkeypatch):

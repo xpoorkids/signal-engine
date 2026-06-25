@@ -86,6 +86,41 @@ def test_learning_history_summary_route_returns_aggregate(tmp_path, monkeypatch)
     assert response.json()["signals"]["sample_size"] == 1
 
 
+def test_learning_admin_snapshot_job_prune_requires_token_and_deletes_stale_jobs(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN", "secret")
+    monkeypatch.setenv("SIGNAL_ENGINE_SNAPSHOT_MAX_LAG_SECONDS", "3600")
+    now = 1_800_000_000
+    monkeypatch.setattr(sls.time, "time", lambda: now)
+    sls.init()
+
+    signal_id = sls.record_signal_event(
+        Event(type="candidate", source="test", token="token-route-prune", ts=now - 300, extra={}),
+        external_ref="route-prune",
+    )
+    with sls._connect() as c:
+        c.execute(
+            "UPDATE signal_snapshot_jobs SET due_ts=? WHERE signal_id=? AND horizon_minutes=15",
+            (now - 7200, signal_id),
+        )
+
+    client = TestClient(main.app)
+
+    forbidden = client.post("/learning/admin/snapshot-jobs/prune")
+    assert forbidden.status_code == 403
+
+    response = client.post(
+        "/learning/admin/snapshot-jobs/prune?limit=10",
+        headers={"x-signal-engine-token": "secret"},
+    )
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["deleted"] == 1
+    assert payload["stale_pending_remaining"] == 0
+
+
 def test_learning_diagnostics_route_returns_summary(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

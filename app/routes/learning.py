@@ -39,6 +39,7 @@ from app.services.signal_learning_service import (
     get_policy_trace_summary,
     get_policy_replay,
     get_policy_validation_comparison,
+    prune_stale_snapshot_jobs,
     resolve_live_policy,
     run_policy_automation_cycle,
     run_policy_replay,
@@ -450,6 +451,16 @@ def learning_internal_heartbeat(
 ):
     _validate_internal_write_token(x_signal_engine_token)
     return ingest_runtime_heartbeat(payload)
+
+
+@router.post("/learning/admin/snapshot-jobs/prune")
+def learning_admin_prune_snapshot_jobs(
+    max_age_seconds: int | None = None,
+    limit: int = 10_000,
+    x_signal_engine_token: str | None = Header(default=None),
+):
+    _validate_internal_write_token(x_signal_engine_token)
+    return prune_stale_snapshot_jobs(max_age_seconds=max_age_seconds, limit=limit)
 
 
 @router.get("/learning/tuning/proposals")

@@ -2909,8 +2909,45 @@ def render_operator_command_center_html(hours: int = 24) -> str:
 </html>"""
 
 
+def _get_ops_digest_center(hours: int = 24) -> dict[str, Any]:
+    lookback = max(1, int(hours))
+    engine_health = sls.get_engine_health_digest(hours=lookback)
+    diagnostics = sls.get_diagnostics_summary(hours=lookback)
+    rollout_summary = get_tuning_rollout_summary()
+    notifications = list_rollout_notifications(limit=25, active_only=True)
+    recommended_actions: list[str] = []
+    rollout_actions = rollout_summary.get("recommended_actions")
+    if isinstance(rollout_actions, list):
+        recommended_actions.extend(str(item) for item in rollout_actions if item)
+    status = str(engine_health.get("status") or "unknown")
+    storage = engine_health.get("storage") if isinstance(engine_health.get("storage"), dict) else {}
+    if status in {"cold", "quiet"}:
+        recommended_actions.insert(0, f"Engine status is {status}. Check gate pressure and recent decision flow before changing thresholds.")
+    elif status in {"gated", "blocked"}:
+        recommended_actions.insert(0, f"Engine status is {status}. Review recent skip/block reasons before rolling out more aggressive profiles.")
+    if (
+        status == "cold"
+        and int(storage.get("signal_count") or 0) == 0
+        and int(storage.get("decision_count") or 0) == 0
+    ):
+        recommended_actions.insert(
+            0,
+            f"Learning DB is empty at {storage.get('db_path', 'unknown')}. Verify worker and engine share SIGNAL_ENGINE_DB_PATH or the same mounted disk path.",
+        )
+    return {
+        "lookback_hours": lookback,
+        "engine_health": engine_health,
+        "diagnostics": diagnostics,
+        "rollout_summary": rollout_summary,
+        "drift": {},
+        "notifications": notifications,
+        "recommended_actions": recommended_actions,
+        "mode": "fast",
+    }
+
+
 def get_ops_digest(hours: int = 24) -> dict[str, Any]:
-    center = get_operator_command_center(hours=max(1, hours))
+    center = _get_ops_digest_center(hours=max(1, hours))
     engine_health = center.get("engine_health") if isinstance(center.get("engine_health"), dict) else {}
     diagnostics = center.get("diagnostics") if isinstance(center.get("diagnostics"), dict) else {}
     rollout_summary = center.get("rollout_summary") if isinstance(center.get("rollout_summary"), dict) else {}

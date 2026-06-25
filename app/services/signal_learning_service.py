@@ -5757,8 +5757,12 @@ def get_live_validation_records(
     return records
 
 
-def get_missed_runner_analysis(*, hours: int = 168, limit: int = 50) -> dict[str, Any]:
-    records = get_live_validation_records(hours=hours, limit=max(limit * 5, 200), sent_only=False)
+def _build_missed_runner_analysis(
+    records: list[dict[str, Any]],
+    *,
+    hours: int = 168,
+    limit: int = 50,
+) -> dict[str, Any]:
     missed: list[dict[str, Any]] = []
     for record in records:
         if record.get("sent_to_discord"):
@@ -5810,8 +5814,13 @@ def get_missed_runner_analysis(*, hours: int = 168, limit: int = 50) -> dict[str
     }
 
 
-def get_policy_validation_comparison(*, hours: int = 168, limit: int = 12) -> dict[str, Any]:
-    records = get_live_validation_records(hours=hours, limit=5000, sent_only=False)
+def get_missed_runner_analysis(*, hours: int = 168, limit: int = 50) -> dict[str, Any]:
+    records = get_live_validation_records(hours=hours, limit=max(limit * 5, 200), sent_only=False)
+    return _build_missed_runner_analysis(records, hours=hours, limit=limit)
+
+
+def get_policy_validation_comparison(*, hours: int = 168, limit: int = 12, record_limit: int = 5000) -> dict[str, Any]:
+    records = get_live_validation_records(hours=hours, limit=max(1, record_limit), sent_only=False)
     grouped: dict[str, dict[str, Any]] = {}
     for record in records:
         descriptor = record.get("thresholds_used") if isinstance(record.get("thresholds_used"), dict) else {}
@@ -5884,9 +5893,15 @@ def get_policy_validation_comparison(*, hours: int = 168, limit: int = 12) -> di
 
 
 def get_live_validation_summary(*, hours: int = 72, limit: int = 200) -> dict[str, Any]:
-    records = get_live_validation_records(hours=hours, limit=max(limit, 300), sent_only=False)
-    missed = get_missed_runner_analysis(hours=hours, limit=max(10, min(50, limit)))
-    comparison = get_policy_validation_comparison(hours=max(hours, 24), limit=8)
+    result_limit = max(1, min(int(limit), 500))
+    records_limit = max(result_limit, 300)
+    records = get_live_validation_records(hours=hours, limit=records_limit, sent_only=False)
+    missed = _build_missed_runner_analysis(records, hours=hours, limit=max(10, min(50, result_limit)))
+    comparison = get_policy_validation_comparison(
+        hours=max(hours, 24),
+        limit=8,
+        record_limit=max(300, min(1000, records_limit * 2)),
+    )
 
     route_counts: dict[str, int] = {}
     sent_route_counts: dict[str, int] = {}
@@ -6582,6 +6597,46 @@ def _fetch_due_jobs(limit: int = 10) -> list[dict[str, Any]]:
         {"signal_id": row[0], "horizon_minutes": row[1], "token": row[2]}
         for row in rows
     ]
+
+
+def prune_stale_snapshot_jobs(*, max_age_seconds: int | None = None, limit: int = 10_000) -> dict[str, Any]:
+    _ensure_schema()
+    now = int(time.time())
+    age_seconds = max(1, int(max_age_seconds or _snapshot_max_lag_seconds()))
+    prune_limit = max(1, min(int(limit), 100_000))
+    stale_before = now - age_seconds
+    with _connect() as c:
+        before = c.execute(
+            "SELECT COUNT(1) FROM signal_snapshot_jobs WHERE status='pending' AND due_ts < ?",
+            (stale_before,),
+        ).fetchone()[0]
+        c.execute(
+            """
+            DELETE FROM signal_snapshot_jobs
+            WHERE rowid IN (
+                SELECT rowid
+                FROM signal_snapshot_jobs
+                WHERE status='pending' AND due_ts < ?
+                ORDER BY due_ts ASC
+                LIMIT ?
+            )
+            """,
+            (stale_before, prune_limit),
+        )
+        deleted = c.execute("SELECT changes()").fetchone()[0]
+        remaining = c.execute(
+            "SELECT COUNT(1) FROM signal_snapshot_jobs WHERE status='pending' AND due_ts < ?",
+            (stale_before,),
+        ).fetchone()[0]
+    return {
+        "status": "ok",
+        "deleted": int(deleted or 0),
+        "stale_pending_before": int(before or 0),
+        "stale_pending_remaining": int(remaining or 0),
+        "limit": prune_limit,
+        "max_age_seconds": age_seconds,
+        "stale_before_ts": stale_before,
+    }
 
 
 def _mark_job_running(signal_id: str, horizon_minutes: int) -> None:

@@ -92,6 +92,46 @@ def test_due_snapshot_jobs_skip_stale_work_and_report_backlog(tmp_path, monkeypa
     assert storage["snapshot_max_lag_seconds"] == 3600
 
 
+def test_prune_stale_snapshot_jobs_removes_only_old_pending_jobs(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_SNAPSHOT_MAX_LAG_SECONDS", "3600")
+    now = 1_800_000_000
+    monkeypatch.setattr(sls.time, "time", lambda: now)
+    sls.init()
+
+    event = Event(type="candidate", source="test", token="token-prune-jobs", ts=now - 300, extra={})
+    signal_id = sls.record_signal_event(event, external_ref="prune-jobs")
+    with sls._connect() as c:
+        c.execute(
+            "UPDATE signal_snapshot_jobs SET due_ts=? WHERE signal_id=? AND horizon_minutes=5",
+            (now - 30, signal_id),
+        )
+        c.execute(
+            "UPDATE signal_snapshot_jobs SET due_ts=? WHERE signal_id=? AND horizon_minutes=15",
+            (now - 7200, signal_id),
+        )
+        c.execute(
+            "UPDATE signal_snapshot_jobs SET status='done', due_ts=? WHERE signal_id=? AND horizon_minutes=60",
+            (now - 7200, signal_id),
+        )
+
+    result = sls.prune_stale_snapshot_jobs(limit=10)
+
+    with sls._connect() as c:
+        rows = c.execute(
+            "SELECT horizon_minutes, status FROM signal_snapshot_jobs WHERE signal_id=? ORDER BY horizon_minutes",
+            (signal_id,),
+        ).fetchall()
+
+    assert result["deleted"] == 1
+    assert result["stale_pending_before"] == 1
+    assert result["stale_pending_remaining"] == 0
+    row_pairs = [(int(row[0]), str(row[1])) for row in rows]
+    assert (15, "pending") not in row_pairs
+    assert (60, "done") in row_pairs
+
+
 def test_snapshot_horizons_include_immediate_market_baseline():
     assert sls.SNAPSHOT_HORIZONS_MINUTES[0] == 0
     assert sls.SNAPSHOT_HORIZONS_MINUTES[-1] == 240
@@ -3074,6 +3114,25 @@ def test_live_validation_summary_tracks_alert_outcomes_and_buckets(tmp_path, mon
     assert summary["missed_runner_analysis"]["missed_runners"][0]["miss_bucket"] == "missed_sniper"
     assert summary["policy_comparison"]["variant_count"] >= 1
     assert summary["alerts"][0]["thresholds_used"]["policy_name"] == "live_policy"
+
+
+def test_live_validation_summary_uses_bounded_policy_comparison(monkeypatch):
+    captured: dict[str, int] = {}
+
+    monkeypatch.setattr(sls, "get_live_validation_records", lambda **kwargs: [])
+    monkeypatch.setattr(sls, "get_diagnostics_summary", lambda **kwargs: {"threshold_guidance": [], "top_skip_reasons": []})
+
+    def fake_policy_comparison(**kwargs):
+        captured.update(kwargs)
+        return {"lookback_hours": kwargs["hours"], "variant_count": 0, "variants": []}
+
+    monkeypatch.setattr(sls, "get_policy_validation_comparison", fake_policy_comparison)
+
+    summary = sls.get_live_validation_summary(hours=72, limit=10_000)
+
+    assert captured["record_limit"] == 1000
+    assert summary["total_tracked_opportunities"] == 0
+    assert summary["missed_runner_analysis"]["missed_runner_count"] == 0
 
 
 def test_live_validation_records_mark_unsent_decision_shells(tmp_path, monkeypatch):
