@@ -257,7 +257,7 @@ from worker.config import (
     PROM_MIN_LIQ_USD,
     PROMOTION_MIN_ATTENTION,
     PROMOTION_MAX_RISK,
-    TRADE_VALIDATION_MAX_WALLET_TOP_HOLDER_PCT,
+    WALLET_DISTRIBUTION_HARD_FAIL_TOP_HOLDER_PCT,
 )
 from worker.confidence import CONF_WEIGHTS, CAPS, bump
 from worker.wallet_risk import score_wallet_risk
@@ -321,10 +321,14 @@ def _wallet_distribution_fail_reasons(
         top_holder_pct = None
 
     if wallet_level == "high":
-        reasons.append("wallet_distribution_high_risk")
+        if (
+            top_holder_pct is not None
+            and top_holder_pct >= WALLET_DISTRIBUTION_HARD_FAIL_TOP_HOLDER_PCT
+        ):
+            reasons.append("wallet_distribution_high_risk")
     if (
         top_holder_pct is not None
-        and top_holder_pct >= TRADE_VALIDATION_MAX_WALLET_TOP_HOLDER_PCT
+        and top_holder_pct >= WALLET_DISTRIBUTION_HARD_FAIL_TOP_HOLDER_PCT
     ):
         reasons.append("wallet_top_holder_concentration")
     if total_buys_30s >= 6 and unique_wallets_30s <= 2 and top_wallet_share >= 0.70:

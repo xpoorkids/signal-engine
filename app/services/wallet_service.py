@@ -23,6 +23,24 @@ def _helius_url():
     return f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
 
+def _rpc_post(helius_url: str, payload: dict) -> dict:
+    r = requests.post(helius_url, json=payload, timeout=12)
+    r.raise_for_status()
+    return r.json().get("result", {}) or {}
+
+
+def _amount_float(item: dict) -> float | None:
+    value = item.get("uiAmount")
+    if value is None:
+        value = item.get("uiAmountString")
+    if value is None:
+        value = item.get("amount")
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
 def wallet_risk_score(token_mint: str) -> dict:
     cached = _CACHE.get(token_mint)
     now = time.time()
@@ -42,17 +60,22 @@ def wallet_risk_score(token_mint: str) -> dict:
         _CACHE[token_mint] = (now + WALLET_RISK_CACHE_TTL_SEC, result)
         return dict(result)
 
-    payload = {
+    largest_payload = {
         "jsonrpc": "2.0",
         "id": "1",
         "method": "getTokenLargestAccounts",
         "params": [token_mint],
     }
+    supply_payload = {
+        "jsonrpc": "2.0",
+        "id": "2",
+        "method": "getTokenSupply",
+        "params": [token_mint],
+    }
 
     try:
-        r = requests.post(helius_url, json=payload, timeout=12)
-        r.raise_for_status()
-        result = r.json().get("result", {})
+        largest_result = _rpc_post(helius_url, largest_payload)
+        supply_result = _rpc_post(helius_url, supply_payload)
     except Exception:
         output = {
             "enabled": True,
@@ -64,25 +87,23 @@ def wallet_risk_score(token_mint: str) -> dict:
         }
         _CACHE[token_mint] = (now + WALLET_RISK_CACHE_TTL_SEC, output)
         return dict(output)
-    accounts = result.get("value", []) or []
+    accounts = largest_result.get("value", []) or []
+    supply_value = supply_result.get("value") if isinstance(supply_result.get("value"), dict) else {}
+    total_supply = _amount_float(supply_value)
 
     amounts = []
     for a in accounts[:10]:
-        amt = a.get("uiAmount")
-        if amt is None:
-            amt = a.get("amount")
-        try:
-            amounts.append(float(amt))
-        except Exception:
-            pass
+        amount = _amount_float(a)
+        if amount is not None:
+            amounts.append(amount)
 
-    if not amounts:
+    if not amounts or total_supply is None or total_supply <= 0:
         output = {
             "enabled": True,
             "top_holder_pct": None,
             "top10_pct": None,
             "risk": None,
-            "reason": "no_holder_data",
+            "reason": "no_holder_supply_data" if amounts else "no_holder_data",
             "status": "insufficient_data",
         }
         _CACHE[token_mint] = (now + WALLET_RISK_CACHE_TTL_SEC, output)
@@ -90,8 +111,8 @@ def wallet_risk_score(token_mint: str) -> dict:
 
     total_top10 = sum(amounts)
     top1 = amounts[0]
-    top1_pct = top1 / total_top10 if total_top10 > 0 else None
-    top10_pct = 1.0
+    top1_pct = top1 / total_supply
+    top10_pct = total_top10 / total_supply
 
     risk = "ok"
     reason = "holder_ok"
