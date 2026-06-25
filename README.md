@@ -1,69 +1,170 @@
 # Signal Engine
 
-Production-oriented crypto signal engine for Solana token discovery, scoring, alerting, and post-alert learning.
+Production-oriented Solana signal engine for token discovery, deterministic scoring, Discord alerting, live validation, shadow execution, and post-alert learning.
 
-## What It Does
+The engine is built to stay explainable. Scoring and gates are explicit, while the learning layer observes outcomes and surfaces where the rules should be reviewed.
 
-- Ingests token activity from Helius and Dexscreener-derived enrichment paths.
-- Scores tokens with deterministic attention, risk, execution, creator, and promotion logic.
-- Publishes elite Discord alerts for candidate, watch, breakout, and risk-alert states.
-- Persists signal outcomes and generates learning reports without turning the engine into a black box.
+## Production Handles
 
-## System Shape
+- Live API: `https://signal-engine-e66l.onrender.com`
+- Main branch: `main`
+- Current production database path: `/var/data/engine.db` through `SIGNAL_ENGINE_DB_PATH`
+- Primary operator dashboard: `/learning/ops/readiness/dashboard?hours=6&limit=10`
+- Daily opportunities dashboard: `/learning/ops/daily-opportunities/dashboard?hours=6&limit=25`
+- Command center: `/learning/command-center/dashboard?hours=24`
 
-### Core pipeline
+## What It Has
 
-1. `worker.helius_listener` emits raw token/buy events.
-2. `worker.promote.process_event` enriches and scores events.
-3. `worker.runner` sends candidate/promoted/heating alerts to Discord.
-4. `app.services.signal_learning_service` records emitted signals and schedules post-alert snapshots.
-5. Daily learning reports summarize which setups and sessions performed best or worst.
+### Signal Pipeline
 
-### Major subsystems
+- Helius and Dexscreener-derived token ingestion.
+- Deterministic scoring for attention, risk, liquidity, wallet quality, creator quality, promotion, and execution validation.
+- Candidate, watch, heating, promoted, breakout, risk, and hard-fail routing.
+- Discord alert presentation for live candidates and promoted signals.
+- Repeat/collapse handling so repeated alerts are not treated as independent evidence.
 
-- `worker/`
-  Runtime scoring, enrichment, promotion, Discord formatting, and alert dispatch.
-- `app/services/`
-  State, review APIs, presentation contracts, learning persistence, and HTTP-facing services.
-- `app/routes/`
-  FastAPI routes for health, scan, score, review, watch summaries, and learning reports.
-- `state/engine.db`
-  SQLite database for engine state, candidate state, wallet state, and learning tables.
+### Learning Layer
 
-Shared DB path:
-- `SIGNAL_ENGINE_DB_PATH` can be set on both `engine` and `worker` to force both services to use the same SQLite file, for example on a mounted Render disk.
-- `STATE_ENGINE_DB_PATH` is supported as a fallback alias.
+- SQLite-backed learning tables for signals, decisions, snapshot jobs, snapshots, and reports.
+- Outcome windows at immediate, short, medium, and long horizons.
+- Labels such as `worked`, `failed`, `faded`, `strong_continuation`, `pending`, and `insufficient_data`.
+- Safe production summary endpoints that avoid expensive full-database scans.
+- Historical corpus summary for sampled analysis, feature coverage, decision distribution, repeat rate, and blocker pressure.
 
-## New Learning Layer
+Key routes:
 
-The engine remains deterministic. The learning layer observes outcomes around emitted signals.
-
-Tables added:
-
-- `signals`
-- `signal_snapshot_jobs`
-- `signal_snapshots`
-- `learning_reports`
-
-Features:
-
-- records every emitted candidate/heating/promoted alert
-- attaches session/daypart features
-- captures snapshots at `+5m`, `+15m`, `+1h`, `+4h`
-- classifies outcomes like `worked`, `failed`, `faded`, `strong_continuation`
-- generates daily learning summaries from real outcomes
-
-## HTTP Routes
-
-- `GET /health`
-- `POST /scan`
-- `POST /score`
-- `GET /packet/{symbol}`
-- `GET /watch/summary`
-- `GET /review/{token}`
-- `POST /review`
+- `GET /learning/health`
+- `GET /learning/history/summary?sample_limit=1000`
 - `GET /learning/report/latest`
 - `GET /learning/report/{report_date}`
+- `GET /learning/digest`
+- `GET /learning/digest/dashboard`
+
+### Daily Opportunities
+
+The daily opportunity feed is the main "what should I inspect today?" surface.
+
+It ranks recent live-validation records by:
+
+- positive unsent outcomes
+- pending but active watch candidates
+- wallet-blocked runners
+- route class
+- attention score
+- risk score
+- market-cap movement
+- severe safety penalties
+
+It now includes:
+
+- `positive_unsent`: runners that had positive outcomes but were not sent.
+- `top_blocker_families`: the gate families currently blocking the most activity.
+- `blocker_tuning`: evidence-based recommendations such as `manual_watchlist_override`, `review_relaxation`, `keep_strict`, or `tighten_or_keep_strict`.
+- `shadow_summary`: aggregate shadow P&L coverage for the top feed.
+- per-opportunity `shadow_execution`: latest shadow position and net P&L when available.
+
+Key routes:
+
+- `GET /learning/ops/daily-opportunities?hours=6&limit=25`
+- `GET /learning/ops/daily-opportunities/dashboard?hours=6&limit=25`
+- `GET /learning/ops/daily-opportunities/text?hours=6&limit=10`
+- `POST /learning/ops/daily-opportunities/send`
+
+The feed is an operator triage surface, not a buy command.
+
+### Readiness Dashboard
+
+The readiness endpoint combines ops health, daily opportunities, blocker tuning, and shadow P&L coverage into one daily operating view.
+
+It returns:
+
+- `ready_state`: `ready` or `needs_review`
+- `attention_reasons`
+- ops digest severity and counts
+- learning health
+- positive unsent opportunity count
+- shadow P&L coverage
+- top opportunities
+- blocker tuning recommendations
+- operator links for the next dashboards to inspect
+
+Key routes:
+
+- `GET /learning/ops/readiness?hours=6&limit=10`
+- `GET /learning/ops/readiness/dashboard?hours=6&limit=10`
+
+Current expected review flags include:
+
+- `positive_unsent_opportunities`
+- `blocker_tuning_review_available`
+- `shadow_pnl_not_available_for_top_feed`
+- ops pressure flags such as `no_sends_with_pressure`
+
+### Shadow Execution
+
+Shadow execution tracks paper positions for validated signals so the engine can compare alerts, misses, and gate decisions against simulated P&L.
+
+It records:
+
+- signal id and token
+- entry intent and quote metadata
+- transaction intent
+- submission lifecycle state
+- open/closed status
+- entry price
+- mark-to-market price and liquidity
+- gross and net P&L
+- peak/trough P&L
+- exit reason
+- take-profit, stop-loss, and max-hold settings
+
+Important environment variables:
+
+- `ENABLE_SHADOW_EXECUTION`
+- `SHADOW_EXECUTION_POLL_SECONDS`
+- `SHADOW_EXECUTION_TAKE_PROFIT_PCT`
+- `SHADOW_EXECUTION_STOP_LOSS_PCT`
+- `SHADOW_EXECUTION_MAX_HOLD_MINUTES`
+- `SHADOW_EXECUTION_ENTRY_FEE_BPS`
+- `SHADOW_EXECUTION_EXIT_FEE_BPS`
+- `SHADOW_EXECUTION_FIXED_ENTRY_COST_USD`
+- `SHADOW_EXECUTION_FIXED_EXIT_COST_USD`
+
+### Ops Digest And Notifications
+
+The ops digest watches engine health, skip pressure, promotion blocks, config drift, rollout notifications, and incident state.
+
+Key routes:
+
+- `GET /learning/ops/digest?hours=24`
+- `GET /learning/ops/digest/dashboard?hours=24`
+- `GET /learning/ops/digest/text?hours=24`
+- `POST /learning/ops/digest/send`
+- `GET /learning/tuning/notifications`
+- `GET /learning/tuning/notifications/dashboard`
+- `GET /learning/tuning/incidents`
+- `GET /learning/tuning/incidents/dashboard`
+- `POST /learning/tuning/incidents/state`
+- `POST /learning/tuning/notifications/{notification_id}/state`
+
+Digest event types:
+
+- `incident_digest`
+- `degraded_digest`
+- `daily_summary`
+- `daily_opportunity_digest`
+
+Webhook delivery:
+
+- `SIGNAL_ENGINE_OPS_WEBHOOK_URL` or `OPS_WEBHOOK_URL` must be configured for outbound ops digest delivery.
+- If neither is configured, notifications are recorded but delivery status is `disabled` with `ops_webhook_not_configured`.
+
+### Tuning And Rollouts
+
+The tuning system generates proposals, compares profiles, records approvals, tracks rollout metadata, and verifies behavior after rollout.
+
+Key routes:
+
 - `GET /learning/tuning/proposals`
 - `GET /learning/tuning/proposals/dashboard`
 - `GET /learning/tuning/proposals/env`
@@ -84,74 +185,113 @@ Features:
 - `GET /learning/tuning/verification/dashboard`
 - `POST /learning/tuning/verification/apply`
 - `POST /learning/tuning/verification/run`
-- `GET /learning/tuning/notifications`
-- `GET /learning/tuning/notifications/dashboard`
-- `GET /learning/tuning/incidents`
-- `GET /learning/tuning/incidents/dashboard`
-- `POST /learning/tuning/incidents/state`
-- `POST /learning/tuning/notifications/{notification_id}/state`
-- `GET /learning/command-center`
-- `GET /learning/command-center/dashboard`
-- `GET /learning/ops/digest`
-- `GET /learning/ops/digest/dashboard`
-- `GET /learning/ops/digest/text`
-- `POST /learning/ops/digest/send`
 
-Ops digest behavior:
-- `SIGNAL_ENGINE_OPS_DIGEST_COOLDOWN_SEC` controls duplicate digest suppression for unchanged alert states.
-- `SIGNAL_ENGINE_OPS_DIGEST_POLL_SEC` controls how often the worker evaluates and emits the ops digest.
-- `SIGNAL_ENGINE_OPS_DIGEST_HOURS` controls the digest lookback window used by the background worker.
-- `SIGNAL_ENGINE_OPS_DAILY_SUMMARY_HOURS` controls the lookback window used for daily-summary digests.
-- `SIGNAL_ENGINE_OPS_DEGRADED_SKIP_PRESSURE` and `SIGNAL_ENGINE_OPS_INCIDENT_SKIP_PRESSURE` tune skip-pressure escalation.
-- `SIGNAL_ENGINE_OPS_DEGRADED_BLOCK_PRESSURE` and `SIGNAL_ENGINE_OPS_INCIDENT_BLOCK_PRESSURE` tune promotion-block escalation.
-- `SIGNAL_ENGINE_OPS_INCIDENT_NOTIFICATION_COUNT` tunes rollout-notification escalation.
-- `SIGNAL_ENGINE_OPS_CRITICAL_DRIFT_PROFILES` tunes multi-profile drift escalation.
-- `SIGNAL_ENGINE_OPS_INCIDENT_ZERO_SEND_MIN_SKIPS` tunes the zero-send-with-pressure incident trigger.
-- `SIGNAL_ENGINE_OPS_DEGRADED_REMINDER_SEC` controls degraded-state reminder cadence.
-- `SIGNAL_ENGINE_OPS_DAILY_SUMMARY_INTERVAL_SEC` controls daily-summary send cadence.
+Rollout metadata can be supplied directly or inferred from:
 
-Discord ops links:
-- `SIGNAL_ENGINE_PUBLIC_BASE_URL` enables command-center, verification, and incidents links inside Discord alert actions.
+- `SIGNAL_ENGINE_DEPLOY_SERVICE`
+- `SIGNAL_ENGINE_DEPLOY_SHA`
+- `SIGNAL_ENGINE_DEPLOY_ENV`
+- Render metadata such as `RENDER_SERVICE_NAME`, `RENDER_SERVICE_ID`, `RENDER_GIT_COMMIT`, and `RENDER_EXTERNAL_HOSTNAME`
 
-Scheduled digest tiers:
-- `incident_digest` for `incident` and `critical` states
-- `degraded_digest` for degraded conditions
-- `daily_summary` on its own cadence regardless of urgent state
+### Command Center
 
-Notification controls:
-- `GET /learning/tuning/notifications?active_only=true` returns only unacknowledged and unsnoozed notifications.
-- `GET /learning/tuning/incidents` returns clustered incidents by event, target, and service.
-- `POST /learning/tuning/incidents/state` supports incident-level `acknowledged`, `snoozed`, and `resolved` transitions.
-- `POST /learning/tuning/notifications/{notification_id}/state` supports acknowledgment and snoozing for operator triage.
+The command center is the broader operator dashboard for regime state, policy actions, incident snapshots, rollout verification, automation runs, and strategy synthesis.
 
-Rollout verification:
-- `GET /learning/tuning/verification` compares pre- and post-rollout engine behavior for a rolled-out approval.
-- `GET /learning/tuning/verification/dashboard` renders the same verification as an operator HTML page.
-- `POST /learning/tuning/verification/apply` persists verification state back onto the approval record.
-- `POST /learning/tuning/verification/run` runs verification across recent rolled-out approvals.
+Key routes:
 
-Rollout verification automation:
-- `SIGNAL_ENGINE_ROLLOUT_VERIFY_POLL_SEC` controls the background verification sweep cadence.
-- `SIGNAL_ENGINE_ROLLOUT_VERIFY_MIN_AGE_SEC` controls how long a rollout must age before automatic verification.
+- `GET /learning/command-center?hours=24`
+- `GET /learning/command-center/dashboard?hours=24`
+- `POST /learning/command-center/regime-action`
+
+### Validation And Missed Runners
+
+Live validation compares sent, skipped, blocked, and pending decisions against later observed outcomes.
+
+Key routes:
+
+- `GET /learning/validation/summary?hours=72&limit=200`
+- `GET /learning/validation/dashboard?hours=72&limit=200`
+- `GET /learning/validation/alerts?hours=72&limit=100`
+- `GET /learning/validation/missed?hours=168&limit=50`
+- `GET /learning/validation/policies?hours=168&limit=12`
+
+Use these routes to investigate whether a gate is preventing runners or protecting the system from weak setups.
+
+## System Shape
+
+### Runtime Flow
+
+1. `worker.helius_listener` emits raw token and buy events.
+2. `worker.promote.process_event` enriches and scores events.
+3. `worker.runner` sends Discord alerts and starts background workers.
+4. `app.services.signal_learning_service` records decisions, signals, outcomes, snapshots, and reports.
+5. `app.services.shadow_execution_service` records paper execution lifecycle and P&L.
+6. `app.services.tuning_service` builds ops digests, readiness summaries, tuning proposals, notifications, and rollout verification.
+
+### Main Directories
+
+- `worker/`
+  Runtime ingestion, enrichment, promotion, Discord formatting, execution validation, and background workers.
+- `app/services/`
+  Learning, tuning, shadow execution, scanning, persistence, and presentation services.
+- `app/routes/`
+  FastAPI routes for health, scan, score, watch, review, learning, ops, tuning, and dashboards.
+- `tests/`
+  Regression coverage for scoring, learning, routes, shadow execution, tuning, and ops surfaces.
+- `state/`
+  Local SQLite state for development. Production uses the configured Render disk path.
+
+## Important Environment Variables
+
+### Database And Runtime Role
+
+- `SIGNAL_ENGINE_DB_PATH`
+- `STATE_ENGINE_DB_PATH`
+- `SIGNAL_ENGINE_PROCESS_ROLE`
+- `SIGNAL_ENGINE_PUBLIC_BASE_URL`
+- `SIGNAL_ENGINE_LEARNING_WRITE_BASE_URL`
+
+### Discord And Ops
+
+- `DISCORD_WEBHOOK_URL`
+- `DISCORD_CANDIDATE_WEBHOOK`
+- `DISCORD_WEBHOOK_NEAR_PASS`
+- `DISCORD_WEBHOOK_PASS`
+- `DISCORD_WEBHOOK_RUG`
+- `DISCORD_WEBHOOK_LOGS`
+- `DISCORD_WEBHOOK_DIGEST`
+- `SIGNAL_ENGINE_OPS_WEBHOOK_URL`
+- `OPS_WEBHOOK_URL`
+
+### Ops Digest Policy
+
+- `SIGNAL_ENGINE_OPS_DIGEST_COOLDOWN_SEC`
+- `SIGNAL_ENGINE_OPS_DIGEST_POLL_SEC`
+- `SIGNAL_ENGINE_OPS_DIGEST_HOURS`
+- `SIGNAL_ENGINE_OPS_DAILY_SUMMARY_HOURS`
+- `SIGNAL_ENGINE_OPS_DEGRADED_SKIP_PRESSURE`
+- `SIGNAL_ENGINE_OPS_INCIDENT_SKIP_PRESSURE`
+- `SIGNAL_ENGINE_OPS_DEGRADED_BLOCK_PRESSURE`
+- `SIGNAL_ENGINE_OPS_INCIDENT_BLOCK_PRESSURE`
+- `SIGNAL_ENGINE_OPS_INCIDENT_NOTIFICATION_COUNT`
+- `SIGNAL_ENGINE_OPS_CRITICAL_DRIFT_PROFILES`
+- `SIGNAL_ENGINE_OPS_INCIDENT_ZERO_SEND_MIN_SKIPS`
+- `SIGNAL_ENGINE_OPS_DEGRADED_REMINDER_SEC`
+- `SIGNAL_ENGINE_OPS_DAILY_SUMMARY_INTERVAL_SEC`
+
+### Rollout Verification
+
+- `SIGNAL_ENGINE_ROLLOUT_VERIFY_POLL_SEC`
+- `SIGNAL_ENGINE_ROLLOUT_VERIFY_MIN_AGE_SEC`
+- `SIGNAL_ENGINE_REQUIRED_ALIGNED_PROFILES`
 
 ## Running Locally
-
-## Tuning Rollout Flow
-
-1. Create a tuning approval. New approvals start in `pending`.
-2. Promote to `approved` after review.
-3. Mark as `rolled_out` with deployment metadata:
-   - `deployment_service`
-   - `deployment_sha`
-   - `deployment_env`
-   If omitted and available, these can default from environment variables such as `SIGNAL_ENGINE_DEPLOY_*` or Render metadata.
-   Required aligned profiles can be enforced with `SIGNAL_ENGINE_REQUIRED_ALIGNED_PROFILES`.
-   Use `allow_misaligned=true` on the status transition only when you intentionally need to bypass that guardrail.
 
 ### Requirements
 
 - Python 3.11 preferred
-- environment variables configured in `.env`
+- Environment variables configured locally
+- SQLite database path available through `SIGNAL_ENGINE_DB_PATH` or default local state
 
 ### Install
 
@@ -167,7 +307,7 @@ pip install pytest
 uvicorn app.main:app --reload
 ```
 
-### Run worker
+### Run Worker
 
 ```bash
 python -m worker.runner
@@ -175,35 +315,36 @@ python -m worker.runner
 
 ## Validation
 
-### Syntax check
+### Full Test Suite
+
+```bash
+pytest -q
+```
+
+### Focused Ops And Learning Tests
+
+```bash
+pytest -q tests/test_learning_route.py tests/test_shadow_execution_service.py
+```
+
+### Syntax Check
 
 ```bash
 python -m compileall app worker tests ocr_token_alert_parser.py
 ```
 
-### Unit tests
+## Operating Notes
 
-```bash
-pytest -q tests/test_signal_metrics.py tests/test_signal_learning_service.py tests/test_learning_route.py
-```
+- Do not claim win rate unless resolved outcome snapshots support it.
+- Treat daily opportunities as triage, not financial advice or an automatic buy list.
+- Use `blocker_tuning` before loosening guards.
+- Keep severe safety gates strict unless there is explicit, reviewed evidence.
+- Configure `SIGNAL_ENGINE_OPS_WEBHOOK_URL` if daily digest delivery should leave the API and post to an ops channel.
+- The highest-value next upgrade is wallet guard v2 plus shadow P&L coverage for the top opportunity feed.
 
-### Deterministic scan tests
+## Current Next Improvements
 
-```bash
-python -m tests.scan_test
-python -m tests.scan_replay_test
-```
-
-## Design Rules
-
-- scoring remains explicit and reviewable
-- missing metrics never silently render as fake zeroes
-- Discord/UI presentation should reflect real computed values only
-- learning suggests improvements; it does not auto-rewrite the engine
-
-## Immediate Next Improvements
-
-- expose learning report summaries directly in Discord/admin surfaces
-- add richer regime analytics by weekday/session/lifecycle/risk bucket
-- add promotion outcome comparisons versus candidate-only alerts
-- add structured logging export for long-term storage and offline analysis
+- Split wallet guard behavior into hard fraud blocks versus early concentration/manual-watch overrides.
+- Increase shadow P&L coverage for positive unsent and wallet-blocked top opportunities.
+- Add an explicit "review queue" route for the tokens ranked by `manual_watchlist_override`.
+- Add production dashboard links for individual token drilldowns from the daily opportunity table.
