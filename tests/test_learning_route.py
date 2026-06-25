@@ -431,7 +431,18 @@ def test_learning_validation_routes_return_summary_and_dashboard(tmp_path, monke
     assert opportunities_response.status_code == 200
     opportunities_payload = opportunities_response.json()
     assert opportunities_payload["positive_unsent"] >= 1
+    assert "blocker_tuning" in opportunities_payload
+    assert "shadow_summary" in opportunities_payload
+    assert "shadow_execution" in opportunities_payload["opportunities"][0]
     assert opportunities_payload["opportunities"][0]["action"] in {"review_wallet_blocker", "watch_now", "inspect"}
+
+    opportunities_dashboard_response = client.get("/learning/ops/daily-opportunities/dashboard?hours=10000&limit=10")
+    assert opportunities_dashboard_response.status_code == 200
+    assert "Daily Opportunities" in opportunities_dashboard_response.text
+
+    opportunities_text_response = client.get("/learning/ops/daily-opportunities/text?hours=10000&limit=10")
+    assert opportunities_text_response.status_code == 200
+    assert "Signal Engine Daily Opportunities" in opportunities_text_response.text
 
     policies_response = client.get("/learning/validation/policies?hours=10000&limit=20")
     assert policies_response.status_code == 200
@@ -1369,6 +1380,22 @@ def test_learning_tuning_proposals_route_returns_config_suggestions(tmp_path, mo
     ops_digest_cooldown_payload = ops_digest_cooldown_response.json()
     assert ops_digest_cooldown_payload["dispatched"] is False
     assert ops_digest_cooldown_payload["reason"] == "cooldown_unchanged_digest"
+
+    opportunities_send_response = client.post("/learning/ops/daily-opportunities/send", json={"hours": 24, "limit": 10, "force": True})
+    assert opportunities_send_response.status_code == 200
+    opportunities_send_payload = opportunities_send_response.json()
+    assert opportunities_send_payload["dispatched"] is True
+    assert opportunities_send_payload["notification"]["event_type"] == "daily_opportunity_digest"
+
+    readiness_response = client.get("/learning/ops/readiness?hours=24&limit=10")
+    assert readiness_response.status_code == 200
+    readiness_payload = readiness_response.json()
+    assert "ready_state" in readiness_payload
+    assert "opportunity_summary" in readiness_payload
+
+    readiness_dashboard_response = client.get("/learning/ops/readiness/dashboard?hours=24&limit=10")
+    assert readiness_dashboard_response.status_code == 200
+    assert "Daily Readiness" in readiness_dashboard_response.text
 
     approvals_dashboard_response = client.get("/learning/tuning/approvals/dashboard?limit=10&rollout_status=rolled_out&q=render")
     assert approvals_dashboard_response.status_code == 200

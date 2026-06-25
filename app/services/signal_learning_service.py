@@ -5846,6 +5846,100 @@ def get_missed_runner_analysis(*, hours: int = 168, limit: int = 50) -> dict[str
     return _build_missed_runner_analysis(records, hours=hours, limit=limit)
 
 
+def _build_blocker_tuning(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tuning: dict[str, dict[str, Any]] = {}
+    for record in records:
+        outcome = str(record.get("outcome_label") or "pending")
+        sent = bool(record.get("sent_to_discord"))
+        market_cap_change = _to_float(record.get("outcome_market_cap_change_pct"))
+        for reason in [str(item) for item in record.get("decision_reasons") or []]:
+            family = _reason_family(reason)
+            item = tuning.setdefault(
+                family,
+                {
+                    "family": family,
+                    "count": 0,
+                    "positive_count": 0,
+                    "positive_unsent_count": 0,
+                    "negative_count": 0,
+                    "market_cap_changes": [],
+                    "sample_reasons": [],
+                },
+            )
+            item["count"] += 1
+            if outcome in _POSITIVE_OUTCOME_LABELS:
+                item["positive_count"] += 1
+                if not sent:
+                    item["positive_unsent_count"] += 1
+            elif outcome in _NEGATIVE_OUTCOME_LABELS:
+                item["negative_count"] += 1
+            if market_cap_change is not None:
+                item["market_cap_changes"].append(market_cap_change)
+            if reason not in item["sample_reasons"] and len(item["sample_reasons"]) < 5:
+                item["sample_reasons"].append(reason)
+
+    cards: list[dict[str, Any]] = []
+    for item in tuning.values():
+        changes = [float(value) for value in item.pop("market_cap_changes", [])]
+        count = int(item.get("count") or 0)
+        positive_unsent = int(item.get("positive_unsent_count") or 0)
+        negative = int(item.get("negative_count") or 0)
+        avg_change = round(sum(changes) / len(changes), 4) if changes else None
+        recommendation = "hold"
+        if item["family"] in {"severe_safety", "security"}:
+            recommendation = "keep_strict"
+        elif positive_unsent >= 3 and negative <= max(1, positive_unsent // 2):
+            recommendation = "review_relaxation"
+        elif avg_change is not None and avg_change >= 50 and positive_unsent >= 1:
+            recommendation = "manual_watchlist_override"
+        elif negative > positive_unsent and count >= 3:
+            recommendation = "tighten_or_keep_strict"
+        cards.append(
+            {
+                **item,
+                "avg_market_cap_change_pct": avg_change,
+                "positive_unsent_rate": round((positive_unsent / count) * 100.0, 2) if count else 0.0,
+                "recommendation": recommendation,
+            }
+        )
+    cards.sort(
+        key=lambda item: (
+            0 if item.get("recommendation") in {"review_relaxation", "manual_watchlist_override"} else 1,
+            -int(item.get("positive_unsent_count") or 0),
+            -int(item.get("count") or 0),
+            str(item.get("family") or ""),
+        )
+    )
+    return cards[:10]
+
+
+def _enrich_opportunities_with_shadow(cards: list[dict[str, Any]]) -> dict[str, Any]:
+    if not cards:
+        return {"position_count": 0, "open_count": 0, "closed_count": 0, "realized_net_pnl_usd": 0.0, "marked_net_pnl_usd": 0.0}
+    try:
+        from app.services.shadow_execution_service import get_shadow_position_lookup
+
+        lookup = get_shadow_position_lookup(
+            signal_ids=[str(item.get("signal_id") or "") for item in cards],
+            tokens=[str(item.get("token") or "") for item in cards],
+            limit=max(100, len(cards) * 4),
+        )
+    except Exception as exc:
+        logger.warning("[daily-opportunities] shadow enrichment failed: %s", exc)
+        for item in cards:
+            item["shadow_execution"] = None
+        return {"position_count": 0, "open_count": 0, "closed_count": 0, "error": str(exc)[:200]}
+
+    by_signal = lookup.get("by_signal_id") if isinstance(lookup.get("by_signal_id"), dict) else {}
+    by_token = lookup.get("by_token") if isinstance(lookup.get("by_token"), dict) else {}
+    for item in cards:
+        signal_id = str(item.get("signal_id") or "").strip()
+        token = str(item.get("token") or "").strip()
+        item["shadow_execution"] = by_signal.get(signal_id) or by_token.get(token)
+    summary = lookup.get("summary") if isinstance(lookup.get("summary"), dict) else {}
+    return summary
+
+
 def get_daily_opportunity_brief(*, hours: int = 6, limit: int = 25) -> dict[str, Any]:
     lookback = max(1, int(hours))
     result_limit = max(1, min(int(limit), 100))
@@ -5929,6 +6023,8 @@ def get_daily_opportunity_brief(*, hours: int = 6, limit: int = 25) -> dict[str,
         for record in records
         if not record.get("sent_to_discord") and str(record.get("outcome_label") or "") in _POSITIVE_OUTCOME_LABELS
     )
+    selected_cards = cards[:result_limit]
+    shadow_summary = _enrich_opportunities_with_shadow(selected_cards)
     return {
         "lookback_hours": lookback,
         "sample_size": len(records),
@@ -5938,12 +6034,119 @@ def get_daily_opportunity_brief(*, hours: int = 6, limit: int = 25) -> dict[str,
             {"family": family, "count": count}
             for family, count in sorted(family_counts.items(), key=lambda pair: (-pair[1], pair[0]))[:10]
         ],
-        "opportunities": cards[:result_limit],
+        "blocker_tuning": _build_blocker_tuning(records),
+        "shadow_summary": shadow_summary,
+        "opportunities": selected_cards,
         "notes": [
             "Use this as a triage feed, not a buy command.",
             "Execution validation remains stricter than watchlist routing.",
         ],
     }
+
+
+def render_daily_opportunity_text(*, hours: int = 6, limit: int = 10) -> str:
+    brief = get_daily_opportunity_brief(hours=max(1, hours), limit=max(1, limit))
+    lines = [
+        "# Signal Engine Daily Opportunities",
+        f"Window: {brief['lookback_hours']}h",
+        f"Sample: {brief['sample_size']} records",
+        f"Sent alerts: {brief['sent_alerts']}",
+        f"Positive unsent: {brief['positive_unsent']}",
+        "",
+        "Top Opportunities:",
+    ]
+    for item in brief.get("opportunities") or []:
+        shadow = item.get("shadow_execution") if isinstance(item.get("shadow_execution"), dict) else {}
+        pnl = shadow.get("latest_net_pnl_pct") if shadow else None
+        pnl_text = f" shadow_net={pnl:+.2f}%" if isinstance(pnl, (int, float)) else ""
+        lines.append(
+            f"- {item.get('action')} score={item.get('opportunity_score')} token={item.get('token')} "
+            f"route={item.get('route_class')} outcome={item.get('outcome_label')}{pnl_text}"
+        )
+    if not brief.get("opportunities"):
+        lines.append("- No opportunities in this window.")
+    lines.append("")
+    lines.append("Blocker Tuning:")
+    for item in brief.get("blocker_tuning") or []:
+        lines.append(
+            f"- {item.get('family')}: {item.get('recommendation')} "
+            f"positive_unsent={item.get('positive_unsent_count')} count={item.get('count')}"
+        )
+    return "\n".join(lines).strip()
+
+
+def render_daily_opportunity_html(*, hours: int = 6, limit: int = 25) -> str:
+    brief = get_daily_opportunity_brief(hours=max(1, hours), limit=max(1, limit))
+    shadow = brief.get("shadow_summary") if isinstance(brief.get("shadow_summary"), dict) else {}
+    cards = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('action') or ''))}</td>"
+        f"<td>{html.escape(str(item.get('opportunity_score') or ''))}</td>"
+        f"<td>{html.escape(str(item.get('token') or ''))}</td>"
+        f"<td>{html.escape(str(item.get('route_class') or ''))}</td>"
+        f"<td>{html.escape(str(item.get('outcome_label') or ''))}</td>"
+        f"<td>{html.escape(str((item.get('shadow_execution') or {}).get('latest_net_pnl_pct') if isinstance(item.get('shadow_execution'), dict) else ''))}</td>"
+        f"<td>{html.escape(', '.join(str(reason) for reason in (item.get('binding_reasons') or [])[:3]))}</td>"
+        "</tr>"
+        for item in brief.get("opportunities") or []
+    ) or '<tr><td colspan="7">No opportunities in this window.</td></tr>'
+    tuning_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('family') or ''))}</td>"
+        f"<td>{html.escape(str(item.get('recommendation') or ''))}</td>"
+        f"<td>{int(item.get('positive_unsent_count') or 0)}</td>"
+        f"<td>{int(item.get('count') or 0)}</td>"
+        f"<td>{html.escape(str(item.get('avg_market_cap_change_pct') or ''))}</td>"
+        "</tr>"
+        for item in brief.get("blocker_tuning") or []
+    ) or '<tr><td colspan="5">No blocker pressure in this window.</td></tr>'
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Daily Opportunities</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; font-family: "Segoe UI", sans-serif; color: #17202a; background: #f5f7fa; }}
+    .shell {{ max-width: 1180px; margin: 0 auto; padding: 24px 16px 40px; }}
+    .band {{ background: white; border: 1px solid #d8e0e8; border-radius: 8px; padding: 18px; margin-bottom: 16px; }}
+    h1 {{ margin: 0 0 8px; font-size: 28px; }}
+    h2 {{ margin: 0 0 12px; font-size: 18px; }}
+    .metrics {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }}
+    .metric {{ border: 1px solid #d8e0e8; border-radius: 8px; padding: 12px; background: #fbfcfe; }}
+    .metric span {{ display: block; font-size: 12px; color: #607285; }}
+    .metric strong {{ font-size: 22px; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ border-bottom: 1px solid #e2e8ef; padding: 10px; text-align: left; vertical-align: top; font-size: 13px; }}
+    th {{ color: #40566d; font-size: 12px; text-transform: uppercase; }}
+    @media (max-width: 900px) {{ .metrics {{ grid-template-columns: 1fr 1fr; }} table {{ display: block; overflow-x: auto; }} }}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="band">
+      <h1>Daily Opportunities</h1>
+      <p>Window {int(brief.get('lookback_hours') or hours)}h. Triage feed, not a buy command.</p>
+    </section>
+    <section class="band metrics">
+      <div class="metric"><span>Sample</span><strong>{int(brief.get('sample_size') or 0)}</strong></div>
+      <div class="metric"><span>Sent Alerts</span><strong>{int(brief.get('sent_alerts') or 0)}</strong></div>
+      <div class="metric"><span>Positive Unsent</span><strong>{int(brief.get('positive_unsent') or 0)}</strong></div>
+      <div class="metric"><span>Shadow Open</span><strong>{int(shadow.get('open_count') or 0)}</strong></div>
+      <div class="metric"><span>Shadow Net USD</span><strong>{float(shadow.get('marked_net_pnl_usd') or 0.0):+.2f}</strong></div>
+    </section>
+    <section class="band">
+      <h2>Top Ranked</h2>
+      <table><thead><tr><th>Action</th><th>Score</th><th>Token</th><th>Route</th><th>Outcome</th><th>Shadow Net %</th><th>Reasons</th></tr></thead><tbody>{cards}</tbody></table>
+    </section>
+    <section class="band">
+      <h2>Blocker Tuning</h2>
+      <table><thead><tr><th>Family</th><th>Recommendation</th><th>Positive Unsent</th><th>Count</th><th>Avg MC %</th></tr></thead><tbody>{tuning_rows}</tbody></table>
+    </section>
+  </main>
+</body>
+</html>"""
 
 
 def get_policy_validation_comparison(*, hours: int = 168, limit: int = 12, record_limit: int = 5000) -> dict[str, Any]:

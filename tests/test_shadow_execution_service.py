@@ -69,6 +69,11 @@ def test_open_shadow_position_persists_validated_trade(tmp_path, monkeypatch):
         (ses.STATE_SUBMIT_INTENT_RECORDED, ses.STATE_SUBMIT_REQUESTED, "submit_requested"),
     ]
 
+    lookup = ses.get_shadow_position_lookup(signal_ids=["sig-1"], tokens=["token-1"])
+    assert lookup["summary"]["position_count"] == 1
+    assert lookup["by_signal_id"]["sig-1"]["position_id"] == position_id
+    assert lookup["by_token"]["token-1"]["latest_net_pnl_usd"] < 0
+
 
 def test_open_shadow_position_skips_expired_validation(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"

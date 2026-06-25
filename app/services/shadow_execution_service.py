@@ -617,6 +617,109 @@ def _fetch_open_positions(limit: int = 25) -> list[ShadowPosition]:
     return positions
 
 
+def _shadow_position_card(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "position_id": row["position_id"],
+        "signal_id": row["signal_id"],
+        "token": row["token"],
+        "source_event_type": row["source_event_type"],
+        "status": row["status"],
+        "execution_state": row["execution_state"],
+        "opened_ts": row["opened_ts"],
+        "updated_ts": row["updated_ts"],
+        "closed_ts": row["closed_ts"],
+        "intended_size_usd": row["intended_size_usd"],
+        "entry_exec_price_usd": row["entry_exec_price_usd"],
+        "latest_price_usd": row["latest_price_usd"],
+        "latest_liquidity_usd": row["latest_liquidity_usd"],
+        "latest_pnl_pct": row["latest_pnl_pct"],
+        "latest_pnl_usd": row["latest_pnl_usd"],
+        "latest_net_pnl_pct": row["latest_net_pnl_pct"],
+        "latest_net_pnl_usd": row["latest_net_pnl_usd"],
+        "peak_pnl_pct": row["peak_pnl_pct"],
+        "trough_pnl_pct": row["trough_pnl_pct"],
+        "exit_reason": row["exit_reason"],
+        "take_profit_pct": row["take_profit_pct"],
+        "stop_loss_pct": row["stop_loss_pct"],
+        "max_hold_minutes": row["max_hold_minutes"],
+    }
+
+
+def _shadow_summary(positions: list[dict[str, Any]]) -> dict[str, Any]:
+    closed = [item for item in positions if str(item.get("status") or "") == "closed"]
+    open_positions = [item for item in positions if str(item.get("status") or "") == "open"]
+    realized = [float(item.get("latest_net_pnl_usd") or 0.0) for item in closed if item.get("latest_net_pnl_usd") is not None]
+    marked = [float(item.get("latest_net_pnl_usd") or 0.0) for item in positions if item.get("latest_net_pnl_usd") is not None]
+    pct_values = [float(item.get("latest_net_pnl_pct") or 0.0) for item in positions if item.get("latest_net_pnl_pct") is not None]
+    return {
+        "position_count": len(positions),
+        "open_count": len(open_positions),
+        "closed_count": len(closed),
+        "realized_net_pnl_usd": round(sum(realized), 6),
+        "marked_net_pnl_usd": round(sum(marked), 6),
+        "avg_net_pnl_pct": round(sum(pct_values) / len(pct_values), 4) if pct_values else None,
+        "winner_count": sum(1 for item in positions if float(item.get("latest_net_pnl_usd") or 0.0) > 0),
+        "loser_count": sum(1 for item in positions if float(item.get("latest_net_pnl_usd") or 0.0) < 0),
+    }
+
+
+def get_shadow_position_lookup(
+    *,
+    signal_ids: list[str] | None = None,
+    tokens: list[str] | None = None,
+    limit: int = 500,
+) -> dict[str, Any]:
+    _ensure_schema()
+    clean_signal_ids = [str(item).strip() for item in (signal_ids or []) if str(item or "").strip()]
+    clean_tokens = [str(item).strip() for item in (tokens or []) if str(item or "").strip()]
+    clauses: list[str] = []
+    params: list[Any] = []
+    if clean_signal_ids:
+        placeholders = ",".join("?" for _ in clean_signal_ids)
+        clauses.append(f"signal_id IN ({placeholders})")
+        params.extend(clean_signal_ids)
+    if clean_tokens:
+        placeholders = ",".join("?" for _ in clean_tokens)
+        clauses.append(f"token IN ({placeholders})")
+        params.extend(clean_tokens)
+    if not clauses:
+        return {"by_signal_id": {}, "by_token": {}, "positions": [], "summary": _shadow_summary([])}
+
+    params.append(max(1, min(int(limit), 1000)))
+    with _connect() as c:
+        rows = c.execute(
+            f"""
+            SELECT position_id, signal_id, token, source_event_type, status, execution_state,
+                   opened_ts, updated_ts, closed_ts, intended_size_usd, entry_exec_price_usd,
+                   latest_price_usd, latest_liquidity_usd, latest_pnl_pct, latest_pnl_usd,
+                   latest_net_pnl_pct, latest_net_pnl_usd, peak_pnl_pct, trough_pnl_pct,
+                   exit_reason, take_profit_pct, stop_loss_pct, max_hold_minutes
+            FROM shadow_positions
+            WHERE {" OR ".join(f"({clause})" for clause in clauses)}
+            ORDER BY updated_ts DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+
+    positions = [_shadow_position_card(row) for row in rows]
+    by_signal_id: dict[str, dict[str, Any]] = {}
+    by_token: dict[str, dict[str, Any]] = {}
+    for position in positions:
+        signal_id = str(position.get("signal_id") or "").strip()
+        token = str(position.get("token") or "").strip()
+        if signal_id and signal_id not in by_signal_id:
+            by_signal_id[signal_id] = position
+        if token and token not in by_token:
+            by_token[token] = position
+    return {
+        "by_signal_id": by_signal_id,
+        "by_token": by_token,
+        "positions": positions,
+        "summary": _shadow_summary(positions),
+    }
+
+
 def _write_mark(
     *,
     position_id: str,

@@ -46,6 +46,8 @@ from app.services.signal_learning_service import (
     run_policy_replay,
     render_engine_health_html,
     render_diagnostics_html,
+    render_daily_opportunity_html,
+    render_daily_opportunity_text,
     render_live_validation_html,
     render_learning_digest_html,
     render_learning_report_html,
@@ -57,7 +59,9 @@ from app.services.tuning_service import (
     create_tuning_approval,
     apply_rollout_verification,
     apply_pending_rollout_verifications,
+    dispatch_daily_opportunity_digest,
     dispatch_ops_digest,
+    get_daily_readiness,
     get_config_drift_report,
     get_latest_tuning_approval,
     get_ops_digest,
@@ -68,6 +72,7 @@ from app.services.tuning_service import (
     list_rollout_notifications,
     list_tuning_approvals,
     render_notification_incidents_html,
+    render_daily_readiness_html,
     render_ops_digest_html,
     render_ops_digest_text,
     render_operator_command_center_html,
@@ -825,6 +830,34 @@ def learning_ops_digest_text(hours: int = 24):
 @router.get("/learning/ops/daily-opportunities")
 def learning_ops_daily_opportunities(hours: int = 6, limit: int = 25):
     return get_daily_opportunity_brief(hours=max(1, hours), limit=max(1, limit))
+
+
+@router.get("/learning/ops/daily-opportunities/dashboard")
+def learning_ops_daily_opportunities_dashboard(hours: int = 6, limit: int = 25):
+    return HTMLResponse(content=render_daily_opportunity_html(hours=max(1, hours), limit=max(1, limit)))
+
+
+@router.get("/learning/ops/daily-opportunities/text")
+def learning_ops_daily_opportunities_text(hours: int = 6, limit: int = 10):
+    return PlainTextResponse(content=render_daily_opportunity_text(hours=max(1, hours), limit=max(1, limit)))
+
+
+@router.post("/learning/ops/daily-opportunities/send")
+def learning_ops_daily_opportunities_send(payload: dict[str, object] = Body(default={})):
+    hours = max(1, int(payload.get("hours") or 6))
+    limit = max(1, int(payload.get("limit") or 10))
+    force = bool(payload.get("force") or False)
+    return dispatch_daily_opportunity_digest(hours=hours, limit=limit, force=force)
+
+
+@router.get("/learning/ops/readiness")
+def learning_ops_readiness(hours: int = 6, limit: int = 10):
+    return get_daily_readiness(hours=max(1, hours), limit=max(1, limit))
+
+
+@router.get("/learning/ops/readiness/dashboard")
+def learning_ops_readiness_dashboard(hours: int = 6, limit: int = 10):
+    return HTMLResponse(content=render_daily_readiness_html(hours=max(1, hours), limit=max(1, limit)))
 
 
 @router.post("/learning/ops/digest/send")

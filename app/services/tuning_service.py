@@ -982,7 +982,7 @@ def _typed_ops_digest_signature(digest_type: str, digest: dict[str, Any]) -> str
 
 def _is_ops_digest_event_type(event_type: str | None) -> bool:
     value = str(event_type or "").strip().lower()
-    return value in {"ops_digest", "incident_digest", "degraded_digest", "daily_summary"}
+    return value in {"ops_digest", "incident_digest", "degraded_digest", "daily_summary", "daily_opportunity_digest"}
 
 
 def _merge_family_scorecards(
@@ -3171,6 +3171,211 @@ def render_ops_digest_html(hours: int = 24) -> str:
       <ul>{action_rows}</ul>
     </section>
   </div>
+</body>
+</html>"""
+
+
+def _daily_opportunity_signature(brief: dict[str, Any]) -> str:
+    payload = {
+        "lookback_hours": brief.get("lookback_hours"),
+        "sample_size": brief.get("sample_size"),
+        "positive_unsent": brief.get("positive_unsent"),
+        "top_opportunities": [
+            {
+                "token": item.get("token"),
+                "action": item.get("action"),
+                "score": item.get("opportunity_score"),
+                "outcome": item.get("outcome_label"),
+            }
+            for item in (brief.get("opportunities") or [])[:10]
+            if isinstance(item, dict)
+        ],
+        "blocker_tuning": [
+            {
+                "family": item.get("family"),
+                "recommendation": item.get("recommendation"),
+                "positive_unsent_count": item.get("positive_unsent_count"),
+            }
+            for item in (brief.get("blocker_tuning") or [])[:5]
+            if isinstance(item, dict)
+        ],
+        "shadow_summary": brief.get("shadow_summary") or {},
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def dispatch_daily_opportunity_digest(hours: int = 6, limit: int = 10, *, force: bool = False) -> dict[str, Any]:
+    brief = sls.get_daily_opportunity_brief(hours=max(1, hours), limit=max(1, limit))
+    digest_type = "daily_opportunity_digest"
+    signature = _daily_opportunity_signature(brief)
+    latest = _latest_rollout_notification(digest_type)
+    cooldown_seconds = _ops_digest_cooldown_seconds()
+    if latest and not force:
+        latest_payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
+        latest_signature = str(latest_payload.get("digest_signature") or "")
+        age_seconds = max(0, int(time.time()) - int(latest.get("created_ts") or 0))
+        if latest_signature == signature and age_seconds < cooldown_seconds:
+            return {
+                "dispatched": False,
+                "reason": "cooldown_unchanged_digest",
+                "digest_type": digest_type,
+                "cooldown_seconds": cooldown_seconds,
+                "age_seconds": age_seconds,
+                "latest_notification_id": latest.get("notification_id"),
+                "digest": brief,
+            }
+
+    positive_unsent = int(brief.get("positive_unsent") or 0)
+    top_actions = [
+        str(item.get("action") or "")
+        for item in brief.get("opportunities") or []
+        if isinstance(item, dict)
+    ]
+    if not force and positive_unsent <= 0 and not any(action in {"watch_now", "review_wallet_blocker"} for action in top_actions):
+        return {
+            "dispatched": False,
+            "reason": "no_opportunities",
+            "digest_type": digest_type,
+            "digest": brief,
+        }
+
+    text = sls.render_daily_opportunity_text(hours=max(1, hours), limit=max(1, limit))
+    notification = emit_rollout_notification(
+        event_type=digest_type,
+        level="info" if positive_unsent <= 0 else "warning",
+        message=f"[daily-opportunities] {positive_unsent} positive unsent over {brief.get('lookback_hours')}h",
+        target_name="daily-opportunities",
+        deployment_service=_default_deployment_metadata().get("deployment_service") or None,
+        deployment_sha=_default_deployment_metadata().get("deployment_sha") or None,
+        payload={
+            "digest_type": digest_type,
+            "digest_signature": signature,
+            "lookback_hours": brief.get("lookback_hours"),
+            "sample_size": brief.get("sample_size"),
+            "positive_unsent": brief.get("positive_unsent"),
+            "top_blocker_families": brief.get("top_blocker_families"),
+            "blocker_tuning": brief.get("blocker_tuning"),
+            "shadow_summary": brief.get("shadow_summary"),
+            "opportunity_text": text,
+        },
+    )
+    return {
+        "dispatched": True,
+        "digest_type": digest_type,
+        "notification": notification,
+        "digest": brief,
+    }
+
+
+def get_daily_readiness(hours: int = 6, limit: int = 10) -> dict[str, Any]:
+    lookback = max(1, hours)
+    ops = get_ops_digest(hours=max(24, lookback))
+    opportunities = sls.get_daily_opportunity_brief(hours=lookback, limit=max(1, limit))
+    health = sls.get_engine_health_digest(hours=max(1, lookback))
+    shadow = opportunities.get("shadow_summary") if isinstance(opportunities.get("shadow_summary"), dict) else {}
+    blocker_tuning = opportunities.get("blocker_tuning") if isinstance(opportunities.get("blocker_tuning"), list) else []
+    attention: list[str] = []
+    if ops.get("needs_attention"):
+        attention.extend(str(item) for item in ops.get("attention_reasons") or [])
+    if int(opportunities.get("positive_unsent") or 0) > 0:
+        attention.append("positive_unsent_opportunities")
+    if int(shadow.get("position_count") or 0) == 0:
+        attention.append("shadow_pnl_not_available_for_top_feed")
+    if any(str(item.get("recommendation") or "") in {"review_relaxation", "manual_watchlist_override"} for item in blocker_tuning if isinstance(item, dict)):
+        attention.append("blocker_tuning_review_available")
+
+    return {
+        "lookback_hours": lookback,
+        "ready_state": "needs_review" if attention else "ready",
+        "attention_reasons": sorted(set(attention)),
+        "ops_digest": {
+            "severity": ops.get("severity"),
+            "incident_level": ops.get("incident_level"),
+            "summary": ops.get("summary"),
+            "counts": ops.get("counts"),
+        },
+        "health": health,
+        "opportunity_summary": {
+            "sample_size": opportunities.get("sample_size"),
+            "sent_alerts": opportunities.get("sent_alerts"),
+            "positive_unsent": opportunities.get("positive_unsent"),
+            "top_blocker_families": opportunities.get("top_blocker_families"),
+            "shadow_summary": shadow,
+        },
+        "top_opportunities": (opportunities.get("opportunities") or [])[: max(1, limit)],
+        "blocker_tuning": blocker_tuning,
+        "operator_links": {
+            "daily_opportunities": f"/learning/ops/daily-opportunities?hours={lookback}&limit={max(1, limit)}",
+            "daily_opportunities_dashboard": f"/learning/ops/daily-opportunities/dashboard?hours={lookback}&limit={max(1, limit)}",
+            "ops_digest": f"/learning/ops/digest?hours={max(24, lookback)}",
+            "validation_summary": f"/learning/validation/summary?hours={max(72, lookback)}&limit=200",
+        },
+        "notes": [
+            "This readiness view is operational triage, not financial advice.",
+            "Use shadow P&L and blocker evidence before changing live execution gates.",
+        ],
+    }
+
+
+def render_daily_readiness_html(hours: int = 6, limit: int = 10) -> str:
+    readiness = get_daily_readiness(hours=max(1, hours), limit=max(1, limit))
+    summary = readiness.get("opportunity_summary") if isinstance(readiness.get("opportunity_summary"), dict) else {}
+    shadow = summary.get("shadow_summary") if isinstance(summary.get("shadow_summary"), dict) else {}
+    reasons = "".join(f"<li>{html.escape(str(item))}</li>" for item in readiness.get("attention_reasons") or []) or "<li>No immediate review flags.</li>"
+    links = "".join(
+        f'<a href="{html.escape(str(href))}">{html.escape(str(label).replace("_", " ").title())}</a>'
+        for label, href in (readiness.get("operator_links") or {}).items()
+    )
+    top_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('action') or ''))}</td>"
+        f"<td>{html.escape(str(item.get('opportunity_score') or ''))}</td>"
+        f"<td>{html.escape(str(item.get('token') or ''))}</td>"
+        f"<td>{html.escape(str(item.get('outcome_label') or ''))}</td>"
+        "</tr>"
+        for item in readiness.get("top_opportunities") or []
+        if isinstance(item, dict)
+    ) or '<tr><td colspan="4">No ranked opportunities in this window.</td></tr>'
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Daily Readiness</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; font-family: "Segoe UI", sans-serif; background: #f6f8fb; color: #17202a; }}
+    main {{ max-width: 1120px; margin: 0 auto; padding: 24px 16px 40px; }}
+    section {{ background: #fff; border: 1px solid #d9e2ec; border-radius: 8px; padding: 18px; margin-bottom: 16px; }}
+    h1 {{ margin: 0 0 8px; font-size: 28px; }}
+    h2 {{ margin: 0 0 12px; font-size: 18px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }}
+    .metric {{ border: 1px solid #d9e2ec; border-radius: 8px; background: #fbfcfe; padding: 12px; }}
+    .metric span {{ display: block; color: #64788c; font-size: 12px; }}
+    .metric strong {{ font-size: 22px; }}
+    .links {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+    .links a {{ color: #0b5cab; text-decoration: none; border: 1px solid #b8c8d8; border-radius: 6px; padding: 8px 10px; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ border-bottom: 1px solid #e2e8ef; padding: 10px; text-align: left; font-size: 13px; }}
+    @media (max-width: 840px) {{ .grid {{ grid-template-columns: 1fr 1fr; }} table {{ display: block; overflow-x: auto; }} }}
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>Daily Readiness</h1>
+      <p><strong>{html.escape(str(readiness.get('ready_state') or 'unknown'))}</strong> over {int(readiness.get('lookback_hours') or hours)}h.</p>
+    </section>
+    <section class="grid">
+      <div class="metric"><span>Positive Unsent</span><strong>{int(summary.get('positive_unsent') or 0)}</strong></div>
+      <div class="metric"><span>Sent Alerts</span><strong>{int(summary.get('sent_alerts') or 0)}</strong></div>
+      <div class="metric"><span>Shadow Positions</span><strong>{int(shadow.get('position_count') or 0)}</strong></div>
+      <div class="metric"><span>Marked Net USD</span><strong>{float(shadow.get('marked_net_pnl_usd') or 0.0):+.2f}</strong></div>
+    </section>
+    <section><h2>Review Flags</h2><ul>{reasons}</ul></section>
+    <section><h2>Top Opportunities</h2><table><thead><tr><th>Action</th><th>Score</th><th>Token</th><th>Outcome</th></tr></thead><tbody>{top_rows}</tbody></table></section>
+    <section><h2>Operator Links</h2><div class="links">{links}</div></section>
+  </main>
 </body>
 </html>"""
 
