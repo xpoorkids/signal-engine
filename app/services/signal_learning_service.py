@@ -5602,6 +5602,8 @@ def get_live_validation_records(
 ) -> list[dict[str, Any]]:
     _ensure_schema()
     cutoff = int(time.time()) - max(1, hours) * 3600
+    requested_limit = max(1, int(limit))
+    row_limit = max(requested_limit, min(5000, requested_limit * (20 if sent_only else 5)))
     with _connect() as c:
         signal_rows = c.execute(
             """
@@ -5611,30 +5613,35 @@ def get_live_validation_records(
             FROM signals
             WHERE alert_ts >= ?
             ORDER BY alert_ts DESC
+            LIMIT ?
             """,
-            (cutoff,),
+            (cutoff, row_limit),
         ).fetchall()
+        signal_ids = [str(row[0] or "") for row in signal_rows if str(row[0] or "")]
+        if not signal_ids:
+            return []
+        placeholders = ",".join("?" for _ in signal_ids)
         decision_rows = c.execute(
-            """
+            f"""
             SELECT decision_id, signal_id, token, event_type, stage, decision, action_taken,
                    policy_name, policy_version, reasons_json, features_json,
                    attention_score, risk_score, confidence_score, creator_score,
                    lifecycle, created_ts
             FROM signal_decisions
-            WHERE created_ts >= ?
+            WHERE signal_id IN ({placeholders})
             ORDER BY created_ts DESC
             """,
-            (cutoff,),
+            signal_ids,
         ).fetchall()
         snapshot_rows = c.execute(
-            """
+            f"""
             SELECT signal_id, horizon_minutes, captured_ts, outcome_label, market_cap_change_pct,
                    liquidity_change_pct, volume_m5_change_pct, snapshot_json
             FROM signal_snapshots
-            WHERE signal_id IN (SELECT signal_id FROM signals WHERE alert_ts >= ?)
+            WHERE signal_id IN ({placeholders})
             ORDER BY horizon_minutes DESC, captured_ts DESC
             """,
-            (cutoff,),
+            signal_ids,
         ).fetchall()
 
     latest_decision_by_signal: dict[str, dict[str, Any]] = {}
