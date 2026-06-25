@@ -537,16 +537,23 @@ def _ensure_schema() -> None:
     init()
 
 
-def get_learning_storage_status() -> dict[str, Any]:
+def get_learning_storage_status(*, accurate_counts: bool = True) -> dict[str, Any]:
     _ensure_schema()
     db_path = _current_db_path()
     file_exists = db_path.exists()
     file_size_bytes = db_path.stat().st_size if file_exists else 0
     write_config = _learning_write_config()
     with _connect() as c:
-        signal_count = int(c.execute("SELECT COUNT(1) FROM signals").fetchone()[0] or 0)
-        decision_count = int(c.execute("SELECT COUNT(1) FROM signal_decisions").fetchone()[0] or 0)
-        snapshot_count = int(c.execute("SELECT COUNT(1) FROM signal_snapshots").fetchone()[0] or 0)
+        if accurate_counts:
+            signal_count = int(c.execute("SELECT COUNT(1) FROM signals").fetchone()[0] or 0)
+            decision_count = int(c.execute("SELECT COUNT(1) FROM signal_decisions").fetchone()[0] or 0)
+            snapshot_count = int(c.execute("SELECT COUNT(1) FROM signal_snapshots").fetchone()[0] or 0)
+            count_mode = "exact"
+        else:
+            signal_count = int(c.execute("SELECT COALESCE(MAX(rowid), 0) FROM signals").fetchone()[0] or 0)
+            decision_count = int(c.execute("SELECT COALESCE(MAX(rowid), 0) FROM signal_decisions").fetchone()[0] or 0)
+            snapshot_count = int(c.execute("SELECT COALESCE(MAX(rowid), 0) FROM signal_snapshots").fetchone()[0] or 0)
+            count_mode = "estimated"
         job_counts = {
             str(row[0] or "unknown"): int(row[1] or 0)
             for row in c.execute(
@@ -573,6 +580,7 @@ def get_learning_storage_status() -> dict[str, Any]:
         "signal_count": signal_count,
         "decision_count": decision_count,
         "snapshot_count": snapshot_count,
+        "count_mode": count_mode,
         "snapshot_job_counts": job_counts,
         "stale_pending_snapshot_jobs": stale_pending_count,
         "snapshot_max_lag_seconds": _snapshot_max_lag_seconds(),
@@ -4637,9 +4645,10 @@ async def policy_automation_worker() -> None:
         await asyncio.sleep(_policy_automation_poll_seconds())
 
 
-def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
+def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[str, Any]:
     _ensure_schema()
     cutoff = int(time.time()) - max(1, hours) * 3600
+    sample_limit = max(100, min(50_000, int(limit or os.getenv("SIGNAL_ENGINE_DIAGNOSTICS_SAMPLE_LIMIT", "5000") or 5000)))
     with _connect() as c:
         decision_rows = c.execute(
             """
@@ -4648,8 +4657,9 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
             FROM signal_decisions
             WHERE created_ts >= ?
             ORDER BY created_ts DESC
+            LIMIT ?
             """,
-            (cutoff,),
+            (cutoff, sample_limit),
         ).fetchall()
         outcome_rows = c.execute(
             """
@@ -4671,11 +4681,12 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
                 SELECT MAX(horizon_minutes)
                 FROM signal_snapshots ss2
                 WHERE ss2.signal_id = s.signal_id
-             )
+            )
             WHERE s.alert_ts >= ?
             ORDER BY s.alert_ts DESC
+            LIMIT ?
             """,
-            (cutoff,),
+            (cutoff, sample_limit),
         ).fetchall()
 
     counts_by_decision: dict[str, int] = {}
@@ -5083,6 +5094,10 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
 
     return {
         "lookback_hours": hours,
+        "sample_limit": sample_limit,
+        "sampled": len(decision_rows) >= sample_limit or len(outcome_rows) >= sample_limit,
+        "decision_sample_size": len(decision_rows),
+        "outcome_sample_size": len(outcome_rows),
         "counts_by_decision": counts_by_decision,
         "counts_by_stage": stage_counts,
         "top_skip_reasons": top_skip_reasons,
@@ -5111,8 +5126,8 @@ def get_diagnostics_summary(hours: int = 24) -> dict[str, Any]:
 
 def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
     _ensure_schema()
-    summary = get_diagnostics_summary(hours=max(1, hours))
-    storage = get_learning_storage_status()
+    summary = get_diagnostics_summary(hours=max(1, hours), limit=5000)
+    storage = get_learning_storage_status(accurate_counts=False)
     write_config = storage.get("write_config") if isinstance(storage.get("write_config"), dict) else {}
     cutoff = int(time.time()) - max(1, hours) * 3600
     with _connect() as c:
@@ -5992,7 +6007,7 @@ def get_live_validation_summary(*, hours: int = 72, limit: int = 200) -> dict[st
         )
     )
 
-    diagnostics = get_diagnostics_summary(hours=hours)
+    diagnostics = get_diagnostics_summary(hours=hours, limit=records_limit)
     sent_records = [record for record in records if record.get("sent_to_discord")]
     return {
         "lookback_hours": hours,
