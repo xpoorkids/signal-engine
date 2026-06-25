@@ -4658,7 +4658,8 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
         decision_rows = c.execute(
             """
             SELECT signal_id, decision, reasons_json, session_bucket, local_daypart,
-                   attention_score, risk_score, confidence_score, created_ts, token, stage
+                   attention_score, risk_score, confidence_score, created_ts, token, stage,
+                   action_taken
             FROM signal_decisions
             WHERE created_ts >= ?
             ORDER BY created_ts DESC
@@ -4695,6 +4696,7 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
         ).fetchall()
 
     counts_by_decision: dict[str, int] = {}
+    counts_by_action: dict[str, int] = {}
     skip_reason_counts: dict[str, int] = {}
     stage_counts: dict[str, int] = {}
     sessions: dict[str, dict[str, int]] = {}
@@ -4809,12 +4811,28 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
             )
 
     for row in decision_rows:
-        signal_id, decision, reasons_json, session_bucket, local_daypart, attention_score, risk_score, confidence_score, created_ts, token, stage = row
+        (
+            signal_id,
+            decision,
+            reasons_json,
+            session_bucket,
+            local_daypart,
+            attention_score,
+            risk_score,
+            confidence_score,
+            created_ts,
+            token,
+            stage,
+            action_taken,
+        ) = row
         counts_by_decision[decision] = counts_by_decision.get(decision, 0) + 1
+        action_key = action_taken or "unknown"
+        counts_by_action[action_key] = counts_by_action.get(action_key, 0) + 1
         stage_key = stage or "unknown"
         stage_counts[stage_key] = stage_counts.get(stage_key, 0) + 1
         session_stats = sessions.setdefault(session_bucket or "unknown", {"sent": 0, "skipped": 0, "blocked": 0})
-        if decision.endswith("sent"):
+        sent_to_discord = action_taken == "emit" or str(decision or "").endswith("sent")
+        if sent_to_discord:
             session_stats["sent"] += 1
         elif "skip" in decision:
             session_stats["skipped"] += 1
@@ -4828,7 +4846,7 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
                 reasons = [str(item) for item in parsed]
         except Exception:
             reasons = []
-        if decision != "candidate_sent":
+        if not sent_to_discord:
             for reason in reasons:
                 skip_reason_counts[reason] = skip_reason_counts.get(reason, 0) + 1
         if len(recent_examples) < 20:
@@ -4855,7 +4873,21 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
 
     false_negatives: list[dict[str, Any]] = []
     for row in decision_rows:
-        signal_id, decision, reasons_json, session_bucket, local_daypart, attention_score, risk_score, confidence_score, created_ts, token, stage = row
+        (
+            signal_id,
+            decision,
+            reasons_json,
+            session_bucket,
+            local_daypart,
+            attention_score,
+            risk_score,
+            confidence_score,
+            created_ts,
+            token,
+            stage,
+            action_taken,
+        ) = row
+        sent_to_discord = action_taken == "emit" or str(decision or "").endswith("sent")
         reasons: list[str] = []
         try:
             parsed = json.loads(reasons_json or "[]")
@@ -4908,7 +4940,7 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
                     daily_card["positive"] += 1
                 elif outcome_label in {"failed", "faded"}:
                     daily_card["negative"] += 1
-        if decision.endswith("sent"):
+        if sent_to_discord:
             continue
         if not matched_outcome or matched_outcome["outcome_label"] not in {"worked", "strong_continuation"}:
             continue
@@ -5104,6 +5136,7 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
         "decision_sample_size": len(decision_rows),
         "outcome_sample_size": len(outcome_rows),
         "counts_by_decision": counts_by_decision,
+        "counts_by_action": counts_by_action,
         "counts_by_stage": stage_counts,
         "top_skip_reasons": top_skip_reasons,
         "sessions": sessions,
@@ -5161,7 +5194,12 @@ def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
         ).fetchone()
 
     counts_by_decision = summary.get("counts_by_decision") if isinstance(summary.get("counts_by_decision"), dict) else {}
-    sent_count = sum(int(value or 0) for key, value in counts_by_decision.items() if str(key).endswith("sent"))
+    sessions = summary.get("sessions") if isinstance(summary.get("sessions"), dict) else {}
+    sent_count = sum(
+        int(stats.get("sent") or 0)
+        for stats in sessions.values()
+        if isinstance(stats, dict)
+    )
     skipped_count = sum(int(value or 0) for key, value in counts_by_decision.items() if "skip" in str(key))
     blocked_count = sum(int(value or 0) for key, value in counts_by_decision.items() if "block" in str(key))
     total_decisions = sum(int(value or 0) for value in counts_by_decision.values())
@@ -6530,6 +6568,11 @@ def render_diagnostics_html(hours: int = 24) -> str:
     counts_by_stage = summary.get("counts_by_stage") or {}
     top_skip_reasons = summary.get("top_skip_reasons") or []
     sessions = summary.get("sessions") or {}
+    sent_count = sum(
+        int(stats.get("sent") or 0)
+        for stats in sessions.values()
+        if isinstance(stats, dict)
+    )
     recent_examples = summary.get("recent_examples") or []
     outcomes_by_label = summary.get("outcomes_by_label") or {}
     false_negatives = summary.get("false_negatives") or []
@@ -6681,7 +6724,7 @@ def render_diagnostics_html(hours: int = 24) -> str:
     overview_cards = "".join(
         [
             metric_card("Lookback Hours", summary.get("lookback_hours", hours)),
-            metric_card("Sent", sum(value for key, value in counts_by_decision.items() if str(key).endswith("sent"))),
+            metric_card("Sent", sent_count),
             metric_card("Skipped", sum(value for key, value in counts_by_decision.items() if "skip" in str(key))),
             metric_card("Blocked", sum(value for key, value in counts_by_decision.items() if "block" in str(key))),
             metric_card("False Negatives", len(false_negatives)),

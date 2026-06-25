@@ -266,7 +266,9 @@ def test_learning_internal_ingest_routes_persist_rows(tmp_path, monkeypatch):
     assert heartbeat_response.status_code == 200
 
     health = client.get("/learning/health?hours=1").json()
-    assert health["status"] == "processing"
+    assert health["status"] == "active"
+    assert health["sent_count"] == 1
+    assert health["send_rate"] == 100.0
     assert health["worker_heartbeat"]["status"] == "healthy"
     assert health["worker_heartbeat"]["metadata"]["deploy_sha"] == "abc123"
 
