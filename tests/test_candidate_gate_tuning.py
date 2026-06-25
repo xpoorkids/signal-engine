@@ -94,7 +94,7 @@ def test_wallet_distribution_fail_reasons_flags_bundle_and_severe_concentration(
     reasons = _wallet_distribution_fail_reasons(
         {
             "risk": "high",
-            "top_holder_pct": 0.22,
+            "top_holder_pct": 0.36,
         },
         total_buys_30s=8,
         unique_wallets_30s=2,
@@ -106,11 +106,11 @@ def test_wallet_distribution_fail_reasons_flags_bundle_and_severe_concentration(
     assert "bundle_pattern_detected" in reasons
 
 
-def test_wallet_distribution_fail_reasons_keeps_moderate_concentration_out_of_hard_fail():
+def test_wallet_distribution_fail_reasons_keeps_common_launch_concentration_out_of_hard_fail():
     reasons = _wallet_distribution_fail_reasons(
         {
             "risk": "high",
-            "top_holder_pct": 0.14,
+            "top_holder_pct": 0.22,
         },
         total_buys_30s=5,
         unique_wallets_30s=5,

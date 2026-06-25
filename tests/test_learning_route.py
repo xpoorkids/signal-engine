@@ -427,6 +427,12 @@ def test_learning_validation_routes_return_summary_and_dashboard(tmp_path, monke
     assert missed_response.status_code == 200
     assert missed_response.json()["missed_runner_count"] >= 1
 
+    opportunities_response = client.get("/learning/ops/daily-opportunities?hours=10000&limit=10")
+    assert opportunities_response.status_code == 200
+    opportunities_payload = opportunities_response.json()
+    assert opportunities_payload["positive_unsent"] >= 1
+    assert opportunities_payload["opportunities"][0]["action"] in {"review_wallet_blocker", "watch_now", "inspect"}
+
     policies_response = client.get("/learning/validation/policies?hours=10000&limit=20")
     assert policies_response.status_code == 200
     assert policies_response.json()["variant_count"] >= 1

@@ -26,6 +26,7 @@ from app.services.signal_learning_service import (
     ingest_runtime_heartbeat,
     get_learning_digest,
     get_latest_learning_report,
+    get_daily_opportunity_brief,
     get_policy_regime_summary,
     get_latest_policy_automation_run,
     get_latest_policy_replay,
@@ -819,6 +820,11 @@ def learning_ops_digest_dashboard(hours: int = 24):
 @router.get("/learning/ops/digest/text")
 def learning_ops_digest_text(hours: int = 24):
     return PlainTextResponse(content=render_ops_digest_text(hours=max(1, hours)))
+
+
+@router.get("/learning/ops/daily-opportunities")
+def learning_ops_daily_opportunities(hours: int = 6, limit: int = 25):
+    return get_daily_opportunity_brief(hours=max(1, hours), limit=max(1, limit))
 
 
 @router.post("/learning/ops/digest/send")

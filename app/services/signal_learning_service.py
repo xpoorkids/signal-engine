@@ -5846,6 +5846,106 @@ def get_missed_runner_analysis(*, hours: int = 168, limit: int = 50) -> dict[str
     return _build_missed_runner_analysis(records, hours=hours, limit=limit)
 
 
+def get_daily_opportunity_brief(*, hours: int = 6, limit: int = 25) -> dict[str, Any]:
+    lookback = max(1, int(hours))
+    result_limit = max(1, min(int(limit), 100))
+    records = get_live_validation_records(
+        hours=lookback,
+        limit=max(300, min(2000, result_limit * 20)),
+        sent_only=False,
+    )
+    cards: list[dict[str, Any]] = []
+    family_counts: dict[str, int] = {}
+    for record in records:
+        reasons = [str(item) for item in record.get("decision_reasons") or []]
+        families = sorted({_reason_family(reason) for reason in reasons})
+        for family in families:
+            family_counts[family] = family_counts.get(family, 0) + 1
+        outcome = str(record.get("outcome_label") or "pending")
+        route = str(record.get("final_route_class") or "unknown")
+        sent = bool(record.get("sent_to_discord"))
+        attention = _to_float(record.get("attention_score")) or 0.0
+        risk = _to_float(record.get("risk_score")) or 0.0
+        market_cap_change = _to_float(record.get("outcome_market_cap_change_pct"))
+        severe_safety = any(reason in {"mint_authority_active", "freeze_authority_active", "bundle_pattern_detected"} for reason in reasons)
+        wallet_blocked = any(_reason_family(reason) == "wallet_quality" for reason in reasons)
+        positive = outcome in _POSITIVE_OUTCOME_LABELS
+        pending = outcome in {"pending", "insufficient_data", ""}
+        score = 0.0
+        if positive:
+            score += 65.0
+        if pending:
+            score += 20.0
+        if not sent:
+            score += 8.0
+        if wallet_blocked:
+            score += 10.0
+        if route in {"sniper", "heating_up"}:
+            score += 12.0
+        score += min(12.0, attention * 20.0)
+        if market_cap_change is not None:
+            score += max(-10.0, min(20.0, market_cap_change / 10.0))
+        if severe_safety:
+            score -= 35.0
+        action = "inspect"
+        if severe_safety:
+            action = "avoid_unless_manual_override"
+        elif positive and wallet_blocked:
+            action = "review_wallet_blocker"
+        elif pending and attention >= 0.14 and not sent:
+            action = "watch_now"
+        elif sent:
+            action = "monitor_sent_alert"
+        cards.append(
+            {
+                "token": record.get("token"),
+                "signal_id": record.get("signal_id"),
+                "timestamp": record.get("timestamp"),
+                "action": action,
+                "opportunity_score": round(score, 2),
+                "route_class": route,
+                "sent_to_discord": sent,
+                "decision_name": record.get("decision_name"),
+                "outcome_label": outcome,
+                "market_cap_change_pct": market_cap_change,
+                "attention_score": attention,
+                "risk_score": risk,
+                "binding_reasons": reasons[:8],
+                "binding_gate_families": families,
+                "key_metrics": record.get("key_metrics") if isinstance(record.get("key_metrics"), dict) else {},
+            }
+        )
+    cards.sort(
+        key=lambda item: (
+            -float(item.get("opportunity_score") or 0.0),
+            0 if item.get("action") in {"watch_now", "review_wallet_blocker"} else 1,
+            -float(item.get("market_cap_change_pct") or 0.0),
+            str(item.get("token") or ""),
+        )
+    )
+    sent_count = sum(1 for record in records if record.get("sent_to_discord"))
+    positive_unsent = sum(
+        1
+        for record in records
+        if not record.get("sent_to_discord") and str(record.get("outcome_label") or "") in _POSITIVE_OUTCOME_LABELS
+    )
+    return {
+        "lookback_hours": lookback,
+        "sample_size": len(records),
+        "sent_alerts": sent_count,
+        "positive_unsent": positive_unsent,
+        "top_blocker_families": [
+            {"family": family, "count": count}
+            for family, count in sorted(family_counts.items(), key=lambda pair: (-pair[1], pair[0]))[:10]
+        ],
+        "opportunities": cards[:result_limit],
+        "notes": [
+            "Use this as a triage feed, not a buy command.",
+            "Execution validation remains stricter than watchlist routing.",
+        ],
+    }
+
+
 def get_policy_validation_comparison(*, hours: int = 168, limit: int = 12, record_limit: int = 5000) -> dict[str, Any]:
     records = get_live_validation_records(hours=hours, limit=max(1, record_limit), sent_only=False)
     grouped: dict[str, dict[str, Any]] = {}
