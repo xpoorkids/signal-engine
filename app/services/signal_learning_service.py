@@ -554,21 +554,25 @@ def get_learning_storage_status(*, accurate_counts: bool = True) -> dict[str, An
             decision_count = int(c.execute("SELECT COALESCE(MAX(rowid), 0) FROM signal_decisions").fetchone()[0] or 0)
             snapshot_count = int(c.execute("SELECT COALESCE(MAX(rowid), 0) FROM signal_snapshots").fetchone()[0] or 0)
             count_mode = "estimated"
-        job_counts = {
-            str(row[0] or "unknown"): int(row[1] or 0)
-            for row in c.execute(
-                "SELECT status, COUNT(1) FROM signal_snapshot_jobs GROUP BY status"
-            ).fetchall()
-        }
         now = int(time.time())
         stale_before = now - _snapshot_max_lag_seconds()
-        stale_pending_count = int(
-            c.execute(
-                "SELECT COUNT(1) FROM signal_snapshot_jobs WHERE status='pending' AND due_ts < ?",
-                (stale_before,),
-            ).fetchone()[0]
-            or 0
-        )
+        if accurate_counts:
+            job_counts = {
+                str(row[0] or "unknown"): int(row[1] or 0)
+                for row in c.execute(
+                    "SELECT status, COUNT(1) FROM signal_snapshot_jobs GROUP BY status"
+                ).fetchall()
+            }
+            stale_pending_count = int(
+                c.execute(
+                    "SELECT COUNT(1) FROM signal_snapshot_jobs WHERE status='pending' AND due_ts < ?",
+                    (stale_before,),
+                ).fetchone()[0]
+                or 0
+            )
+        else:
+            job_counts = {}
+            stale_pending_count = None
     return {
         "db_path": str(db_path),
         "db_path_env": (
@@ -583,6 +587,7 @@ def get_learning_storage_status(*, accurate_counts: bool = True) -> dict[str, An
         "count_mode": count_mode,
         "snapshot_job_counts": job_counts,
         "stale_pending_snapshot_jobs": stale_pending_count,
+        "snapshot_job_counts_sampled": not accurate_counts,
         "snapshot_max_lag_seconds": _snapshot_max_lag_seconds(),
         "write_config": write_config,
     }
