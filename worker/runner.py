@@ -372,7 +372,7 @@ async def event_loop(q: asyncio.Queue) -> None:
                     if delivered and isinstance(buyer, str) and buyer:
                         record_wallet_signal(buyer, de.token or "", de.type)
                     signal_id = _persist_non_candidate_delivery(de, delivered)
-                    if delivered and signal_id and de.type == "promoted":
+                    if delivered and signal_id:
                         maybe_open_shadow_position(de)
                 elif de.type == "candidate":
                     if de.token and not can_alert(state, f"candidate:{de.token}", CANDIDATE_ALERT_COOLDOWN_SEC):
@@ -409,6 +409,8 @@ async def event_loop(q: asyncio.Queue) -> None:
                         message_id=delivery.message_id,
                         edited=bool(message_id),
                     )
+                    if delivery.success:
+                        maybe_open_shadow_position(de)
         except Exception as ex:
             log_event(
                 logger,

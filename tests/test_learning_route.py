@@ -382,8 +382,49 @@ def test_learning_validation_routes_return_summary_and_dashboard(tmp_path, monke
         policy_version="route-v1",
         ts_value=1_773_940_000,
     )
+    observe_id = sls.record_signal_decision(
+        token="token-observe-route",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_buffered",
+        action_taken="hold",
+        reasons=["wallet_guard_watch_only"],
+        attention_score=0.52,
+        risk_score=0.50,
+        confidence_score=0.55,
+        lifecycle="dex",
+        policy_name="route-policy",
+        policy_version="route-v1",
+        features={
+            "wallet_guard_watch_only": True,
+            "wallet_guard_category": "early_concentration",
+            "wallet_guard_original_reasons": [
+                "wallet_distribution_high_risk",
+                "wallet_top_holder_concentration",
+            ],
+            "route_tier": "candidate",
+            "route_confirmations": ["buyer_breadth", "market_support"],
+            "unique_buyers_5m": 5,
+            "liquidity_usd": 30000,
+        },
+        ts_value=1_773_940_030,
+    )
     with sls._connect() as c:
-        c.execute(
+        for row in (
+            (
+                signal_id,
+                100.0,
+                "strong_continuation",
+                '{"outcome_label":"strong_continuation","liquidity_usd":18000,"txns_m5_buys":120,"txns_m5_sells":40,"price_change_m5":12.0}',
+            ),
+            (
+                observe_id,
+                30.0,
+                "worked",
+                '{"outcome_label":"worked","liquidity_usd":32000,"txns_m5_buys":18,"txns_m5_sells":10,"price_change_m5":4.0}',
+            ),
+        ):
+            c.execute(
             """
             INSERT INTO signal_snapshots (
                 signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
@@ -393,7 +434,7 @@ def test_learning_validation_routes_return_summary_and_dashboard(tmp_path, monke
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                signal_id,
+                row[0],
                 60,
                 1_773_943_600,
                 "dex",
@@ -405,11 +446,11 @@ def test_learning_validation_routes_return_summary_and_dashboard(tmp_path, monke
                 60.0,
                 120,
                 40,
-                100.0,
+                row[1],
                 25.0,
                 35.0,
-                "strong_continuation",
-                '{"outcome_label":"strong_continuation"}',
+                row[2],
+                row[3],
             ),
         )
 
@@ -436,7 +477,21 @@ def test_learning_validation_routes_return_summary_and_dashboard(tmp_path, monke
     assert "blocker_tuning" in opportunities_payload
     assert "shadow_summary" in opportunities_payload
     assert "shadow_execution" in opportunities_payload["opportunities"][0]
+    assert "alert_label" in opportunities_payload["opportunities"][0]
+    assert "graduation" in opportunities_payload["opportunities"][0]
     assert opportunities_payload["opportunities"][0]["action"] in {"review_wallet_blocker", "watch_now", "inspect"}
+
+    observe_response = client.get("/learning/ops/observe-review?hours=10000&limit=10")
+    assert observe_response.status_code == 200
+    observe_payload = observe_response.json()
+    assert observe_payload["queue_size"] >= 1
+    assert any(item["token"] == "token-observe-route" for item in observe_payload["items"])
+
+    token_review_response = client.get("/learning/ops/token-review/token-observe-route?hours=10000&limit=10")
+    assert token_review_response.status_code == 200
+    token_review_payload = token_review_response.json()
+    assert token_review_payload["token"] == "token-observe-route"
+    assert token_review_payload["record_count"] >= 1
 
     opportunities_dashboard_response = client.get("/learning/ops/daily-opportunities/dashboard?hours=10000&limit=10")
     assert opportunities_dashboard_response.status_code == 200

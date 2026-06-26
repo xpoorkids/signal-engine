@@ -5802,6 +5802,16 @@ def get_live_validation_records(
             "route_confirmations": features.get("route_confirmations") if isinstance(features.get("route_confirmations"), list) else [],
             "route_blockers": features.get("route_blockers") if isinstance(features.get("route_blockers"), list) else [],
             "sniper_blockers": features.get("sniper_blockers") if isinstance(features.get("sniper_blockers"), list) else [],
+            "wallet_guard": {
+                "category": str(features.get("wallet_guard_category") or "none"),
+                "watch_only": bool(features.get("wallet_guard_watch_only")),
+                "original_reasons": features.get("wallet_guard_original_reasons")
+                if isinstance(features.get("wallet_guard_original_reasons"), list)
+                else [],
+                "observe_blockers": features.get("wallet_guard_observe_blockers")
+                if isinstance(features.get("wallet_guard_observe_blockers"), list)
+                else [],
+            },
             "outcome_label": snapshot.get("outcome_label"),
             "outcome_market_cap_change_pct": snapshot.get("market_cap_change_pct"),
             "outcome_liquidity_change_pct": snapshot.get("liquidity_change_pct"),
@@ -5816,6 +5826,9 @@ def get_live_validation_records(
             market_cap_change_pct=_to_float(snapshot.get("market_cap_change_pct")),
             age_minutes=_to_float(row[16]),
         )
+        record["alert_label"] = _alert_quality_label(record, features)
+        record["graduation"] = _graduation_score(record, features)
+        record["positive_unsent_learning"] = _positive_unsent_suggestion(record)
         records.append(record)
         if len(records) >= max(1, limit):
             break
@@ -5882,6 +5895,99 @@ def _build_missed_runner_analysis(
 def get_missed_runner_analysis(*, hours: int = 168, limit: int = 50) -> dict[str, Any]:
     records = get_live_validation_records(hours=hours, limit=max(limit * 5, 200), sent_only=False)
     return _build_missed_runner_analysis(records, hours=hours, limit=limit)
+
+
+def _alert_quality_label(record: dict[str, Any], features: dict[str, Any]) -> str:
+    if bool(features.get("wallet_guard_watch_only")):
+        return "Observe"
+    route = str(record.get("final_route_class") or "").strip().lower()
+    if route == "promoted":
+        return "Promoted"
+    if route in {"sniper", "heating_up"}:
+        return "Heating"
+    if route == "candidate":
+        return "Watch"
+    reasons = [str(item) for item in record.get("decision_reasons") or []]
+    if any(reason in {"mint_authority_active", "freeze_authority_active", "bundle_pattern_detected"} for reason in reasons):
+        return "Risk"
+    return "Observe" if record.get("sent_to_discord") is False else "Watch"
+
+
+def _graduation_score(record: dict[str, Any], features: dict[str, Any]) -> dict[str, Any]:
+    metrics = record.get("key_metrics") if isinstance(record.get("key_metrics"), dict) else {}
+    outcome = record.get("outcome_snapshot") if isinstance(record.get("outcome_snapshot"), dict) else {}
+    liquidity_usd = _to_float(metrics.get("liquidity_usd")) or _to_float(record.get("liquidity_usd")) or 0.0
+    outcome_liquidity = _to_float(outcome.get("liquidity_usd"))
+    market_cap_change = _to_float(record.get("outcome_market_cap_change_pct"))
+    liquidity_change = _to_float(record.get("outcome_liquidity_change_pct"))
+    volume_change = _to_float(record.get("outcome_volume_m5_change_pct"))
+    price_change_m5 = _to_float(outcome.get("price_change_m5"))
+    buys = _to_int(outcome.get("txns_m5_buys")) or 0
+    sells = _to_int(outcome.get("txns_m5_sells")) or 0
+    unique_buyers = _to_int(metrics.get("unique_buyers_5m")) or 0
+    confirmations = [str(item) for item in record.get("route_confirmations") or []]
+    reasons: list[str] = []
+    score = 0
+    if (outcome_liquidity or liquidity_usd) >= 15000:
+        score += 18
+        reasons.append("liquidity_floor")
+    if liquidity_change is not None and liquidity_change >= -10:
+        score += 14
+        reasons.append("liquidity_holding")
+    if market_cap_change is not None and market_cap_change >= 15:
+        score += 18
+        reasons.append("market_cap_expanding")
+    if volume_change is not None and volume_change >= -50:
+        score += 10
+        reasons.append("volume_not_collapsing")
+    if buys >= 10 or unique_buyers >= 4:
+        score += 16
+        reasons.append("buyer_breadth")
+    if buys > 0 and (sells / buys) <= 1.2:
+        score += 12
+        reasons.append("sell_pressure_contained")
+    if price_change_m5 is not None and price_change_m5 >= -8:
+        score += 6
+        reasons.append("price_holding")
+    if {"market_support", "buyer_breadth"} & set(confirmations):
+        score += 6
+        reasons.append("route_confirmation")
+
+    score = max(0, min(100, int(score)))
+    if score >= 72:
+        stage = "ready_for_watch"
+    elif score >= 50:
+        stage = "continue_observing"
+    elif score >= 25:
+        stage = "early_observe"
+    else:
+        stage = "do_not_graduate"
+    if bool(features.get("wallet_guard_watch_only")) and stage == "ready_for_watch":
+        stage = "observe_ready_for_review"
+    return {"score": score, "stage": stage, "reasons": reasons[:8]}
+
+
+def _positive_unsent_suggestion(record: dict[str, Any]) -> dict[str, Any] | None:
+    if record.get("sent_to_discord"):
+        return None
+    if str(record.get("outcome_label") or "") not in _POSITIVE_OUTCOME_LABELS:
+        return None
+    reasons = [str(item) for item in record.get("decision_reasons") or []]
+    families = sorted({_reason_family(reason) for reason in reasons})
+    graduation = record.get("graduation") if isinstance(record.get("graduation"), dict) else {}
+    recommendation = "review_observe_graduation"
+    if "wallet_quality" in families:
+        recommendation = "wallet_guard_v2_candidate"
+    elif "market_quality" in families:
+        recommendation = "market_confirmation_threshold_review"
+    elif "timing" in families:
+        recommendation = "age_gate_followup_review"
+    return {
+        "recommendation": recommendation,
+        "why": reasons[:5],
+        "graduation_stage": graduation.get("stage"),
+        "graduation_score": graduation.get("score"),
+    }
 
 
 def _build_blocker_tuning(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -6034,6 +6140,7 @@ def get_daily_opportunity_brief(*, hours: int = 6, limit: int = 25) -> dict[str,
                 "signal_id": record.get("signal_id"),
                 "timestamp": record.get("timestamp"),
                 "action": action,
+                "alert_label": record.get("alert_label"),
                 "opportunity_score": round(score, 2),
                 "route_class": route,
                 "sent_to_discord": sent,
@@ -6045,6 +6152,9 @@ def get_daily_opportunity_brief(*, hours: int = 6, limit: int = 25) -> dict[str,
                 "binding_reasons": reasons[:8],
                 "binding_gate_families": families,
                 "key_metrics": record.get("key_metrics") if isinstance(record.get("key_metrics"), dict) else {},
+                "wallet_guard": record.get("wallet_guard") if isinstance(record.get("wallet_guard"), dict) else {},
+                "graduation": record.get("graduation") if isinstance(record.get("graduation"), dict) else {},
+                "positive_unsent_learning": record.get("positive_unsent_learning"),
             }
         )
     cards.sort(
@@ -6079,6 +6189,80 @@ def get_daily_opportunity_brief(*, hours: int = 6, limit: int = 25) -> dict[str,
             "Use this as a triage feed, not a buy command.",
             "Execution validation remains stricter than watchlist routing.",
         ],
+    }
+
+
+def get_observe_review_queue(*, hours: int = 24, limit: int = 50) -> dict[str, Any]:
+    records = get_live_validation_records(hours=max(1, hours), limit=max(300, min(3000, limit * 25)), sent_only=False)
+    queue: list[dict[str, Any]] = []
+    for record in records:
+        wallet = record.get("wallet_guard") if isinstance(record.get("wallet_guard"), dict) else {}
+        graduation = record.get("graduation") if isinstance(record.get("graduation"), dict) else {}
+        observe_like = (
+            str(record.get("alert_label") or "") == "Observe"
+            or bool(wallet.get("watch_only"))
+            or record.get("positive_unsent_learning") is not None
+        )
+        if not observe_like:
+            continue
+        priority = 0.0
+        priority += float(graduation.get("score") or 0) * 0.6
+        if record.get("positive_unsent_learning"):
+            priority += 25
+        if bool(wallet.get("watch_only")):
+            priority += 12
+        if str(wallet.get("category") or "") in {"hard_fraud"}:
+            priority -= 40
+        queue.append(
+            {
+                "token": record.get("token"),
+                "signal_id": record.get("signal_id"),
+                "timestamp": record.get("timestamp"),
+                "priority": round(priority, 2),
+                "alert_label": record.get("alert_label"),
+                "route_class": record.get("final_route_class"),
+                "decision_name": record.get("decision_name"),
+                "sent_to_discord": record.get("sent_to_discord"),
+                "outcome_label": record.get("outcome_label"),
+                "market_cap_change_pct": record.get("outcome_market_cap_change_pct"),
+                "wallet_guard": wallet,
+                "graduation": graduation,
+                "learning": record.get("positive_unsent_learning"),
+                "binding_reasons": record.get("decision_reasons") or [],
+                "key_metrics": record.get("key_metrics") if isinstance(record.get("key_metrics"), dict) else {},
+            }
+        )
+    queue.sort(key=lambda item: (-float(item.get("priority") or 0.0), str(item.get("token") or "")))
+    selected = queue[: max(1, min(int(limit), 200))]
+    shadow_summary = _enrich_opportunities_with_shadow(selected)
+    return {
+        "lookback_hours": max(1, hours),
+        "queue_size": len(queue),
+        "returned": len(selected),
+        "shadow_summary": shadow_summary,
+        "items": selected,
+        "notes": [
+            "Observe review is for better discrimination, not an automatic send list.",
+            "Hard fraud categories remain blocked even when price later moves.",
+        ],
+    }
+
+
+def get_token_review_drilldown(token: str, *, hours: int = 168, limit: int = 25) -> dict[str, Any]:
+    target = str(token or "").strip()
+    records = [
+        record
+        for record in get_live_validation_records(hours=max(1, hours), limit=max(200, min(5000, limit * 50)), sent_only=False)
+        if str(record.get("token") or "").strip() == target
+    ][: max(1, min(int(limit), 100))]
+    shadow_summary = _enrich_opportunities_with_shadow(records)
+    return {
+        "token": target,
+        "lookback_hours": max(1, hours),
+        "record_count": len(records),
+        "latest": records[0] if records else None,
+        "records": records,
+        "shadow_summary": shadow_summary,
     }
 
 

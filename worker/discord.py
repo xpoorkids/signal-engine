@@ -671,7 +671,14 @@ def _signal_type(e: Event, attention_score: float | None, risk_score: float | No
 
 
 def _signal_title(signal_type: str, symbol: str) -> str:
-    return truncate_text(f"${symbol}", 256)
+    label = {
+        "watch": "WATCH",
+        "setup": "WATCH",
+        "breakout": "HEATING",
+        "promoted": "PROMOTED",
+        "risk_alert": "RISK",
+    }.get(signal_type, "OBSERVE")
+    return truncate_text(f"{label} | ${symbol}", 256)
 
 
 def _decision_field(extra: dict | None, confidence_pct: str, lifecycle: str, conviction: str, confidence_score: float | None, risk_score: float | None) -> dict:

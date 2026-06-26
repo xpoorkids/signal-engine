@@ -15,7 +15,7 @@ def maybe_open_shadow_position(event) -> str | None:
         return None
     if not SHADOW_EXECUTION_ENABLED:
         return None
-    if getattr(event, "type", "") != "promoted":
+    if getattr(event, "type", "") not in {"candidate", "heating_up", "promoted"}:
         return None
     try:
         return shadow_execution_service.open_shadow_position(event)

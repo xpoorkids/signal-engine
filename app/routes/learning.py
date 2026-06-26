@@ -21,6 +21,7 @@ from app.services.signal_learning_service import (
     get_live_validation_records,
     get_live_validation_summary,
     get_missed_runner_analysis,
+    get_observe_review_queue,
     ingest_signal_decision,
     ingest_signal_event,
     ingest_runtime_heartbeat,
@@ -39,6 +40,7 @@ from app.services.signal_learning_service import (
     list_policy_rollout_events,
     get_policy_trace_summary,
     get_policy_replay,
+    get_token_review_drilldown,
     get_policy_validation_comparison,
     prune_stale_snapshot_jobs,
     resolve_live_policy,
@@ -840,6 +842,16 @@ def learning_ops_daily_opportunities_dashboard(hours: int = 6, limit: int = 25):
 @router.get("/learning/ops/daily-opportunities/text")
 def learning_ops_daily_opportunities_text(hours: int = 6, limit: int = 10):
     return PlainTextResponse(content=render_daily_opportunity_text(hours=max(1, hours), limit=max(1, limit)))
+
+
+@router.get("/learning/ops/observe-review")
+def learning_ops_observe_review(hours: int = 24, limit: int = 50):
+    return get_observe_review_queue(hours=max(1, hours), limit=max(1, limit))
+
+
+@router.get("/learning/ops/token-review/{token}")
+def learning_ops_token_review(token: str, hours: int = 168, limit: int = 25):
+    return get_token_review_drilldown(token, hours=max(1, hours), limit=max(1, limit))
 
 
 @router.post("/learning/ops/daily-opportunities/send")

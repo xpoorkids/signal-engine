@@ -347,6 +347,26 @@ WALLET_GUARD_REASONS = {
 }
 
 
+def _wallet_guard_category(
+    reasons: list[str],
+    *,
+    wallet_observe_ok: bool = False,
+    attention_metrics: dict[str, Any] | None = None,
+) -> str:
+    reason_set = {str(reason) for reason in reasons}
+    metrics = attention_metrics if isinstance(attention_metrics, dict) else {}
+    smart_wallet_hits = int(metrics.get("tracked_wallet_hits") or 0) + int(metrics.get("kol_wallet_hits") or 0)
+    if reason_set & {"mint_authority_active", "freeze_authority_active", "bundle_pattern_detected"}:
+        return "hard_fraud"
+    if wallet_observe_ok:
+        return "smart_accumulation" if smart_wallet_hits > 0 else "early_concentration"
+    if reason_set & WALLET_GUARD_REASONS:
+        return "early_concentration"
+    if "liquidity_unknown" in reason_set:
+        return "unknown_wallet_structure"
+    return "none"
+
+
 def _wallet_guard_observe_decision(
     hard_fail_reasons: list[str],
     *,
@@ -544,6 +564,10 @@ def _record_decision(
         "candidate_improved": extra.get("candidate_improved"),
         "candidate_rate_limit_allowed": extra.get("candidate_rate_limit_allowed"),
         "candidate_progression_ok": extra.get("candidate_progression_ok"),
+        "wallet_guard_category": extra.get("wallet_guard_category"),
+        "wallet_guard_watch_only": bool(extra.get("wallet_guard_watch_only")),
+        "wallet_guard_original_reasons": extra.get("wallet_guard_original_reasons") or [],
+        "wallet_guard_observe_blockers": extra.get("wallet_guard_observe_blockers") or [],
         "has_dex_pool": bool(dex_summary),
         "lp_drain": extra.get("lp_drain"),
         "creator_sell": extra.get("creator_sold"),
@@ -1114,6 +1138,11 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             )
             extra["wallet_guard_original_reasons"] = list(dict.fromkeys(hard_fail_reasons))
             extra["wallet_guard_observe_blockers"] = wallet_observe_blockers
+            extra["wallet_guard_category"] = _wallet_guard_category(
+                hard_fail_reasons,
+                wallet_observe_ok=wallet_observe_ok,
+                attention_metrics=attn_metrics,
+            )
             if wallet_observe_ok:
                 hard_fail = False
                 hard_fail_reasons = []
@@ -1162,6 +1191,12 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             dex_summary=dex_summary,
         )
         extra["route_decision"] = route_decision
+        if "wallet_guard_category" not in extra:
+            extra["wallet_guard_category"] = _wallet_guard_category(
+                list(extra.get("wallet_guard_original_reasons") or []),
+                wallet_observe_ok=bool(extra.get("wallet_guard_watch_only")),
+                attention_metrics=attn_metrics,
+            )
         route_tier = str(route_decision.get("tier") or "watch")
         route_confidence = float(route_decision.get("route_confidence") or 0.0)
         age_bypass_eligible = bool(route_decision.get("age_bypass_eligible"))

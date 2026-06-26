@@ -272,3 +272,45 @@ def test_event_loop_only_records_wallet_signal_after_successful_delivery(monkeyp
 
     assert persisted == [False]
     assert recorded_wallets == []
+
+
+def test_event_loop_opens_shadow_for_successful_candidate_delivery(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    opened: list[str] = []
+
+    async def _process_event(*_args, **_kwargs):
+        return [
+            Event(
+                type="candidate",
+                source="engine",
+                token="token-shadow-candidate",
+                extra={"candidate_send": True},
+            )
+        ]
+
+    class _Delivery:
+        success = True
+        message_id = "message-1"
+
+    async def _run_once():
+        task = asyncio.create_task(runner.event_loop(queue))
+        await queue.put(Event(type="trade_buy", source="test", token="token-shadow-candidate", signature="sig-shadow"))
+        await queue.join()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    monkeypatch.setattr(runner, "state_init", lambda: None)
+    monkeypatch.setattr(runner, "learning_init", lambda: None)
+    monkeypatch.setattr(runner, "is_sig_new", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(runner, "process_event", _process_event)
+    monkeypatch.setattr(runner, "can_alert", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(runner, "send_candidate_discord", lambda *_args, **_kwargs: _Delivery())
+    monkeypatch.setattr(runner, "_persist_candidate_delivery", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "maybe_open_shadow_position", lambda event: opened.append(event.type))
+
+    asyncio.run(_run_once())
+
+    assert opened == ["candidate"]

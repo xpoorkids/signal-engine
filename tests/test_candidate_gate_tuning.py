@@ -1,6 +1,7 @@
 from worker.alert_gate import admission_check_candidate
 from worker.promote import (
     _candidate_send_eligible,
+    _wallet_guard_category,
     _wallet_distribution_fail_reasons,
     _wallet_guard_observe_decision,
 )
@@ -160,3 +161,17 @@ def test_wallet_guard_observe_blocks_mixed_or_weak_hard_fail():
 
     assert allowed is False
     assert blockers == ["non_wallet_hard_fail"]
+
+
+def test_wallet_guard_v2_categories_separate_fraud_and_accumulation():
+    assert _wallet_guard_category(["mint_authority_active"]) == "hard_fraud"
+    assert (
+        _wallet_guard_category(
+            ["wallet_top_holder_concentration"],
+            wallet_observe_ok=True,
+            attention_metrics={"tracked_wallet_hits": 1},
+        )
+        == "smart_accumulation"
+    )
+    assert _wallet_guard_category(["wallet_distribution_high_risk"]) == "early_concentration"
+    assert _wallet_guard_category(["liquidity_unknown"]) == "unknown_wallet_structure"

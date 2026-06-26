@@ -324,7 +324,7 @@ def test_format_discord_overview_uses_new_hierarchy():
 
     embed = format_discord(event)["embeds"][0]
 
-    assert embed["title"] == "$PUMPERS"
+    assert embed["title"] == "WATCH | $PUMPERS"
     assert embed["fields"][0]["name"] == "Token Identity"
     assert "**Asset:** Pumpers" in _candidate_field(embed, "Token Identity")
     assert "**Ticker:** `$PUMPERS`" in _candidate_field(embed, "Token Identity")
