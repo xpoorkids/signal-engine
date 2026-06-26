@@ -55,6 +55,8 @@ from app.services.signal_learning_service import (
     render_diagnostics_html,
     render_daily_opportunity_html,
     render_daily_opportunity_text,
+    render_ready_for_watch_html,
+    render_ready_for_watch_text,
     render_live_validation_html,
     render_learning_digest_html,
     render_learning_report_html,
@@ -69,6 +71,7 @@ from app.services.tuning_service import (
     apply_pending_rollout_verifications,
     dispatch_daily_opportunity_digest,
     dispatch_ops_digest,
+    dispatch_ready_for_watch_digest,
     get_daily_readiness,
     get_config_drift_report,
     get_latest_tuning_approval,
@@ -863,6 +866,24 @@ def learning_ops_observe_lifecycle(limit: int = 100, status: str | None = None):
 @router.get("/learning/ops/observe-review/ready-for-watch")
 def learning_ops_ready_for_watch(limit: int = 50):
     return get_ready_for_watch_queue(limit=max(1, limit))
+
+
+@router.get("/learning/ops/observe-review/ready-for-watch/text")
+def learning_ops_ready_for_watch_text(limit: int = 10):
+    return PlainTextResponse(content=render_ready_for_watch_text(limit=max(1, limit)))
+
+
+@router.get("/learning/ops/observe-review/ready-for-watch/dashboard")
+def learning_ops_ready_for_watch_dashboard(limit: int = 25):
+    return HTMLResponse(content=render_ready_for_watch_html(limit=max(1, limit)))
+
+
+@router.post("/learning/ops/observe-review/ready-for-watch/send")
+def learning_ops_ready_for_watch_send(payload: dict[str, object] = Body(default={})):
+    return dispatch_ready_for_watch_digest(
+        limit=max(1, int(payload.get("limit") or 10)),
+        force=bool(payload.get("force") or False),
+    )
 
 
 @router.post("/learning/ops/observe-review/sync")

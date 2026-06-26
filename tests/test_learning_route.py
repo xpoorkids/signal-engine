@@ -302,6 +302,21 @@ def test_learning_observe_ops_routes(monkeypatch):
     )
     monkeypatch.setattr(
         learning_route,
+        "render_ready_for_watch_text",
+        lambda **kwargs: "# ready\n- token-ready",
+    )
+    monkeypatch.setattr(
+        learning_route,
+        "render_ready_for_watch_html",
+        lambda **kwargs: "<html><body>Ready For Watch</body></html>",
+    )
+    monkeypatch.setattr(
+        learning_route,
+        "dispatch_ready_for_watch_digest",
+        lambda **kwargs: {"dispatched": True, "digest_type": "ready_for_watch_digest", **kwargs},
+    )
+    monkeypatch.setattr(
+        learning_route,
         "apply_observe_review_action",
         lambda token, **kwargs: {"token": token, "status": "shadow_only", **kwargs},
     )
@@ -317,6 +332,9 @@ def test_learning_observe_ops_routes(monkeypatch):
     assert client.post("/learning/ops/observe-review/recheck", json={"limit": 3}).json()["processed"] == 1
     assert client.get("/learning/ops/observe-review/lifecycle?limit=2").json()["returned"] == 1
     assert client.get("/learning/ops/observe-review/ready-for-watch?limit=2").json()["items"][0]["token"] == "token-ready"
+    assert "token-ready" in client.get("/learning/ops/observe-review/ready-for-watch/text?limit=2").text
+    assert "Ready For Watch" in client.get("/learning/ops/observe-review/ready-for-watch/dashboard?limit=2").text
+    assert client.post("/learning/ops/observe-review/ready-for-watch/send", json={"limit": 2, "force": True}).json()["dispatched"] is True
     action = client.post(
         "/learning/ops/observe-review/token-route-observe/action",
         json={"action": "approve_watch_override", "note": "route test"},

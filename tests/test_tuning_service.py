@@ -13,6 +13,7 @@ from app.services.tuning_service import (
     create_tuning_approval,
     dispatch_policy_tiered_ops_digests,
     dispatch_ops_digest,
+    dispatch_ready_for_watch_digest,
     get_config_drift_report,
     get_latest_tuning_approval,
     get_ops_digest,
@@ -443,6 +444,48 @@ def test_ops_digest_worker_runs_single_iteration(monkeypatch):
         assert str(exc) == "stop-loop"
 
     assert calls == ["tick"]
+
+
+def test_ready_for_watch_digest_dispatches_and_cools_down(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+    queue = {
+        "returned": 1,
+        "total_ready": 1,
+        "items": [
+            {
+                "token": "token-ready-digest",
+                "priority": 105.0,
+                "graduation_score": 94,
+                "wallet_category": "concentration_watch",
+                "market_cap_change_pct": 114.0,
+            }
+        ],
+    }
+    monkeypatch.setattr(sls, "get_ready_for_watch_queue", lambda **kwargs: queue)
+    monkeypatch.setattr(sls, "render_ready_for_watch_text", lambda **kwargs: "# Ready\n- token-ready-digest")
+
+    dispatched = dispatch_ready_for_watch_digest(limit=5, force=False)
+    assert dispatched["dispatched"] is True
+    assert dispatched["notification"]["event_type"] == "ready_for_watch_digest"
+    assert dispatched["notification"]["delivery_status"] == "disabled"
+
+    cooldown = dispatch_ready_for_watch_digest(limit=5, force=False)
+    assert cooldown["dispatched"] is False
+    assert cooldown["reason"] == "cooldown_unchanged_digest"
+
+
+def test_ready_for_watch_digest_skips_empty_queue(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+    monkeypatch.setattr(sls, "get_ready_for_watch_queue", lambda **kwargs: {"returned": 0, "total_ready": 0, "items": []})
+
+    result = dispatch_ready_for_watch_digest(limit=5, force=False)
+
+    assert result["dispatched"] is False
+    assert result["reason"] == "no_ready_for_watch_rows"
 
 
 def test_ops_digest_escalates_to_incident_on_heavy_gate_pressure(tmp_path, monkeypatch):

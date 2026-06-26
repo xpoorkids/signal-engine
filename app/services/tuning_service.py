@@ -3204,6 +3204,76 @@ def _daily_opportunity_signature(brief: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def _ready_for_watch_signature(queue: dict[str, Any]) -> str:
+    payload = {
+        "total_ready": queue.get("total_ready"),
+        "top_ready": [
+            {
+                "token": item.get("token"),
+                "priority": item.get("priority"),
+                "score": item.get("graduation_score"),
+                "wallet_category": item.get("wallet_category"),
+                "market_cap_change_pct": item.get("market_cap_change_pct"),
+            }
+            for item in (queue.get("items") or [])[:10]
+            if isinstance(item, dict)
+        ],
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def dispatch_ready_for_watch_digest(limit: int = 10, *, force: bool = False) -> dict[str, Any]:
+    queue = sls.get_ready_for_watch_queue(limit=max(1, limit))
+    digest_type = "ready_for_watch_digest"
+    signature = _ready_for_watch_signature(queue)
+    latest = _latest_rollout_notification(digest_type)
+    cooldown_seconds = _ops_digest_cooldown_seconds()
+    if latest and not force:
+        latest_payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
+        latest_signature = str(latest_payload.get("digest_signature") or "")
+        age_seconds = max(0, int(time.time()) - int(latest.get("created_ts") or 0))
+        if latest_signature == signature and age_seconds < cooldown_seconds:
+            return {
+                "dispatched": False,
+                "reason": "cooldown_unchanged_digest",
+                "digest_type": digest_type,
+                "cooldown_seconds": cooldown_seconds,
+                "age_seconds": age_seconds,
+                "latest_notification_id": latest.get("notification_id"),
+                "digest": queue,
+            }
+    if not force and int(queue.get("total_ready") or 0) <= 0:
+        return {
+            "dispatched": False,
+            "reason": "no_ready_for_watch_rows",
+            "digest_type": digest_type,
+            "digest": queue,
+        }
+    text = sls.render_ready_for_watch_text(limit=max(1, limit))
+    notification = emit_rollout_notification(
+        event_type=digest_type,
+        level="warning" if int(queue.get("total_ready") or 0) > 0 else "info",
+        message=f"[ready-for-watch] {int(queue.get('total_ready') or 0)} observe graduates awaiting review",
+        target_name="ready-for-watch",
+        deployment_service=_default_deployment_metadata().get("deployment_service") or None,
+        deployment_sha=_default_deployment_metadata().get("deployment_sha") or None,
+        payload={
+            "digest_type": digest_type,
+            "digest_signature": signature,
+            "total_ready": queue.get("total_ready"),
+            "returned": queue.get("returned"),
+            "ready_for_watch_text": text,
+            "items": queue.get("items"),
+        },
+    )
+    return {
+        "dispatched": True,
+        "digest_type": digest_type,
+        "notification": notification,
+        "digest": queue,
+    }
+
+
 def dispatch_daily_opportunity_digest(hours: int = 6, limit: int = 10, *, force: bool = False) -> dict[str, Any]:
     brief = sls.get_daily_opportunity_brief(hours=max(1, hours), limit=max(1, limit))
     digest_type = "daily_opportunity_digest"

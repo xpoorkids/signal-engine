@@ -6893,6 +6893,88 @@ def get_ready_for_watch_queue(*, limit: int = 50) -> dict[str, Any]:
     }
 
 
+def render_ready_for_watch_text(*, limit: int = 10) -> str:
+    queue = get_ready_for_watch_queue(limit=max(1, limit))
+    lines = [
+        "# Signal Engine Ready For Watch",
+        f"Ready rows: {queue.get('total_ready')}",
+        f"Returned: {queue.get('returned')}",
+        "",
+        "Top Graduates:",
+    ]
+    for item in queue.get("items") or []:
+        lines.append(
+            f"- approve_watch_override priority={item.get('priority')} score={item.get('graduation_score')} "
+            f"wallet={item.get('wallet_category')} mc={item.get('market_cap_change_pct')} token={item.get('token')}"
+        )
+    if not queue.get("items"):
+        lines.append("- No ready-for-watch rows.")
+    lines.append("")
+    lines.append("Review Notes:")
+    for note in queue.get("notes") or []:
+        lines.append(f"- {note}")
+    return "\n".join(lines).strip()
+
+
+def render_ready_for_watch_html(*, limit: int = 25) -> str:
+    queue = get_ready_for_watch_queue(limit=max(1, limit))
+    rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('priority') or ''))}</td>"
+        f"<td>{html.escape(str(item.get('graduation_score') or ''))}</td>"
+        f"<td>{html.escape(str(item.get('wallet_category') or ''))}</td>"
+        f"<td>{html.escape(str(item.get('market_cap_change_pct') or ''))}</td>"
+        f"<td>{html.escape(str(item.get('token') or ''))}</td>"
+        f"<td>{html.escape(', '.join(str(reason) for reason in (item.get('reasons') or [])[:4]))}</td>"
+        f"<td>{html.escape(str(item.get('review_endpoint') or ''))}</td>"
+        "</tr>"
+        for item in queue.get("items") or []
+        if isinstance(item, dict)
+    ) or '<tr><td colspan="7">No ready-for-watch rows.</td></tr>'
+    notes = "".join(f"<li>{html.escape(str(note))}</li>" for note in queue.get("notes") or [])
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ready For Watch</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; font-family: "Segoe UI", sans-serif; color: #17202a; background: #f6f8fb; }}
+    main {{ max-width: 1180px; margin: 0 auto; padding: 24px 16px 40px; }}
+    section {{ background: #fff; border: 1px solid #d9e2ec; border-radius: 8px; padding: 18px; margin-bottom: 16px; }}
+    h1 {{ margin: 0 0 8px; font-size: 28px; }}
+    h2 {{ margin: 0 0 12px; font-size: 18px; }}
+    .metrics {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
+    .metric {{ border: 1px solid #d9e2ec; border-radius: 8px; background: #fbfcfe; padding: 12px; }}
+    .metric span {{ display: block; color: #64788c; font-size: 12px; }}
+    .metric strong {{ font-size: 22px; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ border-bottom: 1px solid #e2e8ef; padding: 10px; text-align: left; vertical-align: top; font-size: 13px; }}
+    th {{ color: #40566d; font-size: 12px; text-transform: uppercase; }}
+    @media (max-width: 860px) {{ .metrics {{ grid-template-columns: 1fr; }} table {{ display: block; overflow-x: auto; }} }}
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>Ready For Watch</h1>
+      <p>Manual approval queue for observe graduates.</p>
+    </section>
+    <section class="metrics">
+      <div class="metric"><span>Total Ready</span><strong>{int(queue.get('total_ready') or 0)}</strong></div>
+      <div class="metric"><span>Returned</span><strong>{int(queue.get('returned') or 0)}</strong></div>
+    </section>
+    <section>
+      <h2>Graduates</h2>
+      <table><thead><tr><th>Priority</th><th>Score</th><th>Wallet</th><th>MC %</th><th>Token</th><th>Reasons</th><th>Action Endpoint</th></tr></thead><tbody>{rows}</tbody></table>
+    </section>
+    <section><h2>Notes</h2><ul>{notes}</ul></section>
+  </main>
+</body>
+</html>"""
+
+
 def get_wallet_guard_feedback(*, hours: int = 168, limit: int = 1000) -> dict[str, Any]:
     records = get_live_validation_records(hours=max(1, hours), limit=max(100, min(int(limit), 5000)), sent_only=False)
     groups: dict[str, dict[str, Any]] = {}
