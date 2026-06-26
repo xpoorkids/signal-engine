@@ -40,6 +40,8 @@ _REMOTE_WRITE_RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 _DEFAULT_DECISION_DEDUP_WINDOW_SECONDS = 60
 _POSITIVE_OUTCOME_LABELS = {"worked", "strong_continuation"}
 _NEGATIVE_OUTCOME_LABELS = {"failed", "faded"}
+_OBSERVE_RECHECK_DELAYS_SECONDS = (180, 420, 900, 1800)
+_OBSERVE_ACTIVE_STATUSES = {"observe", "review", "ready_for_watch", "shadow_only"}
 
 
 def _snapshot_max_lag_seconds() -> int:
@@ -359,6 +361,48 @@ def init() -> None:
         )
         c.execute(
             """
+            CREATE TABLE IF NOT EXISTS observe_reviews (
+                token TEXT PRIMARY KEY,
+                first_signal_id TEXT,
+                latest_signal_id TEXT,
+                status TEXT NOT NULL DEFAULT 'observe',
+                action TEXT,
+                priority REAL,
+                graduation_score REAL,
+                graduation_stage TEXT,
+                wallet_category TEXT,
+                reasons_json TEXT NOT NULL DEFAULT '[]',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                first_seen_ts INTEGER NOT NULL,
+                updated_ts INTEGER NOT NULL,
+                next_recheck_ts INTEGER,
+                recheck_count INTEGER NOT NULL DEFAULT 0,
+                operator_note TEXT,
+                suppressed_until_ts INTEGER
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS observe_shadow_positions (
+                token TEXT PRIMARY KEY,
+                signal_id TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                opened_ts INTEGER NOT NULL,
+                updated_ts INTEGER NOT NULL,
+                entry_market_cap_usd REAL,
+                entry_liquidity_usd REAL,
+                latest_market_cap_usd REAL,
+                latest_liquidity_usd REAL,
+                latest_market_cap_change_pct REAL,
+                latest_liquidity_change_pct REAL,
+                graduation_score REAL,
+                payload_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        c.execute(
+            """
             CREATE TABLE IF NOT EXISTS policy_replay_runs (
                 run_id TEXT PRIMARY KEY,
                 created_ts INTEGER NOT NULL,
@@ -475,6 +519,9 @@ def init() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_tuning_approvals_ts ON tuning_approvals(created_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_rollout_notifications_ts ON rollout_notifications(created_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_ts ON signal_decisions(created_ts, decision)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_observe_reviews_due ON observe_reviews(status, next_recheck_ts)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_observe_reviews_updated ON observe_reviews(updated_ts DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_observe_shadow_updated ON observe_shadow_positions(updated_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_replay_runs_ts ON policy_replay_runs(created_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_replay_results_run ON policy_replay_results(run_id, changed)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_profiles_name ON policy_profiles(policy_name, created_ts DESC)")
@@ -6195,6 +6242,7 @@ def get_daily_opportunity_brief(*, hours: int = 6, limit: int = 25) -> dict[str,
 def get_observe_review_queue(*, hours: int = 24, limit: int = 50) -> dict[str, Any]:
     records = get_live_validation_records(hours=max(1, hours), limit=max(300, min(3000, limit * 25)), sent_only=False)
     queue: list[dict[str, Any]] = []
+    shadow_lookup = _get_observe_shadow_lookup()
     for record in records:
         wallet = record.get("wallet_guard") if isinstance(record.get("wallet_guard"), dict) else {}
         graduation = record.get("graduation") if isinstance(record.get("graduation"), dict) else {}
@@ -6230,6 +6278,7 @@ def get_observe_review_queue(*, hours: int = 24, limit: int = 50) -> dict[str, A
                 "learning": record.get("positive_unsent_learning"),
                 "binding_reasons": record.get("decision_reasons") or [],
                 "key_metrics": record.get("key_metrics") if isinstance(record.get("key_metrics"), dict) else {},
+                "observe_shadow": shadow_lookup.get(str(record.get("token") or "").strip()),
             }
         )
     queue.sort(key=lambda item: (-float(item.get("priority") or 0.0), str(item.get("token") or "")))
@@ -6246,6 +6295,601 @@ def get_observe_review_queue(*, hours: int = 24, limit: int = 50) -> dict[str, A
             "Hard fraud categories remain blocked even when price later moves.",
         ],
     }
+
+
+def _observe_next_recheck_ts(now: int, recheck_count: int) -> int:
+    idx = max(0, min(int(recheck_count or 0), len(_OBSERVE_RECHECK_DELAYS_SECONDS) - 1))
+    return now + _OBSERVE_RECHECK_DELAYS_SECONDS[idx]
+
+
+def _observe_status_for_graduation(graduation: dict[str, Any], *, recheck_count: int = 0) -> str:
+    stage = str(graduation.get("stage") or "")
+    score = float(graduation.get("score") or 0.0)
+    if stage in {"ready_for_watch", "observe_ready_for_review"} or score >= 72:
+        return "ready_for_watch"
+    if score < 25 and recheck_count >= 2:
+        return "failed"
+    return "observe"
+
+
+def _observe_action_for_status(status: str) -> str:
+    if status == "ready_for_watch":
+        return "review_promote"
+    if status in {"failed", "suppressed"}:
+        return "suppress"
+    if status == "shadow_only":
+        return "shadow"
+    return "hold"
+
+
+def _observe_decision_for_status(status: str, *, created: bool = False) -> str:
+    if created:
+        return "observe_created"
+    if status == "ready_for_watch":
+        return "observe_graduated_watch"
+    if status == "failed":
+        return "observe_failed"
+    if status == "suppressed":
+        return "observe_suppressed"
+    if status == "shadow_only":
+        return "observe_shadow_only"
+    return "observe_recheck_pass"
+
+
+def _observe_reasons(record: dict[str, Any], graduation: dict[str, Any], wallet: dict[str, Any]) -> list[str]:
+    reasons = [str(item) for item in (graduation.get("reasons") or []) if str(item or "").strip()]
+    reasons.extend(str(item) for item in (record.get("decision_reasons") or []) if str(item or "").strip())
+    category = str(wallet.get("category") or "").strip()
+    if category:
+        reasons.append(f"wallet_guard:{category}")
+    deduped: list[str] = []
+    for reason in reasons:
+        if reason not in deduped:
+            deduped.append(reason)
+    return deduped[:12]
+
+
+def _observe_shadow_payload(record: dict[str, Any]) -> dict[str, Any]:
+    metrics = record.get("key_metrics") if isinstance(record.get("key_metrics"), dict) else {}
+    return {
+        "alert_label": record.get("alert_label"),
+        "route_class": record.get("final_route_class"),
+        "decision_name": record.get("decision_name"),
+        "outcome_label": record.get("outcome_label"),
+        "wallet_guard": record.get("wallet_guard") if isinstance(record.get("wallet_guard"), dict) else {},
+        "graduation": record.get("graduation") if isinstance(record.get("graduation"), dict) else {},
+        "key_metrics": metrics,
+        "positive_unsent_learning": record.get("positive_unsent_learning"),
+    }
+
+
+def _upsert_observe_shadow_position(c: sqlite3.Connection, record: dict[str, Any], *, now: int) -> bool:
+    token = str(record.get("token") or "").strip()
+    if not token:
+        return False
+    metrics = record.get("key_metrics") if isinstance(record.get("key_metrics"), dict) else {}
+    graduation = record.get("graduation") if isinstance(record.get("graduation"), dict) else {}
+    latest_market_cap = _to_float(record.get("outcome_market_cap_usd")) or _to_float(metrics.get("market_cap_usd"))
+    latest_liquidity = _to_float(record.get("outcome_liquidity_usd")) or _to_float(metrics.get("liquidity_usd"))
+    row = c.execute(
+        "SELECT opened_ts, entry_market_cap_usd, entry_liquidity_usd FROM observe_shadow_positions WHERE token=?",
+        (token,),
+    ).fetchone()
+    opened_ts = int(row["opened_ts"]) if row else now
+    entry_market_cap = _to_float(row["entry_market_cap_usd"]) if row else _to_float(metrics.get("market_cap_usd"))
+    entry_liquidity = _to_float(row["entry_liquidity_usd"]) if row else _to_float(metrics.get("liquidity_usd"))
+    market_cap_change = _to_float(record.get("outcome_market_cap_change_pct"))
+    if market_cap_change is None:
+        market_cap_change = _to_float(record.get("market_cap_change_pct"))
+    if market_cap_change is None and entry_market_cap and latest_market_cap:
+        market_cap_change = ((latest_market_cap - entry_market_cap) / entry_market_cap) * 100.0
+    liquidity_change = _to_float(record.get("outcome_liquidity_change_pct"))
+    if liquidity_change is None:
+        liquidity_change = _to_float(record.get("liquidity_change_pct"))
+    if liquidity_change is None and entry_liquidity and latest_liquidity:
+        liquidity_change = ((latest_liquidity - entry_liquidity) / entry_liquidity) * 100.0
+    c.execute(
+        """
+        INSERT INTO observe_shadow_positions (
+            token, signal_id, status, opened_ts, updated_ts, entry_market_cap_usd, entry_liquidity_usd,
+            latest_market_cap_usd, latest_liquidity_usd, latest_market_cap_change_pct,
+            latest_liquidity_change_pct, graduation_score, payload_json
+        )
+        VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(token) DO UPDATE SET
+            signal_id=excluded.signal_id,
+            updated_ts=excluded.updated_ts,
+            latest_market_cap_usd=excluded.latest_market_cap_usd,
+            latest_liquidity_usd=excluded.latest_liquidity_usd,
+            latest_market_cap_change_pct=excluded.latest_market_cap_change_pct,
+            latest_liquidity_change_pct=excluded.latest_liquidity_change_pct,
+            graduation_score=excluded.graduation_score,
+            payload_json=excluded.payload_json
+        """,
+        (
+            token,
+            record.get("signal_id"),
+            opened_ts,
+            now,
+            entry_market_cap,
+            entry_liquidity,
+            latest_market_cap,
+            latest_liquidity,
+            market_cap_change,
+            liquidity_change,
+            _to_float(graduation.get("score")),
+            _json_dumps(_observe_shadow_payload(record)),
+        ),
+    )
+    return row is None
+
+
+def _get_observe_shadow_lookup(tokens: list[str] | None = None) -> dict[str, dict[str, Any]]:
+    _ensure_schema()
+    params: list[Any] = []
+    where = ""
+    normalized = [str(token or "").strip() for token in (tokens or []) if str(token or "").strip()]
+    if normalized:
+        where = f"WHERE token IN ({','.join('?' for _ in normalized)})"
+        params.extend(normalized)
+    with _connect() as c:
+        rows = c.execute(
+            f"""
+            SELECT token, signal_id, status, opened_ts, updated_ts, entry_market_cap_usd, entry_liquidity_usd,
+                   latest_market_cap_usd, latest_liquidity_usd, latest_market_cap_change_pct,
+                   latest_liquidity_change_pct, graduation_score, payload_json
+            FROM observe_shadow_positions
+            {where}
+            ORDER BY updated_ts DESC
+            LIMIT 500
+            """,
+            params,
+        ).fetchall()
+    lookup: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        token = str(row["token"] or "")
+        lookup[token] = {
+            "token": token,
+            "signal_id": row["signal_id"],
+            "status": row["status"],
+            "opened_ts": row["opened_ts"],
+            "updated_ts": row["updated_ts"],
+            "entry_market_cap_usd": row["entry_market_cap_usd"],
+            "entry_liquidity_usd": row["entry_liquidity_usd"],
+            "latest_market_cap_usd": row["latest_market_cap_usd"],
+            "latest_liquidity_usd": row["latest_liquidity_usd"],
+            "latest_market_cap_change_pct": row["latest_market_cap_change_pct"],
+            "latest_liquidity_change_pct": row["latest_liquidity_change_pct"],
+            "graduation_score": row["graduation_score"],
+            "payload": _json_loads_dict(row["payload_json"]),
+        }
+    return lookup
+
+
+def sync_observe_review_queue(*, hours: int = 24, limit: int = 200) -> dict[str, Any]:
+    _ensure_schema()
+    queue = get_observe_review_queue(hours=max(1, hours), limit=max(1, min(limit, 500)))
+    now = int(time.time())
+    created = 0
+    updated = 0
+    shadow_opened = 0
+    decisions: list[dict[str, Any]] = []
+    with _connect() as c:
+        for item in queue.get("items") or []:
+            token = str(item.get("token") or "").strip()
+            if not token:
+                continue
+            wallet = item.get("wallet_guard") if isinstance(item.get("wallet_guard"), dict) else {}
+            graduation = item.get("graduation") if isinstance(item.get("graduation"), dict) else {}
+            row = c.execute("SELECT status, first_seen_ts, recheck_count FROM observe_reviews WHERE token=?", (token,)).fetchone()
+            was_created = row is None
+            recheck_count = int(row["recheck_count"] or 0) if row else 0
+            current_status = str(row["status"] or "observe") if row else "observe"
+            status = current_status if current_status not in _OBSERVE_ACTIVE_STATUSES else _observe_status_for_graduation(graduation, recheck_count=recheck_count)
+            action = _observe_action_for_status(status)
+            reasons = _observe_reasons(item, graduation, wallet)
+            c.execute(
+                """
+                INSERT INTO observe_reviews (
+                    token, first_signal_id, latest_signal_id, status, action, priority, graduation_score,
+                    graduation_stage, wallet_category, reasons_json, payload_json, first_seen_ts,
+                    updated_ts, next_recheck_ts, recheck_count
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(token) DO UPDATE SET
+                    latest_signal_id=excluded.latest_signal_id,
+                    status=excluded.status,
+                    action=excluded.action,
+                    priority=excluded.priority,
+                    graduation_score=excluded.graduation_score,
+                    graduation_stage=excluded.graduation_stage,
+                    wallet_category=excluded.wallet_category,
+                    reasons_json=excluded.reasons_json,
+                    payload_json=excluded.payload_json,
+                    updated_ts=excluded.updated_ts,
+                    next_recheck_ts=COALESCE(observe_reviews.next_recheck_ts, excluded.next_recheck_ts)
+                """,
+                (
+                    token,
+                    item.get("signal_id"),
+                    item.get("signal_id"),
+                    status,
+                    action,
+                    _to_float(item.get("priority")),
+                    _to_float(graduation.get("score")),
+                    graduation.get("stage"),
+                    wallet.get("category"),
+                    _json_dumps(reasons),
+                    _json_dumps(item),
+                    int(row["first_seen_ts"]) if row else now,
+                    now,
+                    _observe_next_recheck_ts(now, recheck_count),
+                    recheck_count,
+                ),
+            )
+            if _upsert_observe_shadow_position(c, item, now=now):
+                shadow_opened += 1
+            if was_created or status != current_status:
+                decision = _observe_decision_for_status(status, created=was_created)
+                decisions.append(
+                    {
+                        "token": token,
+                        "signal_id": item.get("signal_id"),
+                        "decision": decision,
+                        "action_taken": action,
+                        "reasons": reasons,
+                        "features": {"observe_review": item, "observe_status": status},
+                    }
+                )
+            if was_created:
+                created += 1
+            else:
+                updated += 1
+    for decision in decisions:
+        _persist_signal_decision(
+            token=decision["token"],
+            event_type="observe_review",
+            stage="observe",
+            decision=decision["decision"],
+            action_taken=decision["action_taken"],
+            reasons=decision["reasons"],
+            features=decision["features"],
+            signal_id=decision.get("signal_id"),
+            source="observe_lifecycle",
+            ts_value=now,
+        )
+    return {
+        "status": "ok",
+        "lookback_hours": max(1, hours),
+        "queue_size": queue.get("queue_size", 0),
+        "created": created,
+        "updated": updated,
+        "observe_shadow_opened": shadow_opened,
+    }
+
+
+def run_observe_rechecks(*, limit: int = 50) -> dict[str, Any]:
+    _ensure_schema()
+    now = int(time.time())
+    max_limit = max(1, min(int(limit), 200))
+    with _connect() as c:
+        rows = c.execute(
+            """
+            SELECT token, latest_signal_id, recheck_count, payload_json
+            FROM observe_reviews
+            WHERE status IN ('observe', 'review', 'ready_for_watch', 'shadow_only')
+              AND (next_recheck_ts IS NULL OR next_recheck_ts <= ?)
+              AND (suppressed_until_ts IS NULL OR suppressed_until_ts <= ?)
+            ORDER BY COALESCE(next_recheck_ts, 0), priority DESC
+            LIMIT ?
+            """,
+            (now, now, max_limit),
+        ).fetchall()
+    processed: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
+    for row in rows:
+        token = str(row["token"] or "")
+        drilldown = get_token_review_drilldown(token, hours=168, limit=10)
+        record = drilldown.get("latest") if isinstance(drilldown.get("latest"), dict) else _json_loads_dict(row["payload_json"])
+        wallet = record.get("wallet_guard") if isinstance(record.get("wallet_guard"), dict) else {}
+        graduation = record.get("graduation") if isinstance(record.get("graduation"), dict) else {}
+        recheck_count = int(row["recheck_count"] or 0) + 1
+        status = _observe_status_for_graduation(graduation, recheck_count=recheck_count)
+        action = _observe_action_for_status(status)
+        reasons = _observe_reasons(record, graduation, wallet)
+        next_recheck_ts = None if status in {"ready_for_watch", "failed"} else _observe_next_recheck_ts(now, recheck_count)
+        with _connect() as c:
+            c.execute(
+                """
+                UPDATE observe_reviews
+                SET latest_signal_id=?, status=?, action=?, priority=?, graduation_score=?, graduation_stage=?,
+                    wallet_category=?, reasons_json=?, payload_json=?, updated_ts=?, next_recheck_ts=?,
+                    recheck_count=?
+                WHERE token=?
+                """,
+                (
+                    record.get("signal_id") or row["latest_signal_id"],
+                    status,
+                    action,
+                    _to_float(record.get("priority")),
+                    _to_float(graduation.get("score")),
+                    graduation.get("stage"),
+                    wallet.get("category"),
+                    _json_dumps(reasons),
+                    _json_dumps(record),
+                    now,
+                    next_recheck_ts,
+                    recheck_count,
+                    token,
+                ),
+            )
+            _upsert_observe_shadow_position(c, record, now=now)
+        decision_name = _observe_decision_for_status(status)
+        decisions.append(
+            {
+                "token": token,
+                "signal_id": record.get("signal_id") or row["latest_signal_id"],
+                "decision": decision_name,
+                "action_taken": action,
+                "reasons": reasons,
+                "features": {
+                    "observe_status": status,
+                    "recheck_count": recheck_count,
+                    "graduation": graduation,
+                    "wallet_guard": wallet,
+                },
+            }
+        )
+        processed.append(
+            {
+                "token": token,
+                "status": status,
+                "action": action,
+                "graduation": graduation,
+                "recheck_count": recheck_count,
+                "next_recheck_ts": next_recheck_ts,
+            }
+        )
+    for decision in decisions:
+        _persist_signal_decision(
+            token=decision["token"],
+            event_type="observe_review",
+            stage="observe",
+            decision=decision["decision"],
+            action_taken=decision["action_taken"],
+            reasons=decision["reasons"],
+            features=decision["features"],
+            signal_id=decision.get("signal_id"),
+            source="observe_recheck",
+            ts_value=now,
+        )
+    return {"status": "ok", "processed": len(processed), "items": processed}
+
+
+def apply_observe_review_action(
+    token: str,
+    *,
+    action: str,
+    note: str | None = None,
+    suppress_hours: int = 24,
+    operator: str | None = None,
+) -> dict[str, Any]:
+    _ensure_schema()
+    target = str(token or "").strip()
+    if not target:
+        raise ValueError("token is required")
+    normalized_action = str(action or "").strip().lower()
+    status_by_action = {
+        "promote_to_watch": "ready_for_watch",
+        "suppress": "suppressed",
+        "mark_bad": "failed",
+        "track_shadow_only": "shadow_only",
+    }
+    if normalized_action not in status_by_action:
+        raise ValueError("action must be promote_to_watch, suppress, mark_bad, or track_shadow_only")
+    now = int(time.time())
+    status = status_by_action[normalized_action]
+    suppress_until = now + max(1, int(suppress_hours or 24)) * 3600 if status == "suppressed" else None
+    action_taken = _observe_action_for_status(status)
+    with _connect() as c:
+        row = c.execute("SELECT token, latest_signal_id, payload_json FROM observe_reviews WHERE token=?", (target,)).fetchone()
+        if not row:
+            raise KeyError(target)
+        c.execute(
+            """
+            UPDATE observe_reviews
+            SET status=?, action=?, operator_note=?, suppressed_until_ts=?, updated_ts=?, next_recheck_ts=NULL
+            WHERE token=?
+            """,
+            (status, action_taken, note, suppress_until, now, target),
+        )
+    decision_name = {
+        "promote_to_watch": "observe_operator_promoted_watch",
+        "suppress": "observe_operator_suppressed",
+        "mark_bad": "observe_operator_marked_bad",
+        "track_shadow_only": "observe_operator_shadow_only",
+    }[normalized_action]
+    _persist_signal_decision(
+        token=target,
+        event_type="observe_review",
+        stage="observe",
+        decision=decision_name,
+        action_taken=action_taken,
+        reasons=[normalized_action] + ([str(note)] if note else []),
+        features={"operator": operator, "status": status, "suppress_until_ts": suppress_until},
+        signal_id=row["latest_signal_id"],
+        source="observe_operator",
+        ts_value=now,
+    )
+    return {
+        "token": target,
+        "status": status,
+        "action": action_taken,
+        "operator_note": note,
+        "suppressed_until_ts": suppress_until,
+    }
+
+
+def get_observe_lifecycle_state(*, limit: int = 100, status: str | None = None) -> dict[str, Any]:
+    _ensure_schema()
+    params: list[Any] = []
+    where = ""
+    if status:
+        where = "WHERE status=?"
+        params.append(status)
+    params.append(max(1, min(int(limit), 500)))
+    with _connect() as c:
+        rows = c.execute(
+            f"""
+            SELECT token, first_signal_id, latest_signal_id, status, action, priority, graduation_score,
+                   graduation_stage, wallet_category, reasons_json, payload_json, first_seen_ts, updated_ts,
+                   next_recheck_ts, recheck_count, operator_note, suppressed_until_ts
+            FROM observe_reviews
+            {where}
+            ORDER BY updated_ts DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    shadow_lookup = _get_observe_shadow_lookup([str(row["token"] or "") for row in rows])
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        token = str(row["token"] or "")
+        items.append(
+            {
+                "token": token,
+                "first_signal_id": row["first_signal_id"],
+                "latest_signal_id": row["latest_signal_id"],
+                "status": row["status"],
+                "action": row["action"],
+                "priority": row["priority"],
+                "graduation_score": row["graduation_score"],
+                "graduation_stage": row["graduation_stage"],
+                "wallet_category": row["wallet_category"],
+                "reasons": _json_loads_list(row["reasons_json"]),
+                "payload": _json_loads_dict(row["payload_json"]),
+                "first_seen_ts": row["first_seen_ts"],
+                "updated_ts": row["updated_ts"],
+                "next_recheck_ts": row["next_recheck_ts"],
+                "recheck_count": row["recheck_count"],
+                "operator_note": row["operator_note"],
+                "suppressed_until_ts": row["suppressed_until_ts"],
+                "observe_shadow": shadow_lookup.get(token),
+            }
+        )
+    counts: dict[str, int] = {}
+    for item in items:
+        key = str(item.get("status") or "unknown")
+        counts[key] = counts.get(key, 0) + 1
+    return {"returned": len(items), "status_counts": counts, "items": items}
+
+
+def get_wallet_guard_feedback(*, hours: int = 168, limit: int = 1000) -> dict[str, Any]:
+    records = get_live_validation_records(hours=max(1, hours), limit=max(100, min(int(limit), 5000)), sent_only=False)
+    groups: dict[str, dict[str, Any]] = {}
+    for record in records:
+        wallet = record.get("wallet_guard") if isinstance(record.get("wallet_guard"), dict) else {}
+        category = str(wallet.get("category") or "none")
+        item = groups.setdefault(
+            category,
+            {
+                "category": category,
+                "count": 0,
+                "watch_only": 0,
+                "sent": 0,
+                "positive": 0,
+                "positive_unsent": 0,
+                "negative": 0,
+                "graduation_scores": [],
+                "market_cap_changes": [],
+                "sample_tokens": [],
+            },
+        )
+        item["count"] += 1
+        if bool(wallet.get("watch_only")):
+            item["watch_only"] += 1
+        if bool(record.get("sent_to_discord")):
+            item["sent"] += 1
+        outcome = str(record.get("outcome_label") or "")
+        if outcome in _POSITIVE_OUTCOME_LABELS:
+            item["positive"] += 1
+            if not record.get("sent_to_discord"):
+                item["positive_unsent"] += 1
+        elif outcome in _NEGATIVE_OUTCOME_LABELS:
+            item["negative"] += 1
+        graduation = record.get("graduation") if isinstance(record.get("graduation"), dict) else {}
+        score = _to_float(graduation.get("score"))
+        if score is not None:
+            item["graduation_scores"].append(score)
+        market_cap_change = _to_float(record.get("outcome_market_cap_change_pct"))
+        if market_cap_change is not None:
+            item["market_cap_changes"].append(market_cap_change)
+        token = str(record.get("token") or "")
+        if token and len(item["sample_tokens"]) < 5:
+            item["sample_tokens"].append(token)
+    feedback: list[dict[str, Any]] = []
+    for item in groups.values():
+        scores = [float(value) for value in item.pop("graduation_scores")]
+        changes = [float(value) for value in item.pop("market_cap_changes")]
+        count = int(item.get("count") or 0)
+        positive_unsent = int(item.get("positive_unsent") or 0)
+        negative = int(item.get("negative") or 0)
+        watch_only = int(item.get("watch_only") or 0)
+        recommendation = "keep_observing"
+        if str(item.get("category")) == "hard_fraud":
+            recommendation = "keep_blocked"
+        elif positive_unsent >= 2 and negative <= max(1, positive_unsent // 2):
+            recommendation = "graduate_more_with_review"
+        elif watch_only >= 3 and negative > positive_unsent:
+            recommendation = "keep_watch_only"
+        feedback.append(
+            {
+                **item,
+                "positive_rate_pct": round((int(item.get("positive") or 0) / count) * 100.0, 2) if count else 0.0,
+                "positive_unsent_rate_pct": round((positive_unsent / count) * 100.0, 2) if count else 0.0,
+                "negative_rate_pct": round((negative / count) * 100.0, 2) if count else 0.0,
+                "avg_graduation_score": round(sum(scores) / len(scores), 2) if scores else None,
+                "avg_market_cap_change_pct": round(sum(changes) / len(changes), 4) if changes else None,
+                "recommendation": recommendation,
+            }
+        )
+    feedback.sort(
+        key=lambda item: (
+            0 if item.get("recommendation") == "graduate_more_with_review" else 1,
+            -int(item.get("positive_unsent") or 0),
+            -int(item.get("count") or 0),
+            str(item.get("category") or ""),
+        )
+    )
+    return {"lookback_hours": max(1, hours), "sample_size": len(records), "categories": feedback}
+
+
+def _observe_recheck_poll_seconds() -> int:
+    raw = os.getenv("SIGNAL_ENGINE_OBSERVE_RECHECK_POLL_SECONDS", "120").strip()
+    try:
+        return max(30, int(raw))
+    except (TypeError, ValueError):
+        return 120
+
+
+async def observe_recheck_worker() -> None:
+    init()
+    while True:
+        try:
+            sync = sync_observe_review_queue(
+                hours=max(1, int(os.getenv("SIGNAL_ENGINE_OBSERVE_SYNC_HOURS", "24"))),
+                limit=max(1, int(os.getenv("SIGNAL_ENGINE_OBSERVE_SYNC_LIMIT", "200"))),
+            )
+            recheck = run_observe_rechecks(limit=max(1, int(os.getenv("SIGNAL_ENGINE_OBSERVE_RECHECK_LIMIT", "50"))))
+            logger.info(
+                "[observe-recheck] synced created=%s updated=%s processed=%s",
+                sync.get("created"),
+                sync.get("updated"),
+                recheck.get("processed"),
+            )
+        except Exception as exc:
+            logger.exception("[observe-recheck] worker iteration failed: %s", exc)
+        await asyncio.sleep(_observe_recheck_poll_seconds())
 
 
 def get_token_review_drilldown(token: str, *, hours: int = 168, limit: int = 25) -> dict[str, Any]:

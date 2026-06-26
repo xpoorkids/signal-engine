@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from app.routes import health, scan, score, packet, watch, review, learning
 
 from app.services.db_service import resolve_engine_db_path
-from app.services.signal_learning_service import daily_report_worker, policy_automation_worker, snapshot_worker
+from app.services.signal_learning_service import daily_report_worker, observe_recheck_worker, policy_automation_worker, snapshot_worker
 
 os.environ.setdefault("SIGNAL_ENGINE_PROCESS_ROLE", "engine")
 
@@ -57,6 +57,12 @@ def _learning_workers_enabled() -> bool:
     return os.getenv("SIGNAL_ENGINE_ENABLE_LEARNING_WORKERS", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _observe_recheck_worker_enabled() -> bool:
+    if not _learning_workers_enabled():
+        return False
+    return os.getenv("SIGNAL_ENGINE_ENABLE_OBSERVE_RECHECK_WORKER", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _snapshot_worker_enabled() -> bool:
     if os.getenv("PYTEST_CURRENT_TEST"):
         return False
@@ -86,6 +92,13 @@ async def start_background_workers() -> None:
         logger.warning("[startup] learning daily report worker enabled")
     else:
         logger.warning("[startup] learning daily report worker disabled")
+    if _observe_recheck_worker_enabled():
+        name = "observe_recheck"
+        if name not in _BACKGROUND_TASKS or _BACKGROUND_TASKS[name].done():
+            _BACKGROUND_TASKS[name] = asyncio.create_task(observe_recheck_worker(), name=name)
+        logger.warning("[startup] observe recheck worker enabled")
+    else:
+        logger.warning("[startup] observe recheck worker disabled")
     if _policy_automation_worker_enabled() and ("policy_automation" not in _BACKGROUND_TASKS or _BACKGROUND_TASKS["policy_automation"].done()):
         _BACKGROUND_TASKS["policy_automation"] = asyncio.create_task(policy_automation_worker(), name="policy_automation_worker")
         logger.warning("[startup] policy automation worker enabled")

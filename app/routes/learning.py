@@ -16,12 +16,15 @@ from app.services.signal_learning_service import (
     generate_policy_candidates,
     get_engine_health_digest,
     get_historical_corpus_summary,
+    apply_observe_review_action,
     get_policy_automation_status,
     get_diagnostics_summary,
     get_live_validation_records,
     get_live_validation_summary,
     get_missed_runner_analysis,
     get_observe_review_queue,
+    get_observe_lifecycle_state,
+    get_wallet_guard_feedback,
     ingest_signal_decision,
     ingest_signal_event,
     ingest_runtime_heartbeat,
@@ -44,6 +47,7 @@ from app.services.signal_learning_service import (
     get_policy_validation_comparison,
     prune_stale_snapshot_jobs,
     resolve_live_policy,
+    run_observe_rechecks,
     run_policy_automation_cycle,
     run_policy_replay,
     render_engine_health_html,
@@ -53,6 +57,7 @@ from app.services.signal_learning_service import (
     render_live_validation_html,
     render_learning_digest_html,
     render_learning_report_html,
+    sync_observe_review_queue,
     update_policy_approval_status,
 )
 from app.services.tuning_service import (
@@ -847,6 +852,45 @@ def learning_ops_daily_opportunities_text(hours: int = 6, limit: int = 10):
 @router.get("/learning/ops/observe-review")
 def learning_ops_observe_review(hours: int = 24, limit: int = 50):
     return get_observe_review_queue(hours=max(1, hours), limit=max(1, limit))
+
+
+@router.get("/learning/ops/observe-review/lifecycle")
+def learning_ops_observe_lifecycle(limit: int = 100, status: str | None = None):
+    return get_observe_lifecycle_state(limit=max(1, limit), status=status)
+
+
+@router.post("/learning/ops/observe-review/sync")
+def learning_ops_observe_review_sync(payload: dict[str, object] = Body(default={})):
+    return sync_observe_review_queue(
+        hours=max(1, int(payload.get("hours") or 24)),
+        limit=max(1, int(payload.get("limit") or 200)),
+    )
+
+
+@router.post("/learning/ops/observe-review/recheck")
+def learning_ops_observe_review_recheck(payload: dict[str, object] = Body(default={})):
+    return run_observe_rechecks(limit=max(1, int(payload.get("limit") or 50)))
+
+
+@router.post("/learning/ops/observe-review/{token}/action")
+def learning_ops_observe_review_action(token: str, payload: dict[str, object] = Body(...)):
+    try:
+        return apply_observe_review_action(
+            token,
+            action=str(payload.get("action") or ""),
+            note=str(payload.get("note") or "") or None,
+            suppress_hours=max(1, int(payload.get("suppress_hours") or 24)),
+            operator=str(payload.get("operator") or "") or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="observe_review_not_found")
+
+
+@router.get("/learning/ops/wallet-guard/feedback")
+def learning_ops_wallet_guard_feedback(hours: int = 168, limit: int = 1000):
+    return get_wallet_guard_feedback(hours=max(1, hours), limit=max(1, limit))
 
 
 @router.get("/learning/ops/token-review/{token}")

@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app import main
+from app.routes import learning as learning_route
 from app.services import signal_learning_service as sls
 from worker.events import Event
 
@@ -276,6 +277,46 @@ def test_learning_internal_ingest_routes_persist_rows(tmp_path, monkeypatch):
         assert c.execute("SELECT COUNT(1) FROM signals WHERE signal_id=?", (signal_id,)).fetchone()[0] == 1
         assert c.execute("SELECT COUNT(1) FROM signal_decisions WHERE signal_id=?", (signal_id,)).fetchone()[0] == 1
         assert c.execute("SELECT COUNT(1) FROM runtime_heartbeats WHERE service_role='worker'").fetchone()[0] == 1
+
+
+def test_learning_observe_ops_routes(monkeypatch):
+    monkeypatch.setattr(
+        learning_route,
+        "sync_observe_review_queue",
+        lambda **kwargs: {"status": "ok", "created": 1, "updated": 0, **kwargs},
+    )
+    monkeypatch.setattr(
+        learning_route,
+        "run_observe_rechecks",
+        lambda **kwargs: {"status": "ok", "processed": 1, **kwargs},
+    )
+    monkeypatch.setattr(
+        learning_route,
+        "get_observe_lifecycle_state",
+        lambda **kwargs: {"returned": 1, "items": [{"token": "token-route-observe"}], **kwargs},
+    )
+    monkeypatch.setattr(
+        learning_route,
+        "apply_observe_review_action",
+        lambda token, **kwargs: {"token": token, "status": "shadow_only", **kwargs},
+    )
+    monkeypatch.setattr(
+        learning_route,
+        "get_wallet_guard_feedback",
+        lambda **kwargs: {"sample_size": 1, "categories": [{"category": "concentration_watch"}], **kwargs},
+    )
+
+    client = TestClient(main.app)
+
+    assert client.post("/learning/ops/observe-review/sync", json={"hours": 12, "limit": 5}).json()["created"] == 1
+    assert client.post("/learning/ops/observe-review/recheck", json={"limit": 3}).json()["processed"] == 1
+    assert client.get("/learning/ops/observe-review/lifecycle?limit=2").json()["returned"] == 1
+    action = client.post(
+        "/learning/ops/observe-review/token-route-observe/action",
+        json={"action": "track_shadow_only", "note": "route test"},
+    ).json()
+    assert action["token"] == "token-route-observe"
+    assert client.get("/learning/ops/wallet-guard/feedback?hours=24&limit=10").json()["sample_size"] == 1
 
 
 def test_learning_internal_ingest_rejects_bad_token(tmp_path, monkeypatch):
