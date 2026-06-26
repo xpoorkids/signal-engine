@@ -25,6 +25,8 @@ from app.services.signal_learning_service import (
     get_observe_review_queue,
     get_observe_lifecycle_state,
     get_ready_for_watch_queue,
+    get_active_watch_override,
+    get_watch_overrides,
     get_wallet_guard_feedback,
     ingest_signal_decision,
     ingest_signal_event,
@@ -57,6 +59,7 @@ from app.services.signal_learning_service import (
     render_daily_opportunity_text,
     render_ready_for_watch_html,
     render_ready_for_watch_text,
+    revoke_watch_override,
     render_live_validation_html,
     render_learning_digest_html,
     render_learning_report_html,
@@ -913,6 +916,33 @@ def learning_ops_observe_review_action(token: str, payload: dict[str, object] = 
         raise HTTPException(status_code=400, detail=str(exc))
     except KeyError:
         raise HTTPException(status_code=404, detail="observe_review_not_found")
+
+
+@router.get("/learning/ops/watch-overrides")
+def learning_ops_watch_overrides(limit: int = 100, status: str | None = None, token: str | None = None):
+    return get_watch_overrides(limit=max(1, limit), status=status, token=token)
+
+
+@router.get("/learning/ops/watch-overrides/{token}/active")
+def learning_ops_watch_override_active(token: str):
+    override = get_active_watch_override(token)
+    if override is None:
+        raise HTTPException(status_code=404, detail="watch_override_not_found")
+    return override
+
+
+@router.post("/learning/ops/watch-overrides/{token}/revoke")
+def learning_ops_watch_override_revoke(token: str, payload: dict[str, object] = Body(default={})):
+    try:
+        return revoke_watch_override(
+            token,
+            reason=str(payload.get("reason") or "") or None,
+            operator=str(payload.get("operator") or "") or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="watch_override_not_found")
 
 
 @router.get("/learning/ops/wallet-guard/feedback")

@@ -403,6 +403,28 @@ def init() -> None:
         )
         c.execute(
             """
+            CREATE TABLE IF NOT EXISTS watch_overrides (
+                token TEXT PRIMARY KEY,
+                override_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                source_signal_id TEXT,
+                approved_ts INTEGER NOT NULL,
+                expires_ts INTEGER NOT NULL,
+                revoked_ts INTEGER,
+                approved_by TEXT,
+                operator_note TEXT,
+                revoke_reason TEXT,
+                target_market_cap_usd REAL NOT NULL DEFAULT 100000,
+                min_liquidity_usd REAL NOT NULL DEFAULT 15000,
+                wallet_category TEXT,
+                graduation_score REAL,
+                market_cap_change_pct REAL,
+                evidence_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        c.execute(
+            """
             CREATE TABLE IF NOT EXISTS policy_replay_runs (
                 run_id TEXT PRIMARY KEY,
                 created_ts INTEGER NOT NULL,
@@ -522,6 +544,7 @@ def init() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_observe_reviews_due ON observe_reviews(status, next_recheck_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_observe_reviews_updated ON observe_reviews(updated_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_observe_shadow_updated ON observe_shadow_positions(updated_ts DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_watch_overrides_status ON watch_overrides(status, expires_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_replay_runs_ts ON policy_replay_runs(created_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_replay_results_run ON policy_replay_results(run_id, changed)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_profiles_name ON policy_profiles(policy_name, created_ts DESC)")
@@ -6774,12 +6797,29 @@ def apply_observe_review_action(
         source="observe_operator",
         ts_value=now,
     )
+    watch_override = None
+    if normalized_action == "approve_watch_override":
+        watch_override = create_watch_override_from_observe(
+            target,
+            note=note,
+            operator=operator,
+        )
+    elif normalized_action in {"suppress", "mark_bad"}:
+        try:
+            watch_override = revoke_watch_override(
+                target,
+                reason=f"observe_{normalized_action}",
+                operator=operator,
+            )
+        except KeyError:
+            watch_override = None
     return {
         "token": target,
         "status": status,
         "action": action_taken,
         "operator_note": note,
         "suppressed_until_ts": suppress_until,
+        "watch_override": watch_override,
     }
 
 
@@ -6891,6 +6931,273 @@ def get_ready_for_watch_queue(*, limit: int = 50) -> dict[str, Any]:
             "This queue is sourced from observe lifecycle rows, not raw event volume.",
         ],
     }
+
+
+def _watch_override_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "token": row["token"],
+        "override_id": row["override_id"],
+        "status": row["status"],
+        "source_signal_id": row["source_signal_id"],
+        "approved_ts": row["approved_ts"],
+        "expires_ts": row["expires_ts"],
+        "revoked_ts": row["revoked_ts"],
+        "approved_by": row["approved_by"],
+        "operator_note": row["operator_note"],
+        "revoke_reason": row["revoke_reason"],
+        "target_market_cap_usd": row["target_market_cap_usd"],
+        "min_liquidity_usd": row["min_liquidity_usd"],
+        "wallet_category": row["wallet_category"],
+        "graduation_score": row["graduation_score"],
+        "market_cap_change_pct": row["market_cap_change_pct"],
+        "evidence": _json_loads_dict(row["evidence_json"]),
+    }
+
+
+def _watch_override_defaults(
+    *,
+    ttl_hours: int | None = None,
+    target_market_cap_usd: float | None = None,
+    min_liquidity_usd: float | None = None,
+) -> tuple[int, float, float]:
+    ttl = ttl_hours if ttl_hours is not None else int(os.getenv("SIGNAL_ENGINE_WATCH_OVERRIDE_TTL_HOURS", "6") or "6")
+    target_mc = (
+        target_market_cap_usd
+        if target_market_cap_usd is not None
+        else float(os.getenv("SIGNAL_ENGINE_WATCH_OVERRIDE_TARGET_MARKET_CAP_USD", "100000") or "100000")
+    )
+    min_liq = (
+        min_liquidity_usd
+        if min_liquidity_usd is not None
+        else float(os.getenv("SIGNAL_ENGINE_WATCH_OVERRIDE_MIN_LIQUIDITY_USD", "15000") or "15000")
+    )
+    return max(1, int(ttl)), max(1.0, float(target_mc)), max(1.0, float(min_liq))
+
+
+def create_watch_override_from_observe(
+    token: str,
+    *,
+    note: str | None = None,
+    operator: str | None = None,
+    ttl_hours: int | None = None,
+    target_market_cap_usd: float | None = None,
+    min_liquidity_usd: float | None = None,
+) -> dict[str, Any]:
+    _ensure_schema()
+    target = str(token or "").strip()
+    if not target:
+        raise ValueError("token is required")
+    now = int(time.time())
+    ttl, target_mc, min_liq = _watch_override_defaults(
+        ttl_hours=ttl_hours,
+        target_market_cap_usd=target_market_cap_usd,
+        min_liquidity_usd=min_liquidity_usd,
+    )
+    with _connect() as c:
+        row = c.execute(
+            """
+            SELECT token, latest_signal_id, status, graduation_score, graduation_stage, wallet_category,
+                   reasons_json, payload_json
+            FROM observe_reviews
+            WHERE token=?
+            """,
+            (target,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(target)
+        status = str(row["status"] or "")
+        if status != "ready_for_watch":
+            raise ValueError("observe review must be ready_for_watch")
+        payload = _json_loads_dict(row["payload_json"])
+        wallet_category = _wallet_category_from_payload(payload, str(row["wallet_category"] or "none"))
+        if wallet_category in {"hard_fraud", "severe_safety"}:
+            raise ValueError("wallet category is not override eligible")
+        graduation_score = _to_float(row["graduation_score"]) or 0.0
+        if graduation_score < 72:
+            raise ValueError("graduation score below override threshold")
+        market_cap_change = _to_float(payload.get("market_cap_change_pct"))
+        shadow = _get_observe_shadow_lookup([target]).get(target) or {}
+        if market_cap_change is None:
+            market_cap_change = _to_float(shadow.get("latest_market_cap_change_pct"))
+        override_id = f"wo-{uuid.uuid4().hex[:12]}"
+        evidence = {
+            "source": "observe_review",
+            "status": status,
+            "graduation_stage": row["graduation_stage"],
+            "graduation_score": graduation_score,
+            "wallet_category": wallet_category,
+            "market_cap_change_pct": market_cap_change,
+            "target_market_cap_usd": target_mc,
+            "min_liquidity_usd": min_liq,
+            "reasons": _json_loads_list(row["reasons_json"]),
+            "payload": payload,
+            "observe_shadow": shadow,
+        }
+        c.execute(
+            """
+            INSERT INTO watch_overrides (
+                token, override_id, status, source_signal_id, approved_ts, expires_ts, revoked_ts,
+                approved_by, operator_note, revoke_reason, target_market_cap_usd, min_liquidity_usd,
+                wallet_category, graduation_score, market_cap_change_pct, evidence_json
+            )
+            VALUES (?, ?, 'active', ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(token) DO UPDATE SET
+                override_id=excluded.override_id,
+                status='active',
+                source_signal_id=excluded.source_signal_id,
+                approved_ts=excluded.approved_ts,
+                expires_ts=excluded.expires_ts,
+                revoked_ts=NULL,
+                approved_by=excluded.approved_by,
+                operator_note=excluded.operator_note,
+                revoke_reason=NULL,
+                target_market_cap_usd=excluded.target_market_cap_usd,
+                min_liquidity_usd=excluded.min_liquidity_usd,
+                wallet_category=excluded.wallet_category,
+                graduation_score=excluded.graduation_score,
+                market_cap_change_pct=excluded.market_cap_change_pct,
+                evidence_json=excluded.evidence_json
+            """,
+            (
+                target,
+                override_id,
+                row["latest_signal_id"],
+                now,
+                now + ttl * 3600,
+                operator,
+                note,
+                target_mc,
+                min_liq,
+                wallet_category,
+                graduation_score,
+                market_cap_change,
+                _json_dumps(evidence),
+            ),
+        )
+    _persist_signal_decision(
+        token=target,
+        event_type="watch_override",
+        stage="watch_override",
+        decision="watch_override_approved",
+        action_taken="override",
+        reasons=["operator_approved", f"target_market_cap_usd>={target_mc}", f"min_liquidity_usd>={min_liq}"],
+        features={"override_id": override_id, "evidence": evidence},
+        signal_id=row["latest_signal_id"],
+        source="watch_override",
+        ts_value=now,
+    )
+    override = get_active_watch_override(target)
+    return override or {"token": target, "override_id": override_id, "status": "active"}
+
+
+def revoke_watch_override(token: str, *, reason: str | None = None, operator: str | None = None) -> dict[str, Any]:
+    _ensure_schema()
+    target = str(token or "").strip()
+    if not target:
+        raise ValueError("token is required")
+    now = int(time.time())
+    with _connect() as c:
+        row = c.execute("SELECT * FROM watch_overrides WHERE token=?", (target,)).fetchone()
+        if row is None:
+            raise KeyError(target)
+        c.execute(
+            """
+            UPDATE watch_overrides
+            SET status='revoked', revoked_ts=?, revoke_reason=?, operator_note=COALESCE(operator_note, ?)
+            WHERE token=?
+            """,
+            (now, reason or "operator_revoked", operator, target),
+        )
+    _persist_signal_decision(
+        token=target,
+        event_type="watch_override",
+        stage="watch_override",
+        decision="watch_override_revoked",
+        action_taken="revoke",
+        reasons=[reason or "operator_revoked"],
+        features={"operator": operator},
+        signal_id=row["source_signal_id"],
+        source="watch_override",
+        ts_value=now,
+    )
+    updated = get_watch_overrides(limit=1, status="revoked", token=target)["items"]
+    return updated[0] if updated else {"token": target, "status": "revoked"}
+
+
+def get_active_watch_override(token: str) -> dict[str, Any] | None:
+    _ensure_schema()
+    target = str(token or "").strip()
+    if not target:
+        return None
+    now = int(time.time())
+    with _connect() as c:
+        row = c.execute(
+            """
+            SELECT * FROM watch_overrides
+            WHERE token=? AND status='active' AND expires_ts > ?
+            LIMIT 1
+            """,
+            (target, now),
+        ).fetchone()
+    return _watch_override_from_row(row) if row else None
+
+
+def get_watch_overrides(*, limit: int = 100, status: str | None = None, token: str | None = None) -> dict[str, Any]:
+    _ensure_schema()
+    now = int(time.time())
+    where: list[str] = []
+    params: list[Any] = []
+    if status:
+        where.append("status=?")
+        params.append(status)
+    if token:
+        where.append("token=?")
+        params.append(str(token).strip())
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    params.append(max(1, min(int(limit), 500)))
+    with _connect() as c:
+        c.execute("UPDATE watch_overrides SET status='expired' WHERE status='active' AND expires_ts <= ?", (now,))
+        rows = c.execute(
+            f"""
+            SELECT * FROM watch_overrides
+            {where_sql}
+            ORDER BY approved_ts DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    items = [_watch_override_from_row(row) for row in rows]
+    counts: dict[str, int] = {}
+    for item in items:
+        key = str(item.get("status") or "unknown")
+        counts[key] = counts.get(key, 0) + 1
+    return {"returned": len(items), "status_counts": counts, "items": items}
+
+
+def resolve_watch_override_for_worker(
+    token: str,
+    *,
+    market_cap_usd: float | None = None,
+    liquidity_usd: float | None = None,
+) -> dict[str, Any] | None:
+    override = get_active_watch_override(token)
+    if override is None:
+        return None
+    target_mc = _to_float(override.get("target_market_cap_usd")) or 100000.0
+    min_liq = _to_float(override.get("min_liquidity_usd")) or 15000.0
+    mc = _to_float(market_cap_usd)
+    liq = _to_float(liquidity_usd)
+    checks = {
+        "market_cap_ok": mc is not None and mc >= target_mc,
+        "liquidity_ok": liq is not None and liq >= min_liq,
+        "market_cap_usd": mc,
+        "liquidity_usd": liq,
+        "target_market_cap_usd": target_mc,
+        "min_liquidity_usd": min_liq,
+    }
+    if not (checks["market_cap_ok"] and checks["liquidity_ok"]):
+        return {**override, "consumable": False, "checks": checks}
+    return {**override, "consumable": True, "checks": checks}
 
 
 def render_ready_for_watch_text(*, limit: int = 10) -> str:

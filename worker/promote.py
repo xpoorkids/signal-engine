@@ -273,6 +273,7 @@ from worker.alert_gate import evaluate_alert_gate, admission_check_candidate
 from worker.creator_score import compute_creator_score
 from worker.progression import metrics_improved
 from worker.recheck import schedule_rechecks, update_stop_counters, min_liquidity_gate
+from worker.watch_overrides import resolve_consumable_watch_override
 from worker.signal_policy import (
     attention_scoring_policy,
     candidate_lifecycle_policy,
@@ -568,6 +569,8 @@ def _record_decision(
         "wallet_guard_watch_only": bool(extra.get("wallet_guard_watch_only")),
         "wallet_guard_original_reasons": extra.get("wallet_guard_original_reasons") or [],
         "wallet_guard_observe_blockers": extra.get("wallet_guard_observe_blockers") or [],
+        "watch_override": extra.get("watch_override") if isinstance(extra.get("watch_override"), dict) else None,
+        "watch_override_gate_bypass": extra.get("watch_override_gate_bypass") or [],
         "has_dex_pool": bool(dex_summary),
         "lp_drain": extra.get("lp_drain"),
         "creator_sell": extra.get("creator_sold"),
@@ -1160,6 +1163,42 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     unique_buyers_5m=attn_metrics.get("unique_buyers_5m"),
                 )
 
+        override_reasons = list(extra.get("wallet_guard_original_reasons") or hard_fail_reasons)
+        if override_reasons and set(override_reasons).issubset(WALLET_GUARD_REASONS) and (
+            hard_fail or bool(extra.get("wallet_guard_watch_only"))
+        ):
+            dex = dex_summary if isinstance(dex_summary, dict) else {}
+            watch_override = resolve_consumable_watch_override(
+                e.token,
+                market_cap_usd=dex.get("market_cap_usd") or dex.get("market_cap") or dex.get("fdv"),
+                liquidity_usd=dex.get("liquidity_usd"),
+            )
+            if watch_override:
+                hard_fail = False
+                hard_fail_reasons = []
+                extra["watch_override"] = {
+                    "override_id": watch_override.get("override_id"),
+                    "target_market_cap_usd": watch_override.get("target_market_cap_usd"),
+                    "min_liquidity_usd": watch_override.get("min_liquidity_usd"),
+                    "checks": watch_override.get("checks"),
+                }
+                extra["wallet_guard_watch_only"] = False
+                extra["wallet_guard_category"] = str(
+                    watch_override.get("wallet_category")
+                    or extra.get("wallet_guard_category")
+                    or "override"
+                )
+                if "watch_override_active" not in e.reasons:
+                    e.reasons.append("watch_override_active")
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "watch-override-consumed",
+                    token=e.token,
+                    override_id=watch_override.get("override_id"),
+                    checks=watch_override.get("checks"),
+                )
+
         if hard_fail:
             _record_decision(
                 e,
@@ -1410,6 +1449,18 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 token_is_tradeable=token_is_tradeable,
                 bonding_curve_verified=bonding_curve_verified,
             )
+            if isinstance(extra.get("watch_override"), dict) and not ok:
+                extra["watch_override_gate_bypass"] = list(gate_reasons)
+                gate_reasons = [f"watch_override_bypass:{reason}" for reason in gate_reasons]
+                ok = True
+                lifecycle = lifecycle or "watch_override"
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "watch-override-candidate-gate-bypass",
+                    token=e.token,
+                    reasons=gate_reasons,
+                )
             if not ok:
                 logger.info(
                     "[pre-candidate-skip] token=%s sniper_conditions_met=%s",
@@ -1458,6 +1509,10 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     extra=extra,
                     dex_summary=dex_summary,
                 )
+                if isinstance(extra.get("watch_override"), dict):
+                    send_eligible = True
+                    send_reasons = list(dict.fromkeys(["watch_override_approved", *send_reasons]))
+                    confirmation_signals = list(dict.fromkeys(["watch_override", *confirmation_signals]))
                 allow_rate = allow_candidate_rate_limit(EARLY_WATCH_RATE_LIMIT_PER_HOUR) if send_eligible else False
                 should_send = send_eligible and allow_rate
                 extra["candidate_rate_limit_allowed"] = allow_rate

@@ -3257,6 +3257,93 @@ def test_observe_review_lifecycle_sync_recheck_and_action(tmp_path, monkeypatch)
     assert sls.get_observe_lifecycle_state(limit=10)["items"][0]["operator_note"] == "keep observing manually"
 
 
+def test_watch_override_approval_requires_current_market_floor_and_revokes(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setattr(sls.time, "time", lambda: 1_773_950_000)
+    sls.init()
+
+    signal_id = sls.record_signal_decision(
+        token="token-watch-override",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_gate_skip",
+        action_taken="hold",
+        reasons=["wallet_top_holder_concentration"],
+        attention_score=0.31,
+        risk_score=0.16,
+        confidence_score=0.52,
+        lifecycle="dex",
+        features={
+            "wallet_guard_category": "concentration_watch",
+            "wallet_guard_watch_only": True,
+            "wallet_guard_original_reasons": ["wallet_top_holder_concentration"],
+            "market_cap_usd": 32000,
+            "liquidity_usd": 18000,
+        },
+        ts_value=1_773_950_000,
+    )
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO observe_reviews (
+                token, first_signal_id, latest_signal_id, status, action, priority, graduation_score,
+                graduation_stage, wallet_category, reasons_json, payload_json, first_seen_ts,
+                updated_ts, next_recheck_ts, recheck_count
+            ) VALUES (?, ?, ?, 'ready_for_watch', 'watch_now', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+            """,
+            (
+                "token-watch-override",
+                signal_id,
+                signal_id,
+                10.0,
+                94.0,
+                "graduated",
+                "concentration_watch",
+                json.dumps(["wallet_top_holder_concentration"]),
+                json.dumps({"market_cap_change_pct": 140.0}),
+                1_773_950_000,
+                1_773_950_000,
+                0,
+            ),
+        )
+
+    action = sls.apply_observe_review_action(
+        "token-watch-override",
+        action="approve_watch_override",
+        note="pytest approve",
+        operator="pytest",
+    )
+    active = sls.get_active_watch_override("token-watch-override")
+    below_floor = sls.resolve_watch_override_for_worker(
+        "token-watch-override",
+        market_cap_usd=99_000,
+        liquidity_usd=20_000,
+    )
+    consumable = sls.resolve_watch_override_for_worker(
+        "token-watch-override",
+        market_cap_usd=110_000,
+        liquidity_usd=20_000,
+    )
+
+    assert action["watch_override"]["status"] == "active"
+    assert active is not None
+    assert active["target_market_cap_usd"] == 100000.0
+    assert below_floor["consumable"] is False
+    assert below_floor["checks"]["market_cap_ok"] is False
+    assert consumable["consumable"] is True
+
+    revoked = sls.apply_observe_review_action(
+        "token-watch-override",
+        action="mark_bad",
+        note="pytest revoke",
+        operator="pytest",
+    )
+
+    assert revoked["watch_override"]["status"] == "revoked"
+    assert sls.get_active_watch_override("token-watch-override") is None
+
+
 def test_wallet_guard_feedback_groups_watch_only_outcomes(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

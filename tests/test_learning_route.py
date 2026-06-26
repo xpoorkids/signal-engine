@@ -322,6 +322,25 @@ def test_learning_observe_ops_routes(monkeypatch):
     )
     monkeypatch.setattr(
         learning_route,
+        "get_watch_overrides",
+        lambda **kwargs: {
+            "returned": 1,
+            "items": [{"token": kwargs.get("token") or "token-route-observe", "status": "active"}],
+            **kwargs,
+        },
+    )
+    monkeypatch.setattr(
+        learning_route,
+        "get_active_watch_override",
+        lambda token: {"token": token, "status": "active", "target_market_cap_usd": 100000.0},
+    )
+    monkeypatch.setattr(
+        learning_route,
+        "revoke_watch_override",
+        lambda token, **kwargs: {"token": token, "status": "revoked", **kwargs},
+    )
+    monkeypatch.setattr(
+        learning_route,
         "get_wallet_guard_feedback",
         lambda **kwargs: {"sample_size": 1, "categories": [{"category": "concentration_watch"}], **kwargs},
     )
@@ -340,6 +359,13 @@ def test_learning_observe_ops_routes(monkeypatch):
         json={"action": "approve_watch_override", "note": "route test"},
     ).json()
     assert action["token"] == "token-route-observe"
+    assert client.get("/learning/ops/watch-overrides?limit=2").json()["items"][0]["status"] == "active"
+    assert client.get("/learning/ops/watch-overrides/token-route-observe/active").json()["target_market_cap_usd"] == 100000.0
+    revoke = client.post(
+        "/learning/ops/watch-overrides/token-route-observe/revoke",
+        json={"reason": "route test"},
+    ).json()
+    assert revoke["status"] == "revoked"
     assert client.get("/learning/ops/wallet-guard/feedback?hours=24&limit=10").json()["sample_size"] == 1
 
 
