@@ -341,6 +341,65 @@ def _wallet_distribution_fail_reasons(
     return deduped
 
 
+WALLET_GUARD_REASONS = {
+    "wallet_distribution_high_risk",
+    "wallet_top_holder_concentration",
+}
+
+
+def _wallet_guard_observe_decision(
+    hard_fail_reasons: list[str],
+    *,
+    attention_score: float | None,
+    risk_score: float | None,
+    attention_metrics: dict[str, Any] | None,
+    dex_summary: dict[str, Any] | None,
+) -> tuple[bool, list[str]]:
+    reasons = list(dict.fromkeys(hard_fail_reasons))
+    if not reasons or not set(reasons).issubset(WALLET_GUARD_REASONS):
+        return False, ["non_wallet_hard_fail"]
+
+    metrics = attention_metrics if isinstance(attention_metrics, dict) else {}
+    dex = dex_summary if isinstance(dex_summary, dict) else {}
+    policy = route_signal_policy()
+    candidate_policy = candidate_signal_policy()
+
+    liq = float(dex.get("liquidity_usd") or 0.0)
+    buys5m = int(dex.get("txns_m5_buys") or 0)
+    sells5m = int(dex.get("txns_m5_sells") or 0)
+    vol5m = float(dex.get("volume_m5") or 0.0)
+    price_change_m5 = float(dex.get("price_change_m5") or 0.0)
+    attn = float(attention_score or 0.0)
+    risk = float(risk_score) if isinstance(risk_score, (int, float)) else 1.0
+    buyers_5m = int(metrics.get("unique_buyers_5m") or 0)
+    tracked_hits = int(metrics.get("tracked_wallet_hits") or 0)
+    kol_hits = int(metrics.get("kol_wallet_hits") or 0)
+    burst_60s = int(metrics.get("burst_count_60s") or 0)
+
+    blockers: list[str] = []
+    if liq < policy.heating_min_liq_usd:
+        blockers.append(f"wallet_observe_liquidity<{policy.heating_min_liq_usd:.0f}")
+    if buys5m < policy.route_market_support_min_buys5m:
+        blockers.append(f"wallet_observe_buys5m<{policy.route_market_support_min_buys5m}")
+    if buys5m > 0 and (float(sells5m) / float(buys5m)) > policy.adversarial_max_sell_ratio_5m:
+        blockers.append(f"wallet_observe_sell_ratio>{policy.adversarial_max_sell_ratio_5m:.2f}")
+    if liq > 0.0 and (vol5m / liq) > policy.adversarial_max_vol_liq_ratio_5m:
+        blockers.append(f"wallet_observe_vol_liq_ratio>{policy.adversarial_max_vol_liq_ratio_5m:.2f}")
+    if price_change_m5 < -18.0:
+        blockers.append("wallet_observe_price_change_m5<-18")
+    if risk > 0.60:
+        blockers.append("wallet_observe_risk>0.60")
+
+    has_attention = attn >= policy.heating_min_attention
+    has_breadth = buyers_5m >= max(candidate_policy.min_unique_buyers_5m + 1, 4)
+    has_smart_wallet = tracked_hits > 0 or kol_hits > 0
+    has_burst = burst_60s >= policy.route_burst_strength_min
+    if not (has_attention or (has_breadth and has_burst) or has_smart_wallet):
+        blockers.append("wallet_observe_confirmation_missing")
+
+    return not blockers, blockers
+
+
 def _candidate_send_eligible(
     attention_score: float | None,
     creator_score: float,
@@ -1044,6 +1103,33 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             else:
                 hard_fail = True
                 hard_fail_reasons.append("liquidity_unknown")
+
+        if hard_fail and hard_fail_reasons:
+            wallet_observe_ok, wallet_observe_blockers = _wallet_guard_observe_decision(
+                hard_fail_reasons,
+                attention_score=attention_score,
+                risk_score=risk_score,
+                attention_metrics=attn_metrics,
+                dex_summary=dex_summary,
+            )
+            extra["wallet_guard_original_reasons"] = list(dict.fromkeys(hard_fail_reasons))
+            extra["wallet_guard_observe_blockers"] = wallet_observe_blockers
+            if wallet_observe_ok:
+                hard_fail = False
+                hard_fail_reasons = []
+                extra["wallet_guard_watch_only"] = True
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "wallet-guard-observe",
+                    token=e.token,
+                    original_reasons=extra["wallet_guard_original_reasons"],
+                    attention_score=attention_score,
+                    risk_score=risk_score,
+                    liquidity_usd=(dex_summary or {}).get("liquidity_usd") if isinstance(dex_summary, dict) else None,
+                    buys5m=(dex_summary or {}).get("txns_m5_buys") if isinstance(dex_summary, dict) else None,
+                    unique_buyers_5m=attn_metrics.get("unique_buyers_5m"),
+                )
 
         if hard_fail:
             _record_decision(

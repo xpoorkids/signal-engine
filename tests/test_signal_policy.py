@@ -414,3 +414,35 @@ def test_heating_delivery_decision_allows_confirmed_heating_alert():
     assert allowed is True
     assert "route_confidence:0.72" in reasons
     assert "market_support" in reasons
+
+
+def test_observe_only_wallet_guard_blocks_candidate_and_heating_sends():
+    candidate_allowed, candidate_reasons, _ = candidate_send_reasons(
+        attention_score=0.82,
+        creator_score=0.90,
+        extra={
+            "wallet_guard_watch_only": True,
+            "attention_metrics": {"unique_buyers_5m": 8, "burst_count_60s": 10},
+            "route_decision": {
+                "tier": "heating_up",
+                "confirmations": ["buyer_breadth", "burst_strength", "market_support"],
+                "route_confidence": 0.80,
+            },
+        },
+        dex_summary={"liquidity_usd": 40000.0, "txns_m5_buys": 18},
+    )
+    heating_allowed, heating_reasons = heating_delivery_decision(
+        {
+            "wallet_guard_watch_only": True,
+            "route_decision": {
+                "tier": "heating_up",
+                "confirmations": ["buyer_breadth", "burst_strength", "market_support"],
+                "route_confidence": 0.80,
+            },
+        }
+    )
+
+    assert candidate_allowed is False
+    assert "wallet_guard_watch_only" in candidate_reasons
+    assert heating_allowed is False
+    assert "wallet_guard_watch_only" in heating_reasons

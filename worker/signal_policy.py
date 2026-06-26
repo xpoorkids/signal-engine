@@ -709,6 +709,8 @@ def candidate_send_reasons(
         shallow_liq_usd=policy.adversarial_shallow_liq_usd,
     )
     confirmation_set = set(confirmations)
+    if payload.get("wallet_guard_watch_only"):
+        reasons.append("wallet_guard_watch_only")
     hard_quality_confirmed = bool(
         {"tracked_wallet_flow", "kol_wallet_flow", "market_support"} & confirmation_set
     )
@@ -1045,6 +1047,8 @@ def heating_delivery_decision(extra: dict[str, Any] | None) -> tuple[bool, list[
     confirmations = route.get("confirmations") if isinstance(route.get("confirmations"), list) else []
     blockers = route.get("blockers") if isinstance(route.get("blockers"), list) else []
     route_confidence = float(route.get("route_confidence") or 0.0)
+    if payload.get("wallet_guard_watch_only"):
+        return False, ["wallet_guard_watch_only", *blockers]
     confirmation_count = len(confirmations)
     has_market_support = "market_support" in confirmations
     has_smart_wallet_support = bool({"tracked_wallet_flow", "kol_wallet_flow"} & set(confirmations))

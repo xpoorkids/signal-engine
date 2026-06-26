@@ -1,5 +1,9 @@
 from worker.alert_gate import admission_check_candidate
-from worker.promote import _candidate_send_eligible, _wallet_distribution_fail_reasons
+from worker.promote import (
+    _candidate_send_eligible,
+    _wallet_distribution_fail_reasons,
+    _wallet_guard_observe_decision,
+)
 from app.services import signal_learning_service as sls
 
 
@@ -118,3 +122,41 @@ def test_wallet_distribution_fail_reasons_keeps_common_launch_concentration_out_
     )
 
     assert reasons == []
+
+
+def test_wallet_guard_observe_allows_confirmed_wallet_only_block():
+    allowed, blockers = _wallet_guard_observe_decision(
+        ["wallet_distribution_high_risk", "wallet_top_holder_concentration"],
+        attention_score=0.52,
+        risk_score=0.50,
+        attention_metrics={"unique_buyers_5m": 5, "burst_count_60s": 9},
+        dex_summary={
+            "liquidity_usd": 30000.0,
+            "txns_m5_buys": 14,
+            "txns_m5_sells": 8,
+            "volume_m5": 25000.0,
+            "price_change_m5": 12.0,
+        },
+    )
+
+    assert allowed is True
+    assert blockers == []
+
+
+def test_wallet_guard_observe_blocks_mixed_or_weak_hard_fail():
+    allowed, blockers = _wallet_guard_observe_decision(
+        ["wallet_top_holder_concentration", "low_liquidity"],
+        attention_score=0.80,
+        risk_score=0.10,
+        attention_metrics={"unique_buyers_5m": 10, "burst_count_60s": 12},
+        dex_summary={
+            "liquidity_usd": 30000.0,
+            "txns_m5_buys": 14,
+            "txns_m5_sells": 8,
+            "volume_m5": 25000.0,
+            "price_change_m5": 12.0,
+        },
+    )
+
+    assert allowed is False
+    assert blockers == ["non_wallet_hard_fail"]
