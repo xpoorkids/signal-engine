@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from app.routes.score import score
-from app.services.score_service import _pick_contract_address, score_pairs
+from app.services.score_service import _is_solana_pair, _pick_contract_address, score_pairs
 
 
 def test_pick_contract_address_prefers_quote_token_when_base_is_wsol():
@@ -25,6 +25,7 @@ def test_score_pairs_returns_pump_contract_not_base_pair_leg():
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
     pairs = [
         {
+            "chainId": "solana",
             "baseToken": {
                 "address": "So11111111111111111111111111111111111111112",
                 "symbol": "SOL",
@@ -44,6 +45,52 @@ def test_score_pairs_returns_pump_contract_not_base_pair_leg():
 
     assert scored[0]["token"] == pump_token
     assert scored[0]["symbol"] == "BUG"
+    assert scored[0]["chain"] == "sol"
+
+
+def test_is_solana_pair_accepts_solana_chain_values():
+    assert _is_solana_pair({"chainId": "solana"}) is True
+    assert _is_solana_pair({"chain": "sol"}) is True
+    assert _is_solana_pair({"chainId": "ethereum"}) is False
+    assert _is_solana_pair({}) is False
+
+
+def test_score_pairs_skips_non_solana_pairs():
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    pairs = [
+        {
+            "chainId": "ethereum",
+            "baseToken": {
+                "address": "0x1234567890abcdef1234567890abcdef12345678",
+                "symbol": "ETHX",
+            },
+            "quoteToken": {
+                "address": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+                "symbol": "WETH",
+            },
+            "liquidity": {"usd": 5000},
+            "volume": {"m5": 500},
+            "priceChange": {"m5": 25},
+            "pairCreatedAt": now_ms - 20_000,
+        },
+        {
+            "chainId": "base",
+            "baseToken": {
+                "address": "0x2222222222222222222222222222222222222222",
+                "symbol": "BASEX",
+            },
+            "quoteToken": {
+                "address": "0x3333333333333333333333333333333333333333",
+                "symbol": "WETH",
+            },
+            "liquidity": {"usd": 5000},
+            "volume": {"m5": 500},
+            "priceChange": {"m5": 25},
+            "pairCreatedAt": now_ms - 20_000,
+        },
+    ]
+
+    assert score_pairs(pairs) == []
 
 
 def test_score_route_persists_contract_before_symbol(monkeypatch):

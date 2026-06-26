@@ -5,10 +5,27 @@ WSOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 EXCLUDED_QUOTES = {WSOL_MINT, USDC_MINT, USDT_MINT}
+SOLANA_CHAIN_VALUES = {"sol", "solana"}
 
 
 def _clean_address(value: object) -> str:
     return str(value or "").strip()
+
+
+def _clean_chain(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _is_solana_pair(pair: dict) -> bool:
+    chain_id = _clean_chain(pair.get("chainId"))
+    if chain_id:
+        return chain_id in SOLANA_CHAIN_VALUES
+
+    chain = _clean_chain(pair.get("chain"))
+    if chain:
+        return chain in SOLANA_CHAIN_VALUES
+
+    return False
 
 
 def _pick_contract_address(pair: dict) -> str | None:
@@ -56,6 +73,9 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
 
     for p in pairs:
         try:
+            if not _is_solana_pair(p):
+                continue
+
             liq = float(p.get("liquidity", {}).get("usd") or 0)
             vol5m = float(p.get("volume", {}).get("m5") or 0)
             chg5m = float(p.get("priceChange", {}).get("m5") or 0)
@@ -73,6 +93,7 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                     {
                         "token": token,
                         "symbol": _pick_symbol(p, token),
+                        "chain": "sol",
                         "reason": "aggressive_near_pass",
                         "metrics": {
                             "liquidity": round(liq, 2),

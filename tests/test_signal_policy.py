@@ -380,3 +380,37 @@ def test_heating_delivery_decision_trusts_sniper_route():
 
     assert allowed is True
     assert "sniper_route" in reasons
+
+
+def test_heating_delivery_decision_blocks_weak_market_only_heating_alert():
+    allowed, reasons = heating_delivery_decision(
+        {
+            "route_decision": {
+                "tier": "heating_up",
+                "confirmations": ["market_support", "attention_support"],
+                "blockers": [],
+                "route_confidence": 0.58,
+            }
+        }
+    )
+
+    assert allowed is False
+    assert "delivery_confirmations<3" in reasons
+    assert "delivery_flow_confirmation_missing" in reasons
+
+
+def test_heating_delivery_decision_allows_confirmed_heating_alert():
+    allowed, reasons = heating_delivery_decision(
+        {
+            "route_decision": {
+                "tier": "heating_up",
+                "confirmations": ["buyer_breadth", "burst_strength", "market_support"],
+                "blockers": [],
+                "route_confidence": 0.72,
+            }
+        }
+    )
+
+    assert allowed is True
+    assert "route_confidence:0.72" in reasons
+    assert "market_support" in reasons

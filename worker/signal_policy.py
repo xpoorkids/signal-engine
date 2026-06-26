@@ -94,6 +94,7 @@ class RouteSignalPolicy:
     route_burst_strength_min: int
     route_market_support_min_buys5m: int
     heating_delivery_min_confidence: float
+    heating_delivery_min_confirmations: int
     adversarial_max_sell_ratio_5m: float
     adversarial_max_vol_liq_ratio_5m: float
     adversarial_shallow_liq_usd: float
@@ -338,6 +339,7 @@ def route_signal_policy() -> RouteSignalPolicy:
         route_burst_strength_min=_env_int("SIGNAL_ENGINE_ROUTE_BURST_STRENGTH_MIN", 8),
         route_market_support_min_buys5m=_env_int("SIGNAL_ENGINE_ROUTE_MARKET_SUPPORT_MIN_BUYS5M", 10),
         heating_delivery_min_confidence=_env_float("SIGNAL_ENGINE_HEATING_DELIVERY_MIN_CONFIDENCE", 0.55),
+        heating_delivery_min_confirmations=_env_int("SIGNAL_ENGINE_HEATING_DELIVERY_MIN_CONFIRMATIONS", 3),
         adversarial_max_sell_ratio_5m=_env_float("SIGNAL_ENGINE_ROUTE_ADVERSARIAL_MAX_SELL_RATIO_5M", 1.2),
         adversarial_max_vol_liq_ratio_5m=_env_float("SIGNAL_ENGINE_ROUTE_ADVERSARIAL_MAX_VOL_LIQ_RATIO_5M", 4.0),
         adversarial_shallow_liq_usd=_env_float("SIGNAL_ENGINE_ROUTE_ADVERSARIAL_SHALLOW_LIQ_USD", 12000.0),
@@ -1043,12 +1045,29 @@ def heating_delivery_decision(extra: dict[str, Any] | None) -> tuple[bool, list[
     confirmations = route.get("confirmations") if isinstance(route.get("confirmations"), list) else []
     blockers = route.get("blockers") if isinstance(route.get("blockers"), list) else []
     route_confidence = float(route.get("route_confidence") or 0.0)
+    confirmation_count = len(confirmations)
+    has_market_support = "market_support" in confirmations
+    has_smart_wallet_support = bool({"tracked_wallet_flow", "kol_wallet_flow"} & set(confirmations))
+    has_flow_support = bool({"buyer_breadth", "burst_strength"} & set(confirmations))
     if tier == "sniper":
         return True, ["sniper_route", f"route_confidence:{route_confidence:.2f}", *confirmations]
+    if tier != "heating_up":
+        return False, blockers or ["route_not_heating_ready"]
     if (
         tier == "heating_up"
-        and confirmations
+        and confirmation_count >= policy.heating_delivery_min_confirmations
+        and has_flow_support
+        and (has_market_support or has_smart_wallet_support)
         and route_confidence >= policy.heating_delivery_min_confidence
     ):
         return True, [f"route_confidence:{route_confidence:.2f}", *confirmations]
-    return False, blockers or ["route_not_heating_ready"]
+    delivery_blockers = list(blockers)
+    if route_confidence < policy.heating_delivery_min_confidence:
+        delivery_blockers.append(f"route_confidence<{policy.heating_delivery_min_confidence:.2f}")
+    if confirmation_count < policy.heating_delivery_min_confirmations:
+        delivery_blockers.append(f"delivery_confirmations<{policy.heating_delivery_min_confirmations}")
+    if not has_flow_support:
+        delivery_blockers.append("delivery_flow_confirmation_missing")
+    if not (has_market_support or has_smart_wallet_support):
+        delivery_blockers.append("delivery_quality_confirmation_missing")
+    return False, delivery_blockers or ["route_not_heating_ready"]
