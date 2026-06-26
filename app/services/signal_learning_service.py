@@ -6078,6 +6078,16 @@ def _wallet_guard_payload(features: dict[str, Any], reasons: list[Any]) -> dict[
     }
 
 
+def _wallet_category_from_payload(payload: dict[str, Any], fallback: str | None = None) -> str:
+    wallet = payload.get("wallet_guard") if isinstance(payload.get("wallet_guard"), dict) else {}
+    category = str(wallet.get("category") or fallback or "none").strip() or "none"
+    if category != "none":
+        return category
+    reasons = payload.get("binding_reasons") if isinstance(payload.get("binding_reasons"), list) else []
+    inferred = _infer_wallet_guard_category({}, reasons)
+    return inferred if inferred != "none" else category
+
+
 def _build_blocker_tuning(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     tuning: dict[str, dict[str, Any]] = {}
     for record in records:
@@ -6798,6 +6808,8 @@ def get_observe_lifecycle_state(*, limit: int = 100, status: str | None = None) 
     items: list[dict[str, Any]] = []
     for row in rows:
         token = str(row["token"] or "")
+        payload = _json_loads_dict(row["payload_json"])
+        wallet_category = _wallet_category_from_payload(payload, str(row["wallet_category"] or "none"))
         items.append(
             {
                 "token": token,
@@ -6808,9 +6820,9 @@ def get_observe_lifecycle_state(*, limit: int = 100, status: str | None = None) 
                 "priority": row["priority"],
                 "graduation_score": row["graduation_score"],
                 "graduation_stage": row["graduation_stage"],
-                "wallet_category": row["wallet_category"],
+                "wallet_category": wallet_category,
                 "reasons": _json_loads_list(row["reasons_json"]),
-                "payload": _json_loads_dict(row["payload_json"]),
+                "payload": payload,
                 "first_seen_ts": row["first_seen_ts"],
                 "updated_ts": row["updated_ts"],
                 "next_recheck_ts": row["next_recheck_ts"],

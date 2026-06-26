@@ -3383,6 +3383,20 @@ def test_wallet_guard_category_infers_from_legacy_reasons(tmp_path, monkeypatch)
     assert record["wallet_guard"]["watch_only"] is True
 
     sync = sls.sync_observe_review_queue(hours=10_000, limit=20)
+    with sls._connect() as c:
+        c.execute(
+            "UPDATE observe_reviews SET wallet_category='none', payload_json=? WHERE token=?",
+            (
+                json.dumps(
+                    {
+                        "binding_reasons": ["wallet_distribution_high_risk", "wallet_top_holder_concentration"],
+                        "wallet_guard": {"category": "none", "watch_only": False},
+                        "market_cap_change_pct": 70.0,
+                    }
+                ),
+                "token-infer-wallet",
+            ),
+        )
     ready = sls.get_ready_for_watch_queue(limit=10)
 
     assert sync["created"] == 1
