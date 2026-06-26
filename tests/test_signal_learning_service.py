@@ -3319,6 +3319,77 @@ def test_wallet_guard_feedback_groups_watch_only_outcomes(tmp_path, monkeypatch)
     assert group["recommendation"] in {"graduate_more_with_review", "keep_observing"}
 
 
+def test_wallet_guard_category_infers_from_legacy_reasons(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setattr(sls.time, "time", lambda: 1_773_940_000)
+    sls.init()
+
+    signal_id = sls.record_signal_decision(
+        token="token-infer-wallet",
+        event_type="candidate",
+        stage="candidate",
+        decision="hard_fail",
+        action_taken="hold",
+        reasons=["wallet_distribution_high_risk", "wallet_top_holder_concentration"],
+        attention_score=0.18,
+        risk_score=0.50,
+        confidence_score=0.30,
+        lifecycle="dex",
+        features={"route_tier": "candidate"},
+        ts_value=1_773_940_000,
+    )
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                60,
+                1_773_943_600,
+                "dex",
+                50000,
+                22000,
+                11000,
+                65.0,
+                12.0,
+                38.0,
+                24,
+                8,
+                70.0,
+                15.0,
+                25.0,
+                "worked",
+                json.dumps(
+                    {
+                        "outcome_label": "worked",
+                        "liquidity_usd": 22000,
+                        "price_change_m5": 12.0,
+                        "txns_m5_buys": 24,
+                        "txns_m5_sells": 8,
+                    }
+                ),
+            ),
+        )
+
+    record = next(item for item in sls.get_live_validation_records(hours=10_000, limit=20) if item["signal_id"] == signal_id)
+    assert record["wallet_guard"]["category"] == "concentration_watch"
+    assert record["wallet_guard"]["watch_only"] is True
+
+    sync = sls.sync_observe_review_queue(hours=10_000, limit=20)
+    ready = sls.get_ready_for_watch_queue(limit=10)
+
+    assert sync["created"] == 1
+    assert ready["items"][0]["token"] == "token-infer-wallet"
+    assert ready["items"][0]["wallet_category"] == "concentration_watch"
+
+
 def test_policy_validation_comparison_ranks_variants_by_live_quality(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

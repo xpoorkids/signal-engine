@@ -5801,6 +5801,7 @@ def get_live_validation_records(
             policy_name=decision.get("policy_name"),
             policy_version=decision.get("policy_version"),
         )
+        decision_reasons = decision.get("reasons") or []
         record = {
             "signal_id": signal_id,
             "timestamp": row[5],
@@ -5823,7 +5824,7 @@ def get_live_validation_records(
             "decision_stage": decision.get("stage"),
             "decision_name": decision.get("decision"),
             "action_taken": decision.get("action_taken"),
-            "decision_reasons": decision.get("reasons") or [],
+            "decision_reasons": decision_reasons,
             "key_metrics": {
                 "attention_score": row[10],
                 "risk_score": row[11],
@@ -5849,16 +5850,7 @@ def get_live_validation_records(
             "route_confirmations": features.get("route_confirmations") if isinstance(features.get("route_confirmations"), list) else [],
             "route_blockers": features.get("route_blockers") if isinstance(features.get("route_blockers"), list) else [],
             "sniper_blockers": features.get("sniper_blockers") if isinstance(features.get("sniper_blockers"), list) else [],
-            "wallet_guard": {
-                "category": str(features.get("wallet_guard_category") or "none"),
-                "watch_only": bool(features.get("wallet_guard_watch_only")),
-                "original_reasons": features.get("wallet_guard_original_reasons")
-                if isinstance(features.get("wallet_guard_original_reasons"), list)
-                else [],
-                "observe_blockers": features.get("wallet_guard_observe_blockers")
-                if isinstance(features.get("wallet_guard_observe_blockers"), list)
-                else [],
-            },
+            "wallet_guard": _wallet_guard_payload(features, decision_reasons),
             "outcome_label": snapshot.get("outcome_label"),
             "outcome_market_cap_change_pct": snapshot.get("market_cap_change_pct"),
             "outcome_liquidity_change_pct": snapshot.get("liquidity_change_pct"),
@@ -6034,6 +6026,55 @@ def _positive_unsent_suggestion(record: dict[str, Any]) -> dict[str, Any] | None
         "why": reasons[:5],
         "graduation_stage": graduation.get("stage"),
         "graduation_score": graduation.get("score"),
+    }
+
+
+def _infer_wallet_guard_category(features: dict[str, Any], reasons: list[Any]) -> str:
+    explicit = str(features.get("wallet_guard_category") or "").strip()
+    if explicit and explicit != "none":
+        return explicit
+    normalized = {str(reason or "").strip() for reason in reasons if str(reason or "").strip()}
+    feature_reasons = features.get("wallet_guard_original_reasons")
+    if isinstance(feature_reasons, list):
+        normalized.update(str(reason or "").strip() for reason in feature_reasons if str(reason or "").strip())
+    observe_blockers = features.get("wallet_guard_observe_blockers")
+    if isinstance(observe_blockers, list):
+        normalized.update(str(reason or "").strip() for reason in observe_blockers if str(reason or "").strip())
+    if normalized & {"wallet_distribution_high_risk", "wallet_top_holder_concentration"}:
+        return "concentration_watch"
+    if normalized & {"concentrated_wallet_flow", "wallet_flow_concentration"}:
+        return "flow_concentration_watch"
+    if normalized & {"wallet_quality_low", "wallet_cluster_risk"}:
+        return "wallet_quality_watch"
+    return explicit or "none"
+
+
+def _wallet_guard_payload(features: dict[str, Any], reasons: list[Any]) -> dict[str, Any]:
+    original_reasons = (
+        features.get("wallet_guard_original_reasons")
+        if isinstance(features.get("wallet_guard_original_reasons"), list)
+        else []
+    )
+    observe_blockers = (
+        features.get("wallet_guard_observe_blockers")
+        if isinstance(features.get("wallet_guard_observe_blockers"), list)
+        else []
+    )
+    category = _infer_wallet_guard_category(features, reasons)
+    inferred_reasons = [
+        str(reason)
+        for reason in reasons
+        if _reason_family(str(reason)) == "wallet_quality" or str(reason) in {"concentrated_wallet_flow", "wallet_flow_concentration"}
+    ]
+    if not original_reasons and inferred_reasons:
+        original_reasons = inferred_reasons[:8]
+    watch_only = bool(features.get("wallet_guard_watch_only")) or (category != "none" and bool(inferred_reasons))
+    return {
+        "category": category,
+        "watch_only": watch_only,
+        "original_reasons": original_reasons,
+        "observe_blockers": observe_blockers,
+        "inferred": not bool(str(features.get("wallet_guard_category") or "").strip()),
     }
 
 
@@ -6681,12 +6722,13 @@ def apply_observe_review_action(
     normalized_action = str(action or "").strip().lower()
     status_by_action = {
         "promote_to_watch": "ready_for_watch",
+        "approve_watch_override": "ready_for_watch",
         "suppress": "suppressed",
         "mark_bad": "failed",
         "track_shadow_only": "shadow_only",
     }
     if normalized_action not in status_by_action:
-        raise ValueError("action must be promote_to_watch, suppress, mark_bad, or track_shadow_only")
+        raise ValueError("action must be promote_to_watch, approve_watch_override, suppress, mark_bad, or track_shadow_only")
     now = int(time.time())
     status = status_by_action[normalized_action]
     suppress_until = now + max(1, int(suppress_hours or 24)) * 3600 if status == "suppressed" else None
@@ -6705,6 +6747,7 @@ def apply_observe_review_action(
         )
     decision_name = {
         "promote_to_watch": "observe_operator_promoted_watch",
+        "approve_watch_override": "observe_operator_approved_watch_override",
         "suppress": "observe_operator_suppressed",
         "mark_bad": "observe_operator_marked_bad",
         "track_shadow_only": "observe_operator_shadow_only",
@@ -6782,6 +6825,60 @@ def get_observe_lifecycle_state(*, limit: int = 100, status: str | None = None) 
         key = str(item.get("status") or "unknown")
         counts[key] = counts.get(key, 0) + 1
     return {"returned": len(items), "status_counts": counts, "items": items}
+
+
+def get_ready_for_watch_queue(*, limit: int = 50) -> dict[str, Any]:
+    state = get_observe_lifecycle_state(limit=max(1, min(int(limit) * 4, 500)), status="ready_for_watch")
+    items: list[dict[str, Any]] = []
+    for item in state.get("items") or []:
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        shadow = item.get("observe_shadow") if isinstance(item.get("observe_shadow"), dict) else {}
+        market_cap_change = _to_float(payload.get("market_cap_change_pct"))
+        if market_cap_change is None:
+            market_cap_change = _to_float(shadow.get("latest_market_cap_change_pct"))
+        priority = float(item.get("priority") or 0.0)
+        graduation_score = _to_float(item.get("graduation_score")) or 0.0
+        if market_cap_change is not None and market_cap_change > 0:
+            priority += min(25.0, market_cap_change / 4.0)
+        wallet_category = str(item.get("wallet_category") or "none")
+        if wallet_category != "none":
+            priority += 8.0
+        items.append(
+            {
+                "token": item.get("token"),
+                "signal_id": item.get("latest_signal_id"),
+                "action": "approve_watch_override",
+                "priority": round(priority, 2),
+                "graduation_score": graduation_score,
+                "graduation_stage": item.get("graduation_stage"),
+                "wallet_category": wallet_category,
+                "market_cap_change_pct": market_cap_change,
+                "reasons": item.get("reasons") or [],
+                "payload": payload,
+                "observe_shadow": shadow,
+                "first_seen_ts": item.get("first_seen_ts"),
+                "updated_ts": item.get("updated_ts"),
+                "review_endpoint": f"/learning/ops/observe-review/{item.get('token')}/action",
+            }
+        )
+    items.sort(
+        key=lambda item: (
+            -float(item.get("priority") or 0.0),
+            -float(item.get("graduation_score") or 0.0),
+            -float(item.get("market_cap_change_pct") or 0.0),
+            str(item.get("token") or ""),
+        )
+    )
+    selected = items[: max(1, min(int(limit), 200))]
+    return {
+        "returned": len(selected),
+        "total_ready": len(items),
+        "items": selected,
+        "notes": [
+            "Approve watch overrides only after manual review.",
+            "This queue is sourced from observe lifecycle rows, not raw event volume.",
+        ],
+    }
 
 
 def get_wallet_guard_feedback(*, hours: int = 168, limit: int = 1000) -> dict[str, Any]:

@@ -24,6 +24,7 @@ from app.services.signal_learning_service import (
     get_missed_runner_analysis,
     get_observe_review_queue,
     get_observe_lifecycle_state,
+    get_ready_for_watch_queue,
     get_wallet_guard_feedback,
     ingest_signal_decision,
     ingest_signal_event,
@@ -857,6 +858,11 @@ def learning_ops_observe_review(hours: int = 24, limit: int = 50):
 @router.get("/learning/ops/observe-review/lifecycle")
 def learning_ops_observe_lifecycle(limit: int = 100, status: str | None = None):
     return get_observe_lifecycle_state(limit=max(1, limit), status=status)
+
+
+@router.get("/learning/ops/observe-review/ready-for-watch")
+def learning_ops_ready_for_watch(limit: int = 50):
+    return get_ready_for_watch_queue(limit=max(1, limit))
 
 
 @router.post("/learning/ops/observe-review/sync")

@@ -297,6 +297,11 @@ def test_learning_observe_ops_routes(monkeypatch):
     )
     monkeypatch.setattr(
         learning_route,
+        "get_ready_for_watch_queue",
+        lambda **kwargs: {"returned": 1, "items": [{"token": "token-ready"}], **kwargs},
+    )
+    monkeypatch.setattr(
+        learning_route,
         "apply_observe_review_action",
         lambda token, **kwargs: {"token": token, "status": "shadow_only", **kwargs},
     )
@@ -311,9 +316,10 @@ def test_learning_observe_ops_routes(monkeypatch):
     assert client.post("/learning/ops/observe-review/sync", json={"hours": 12, "limit": 5}).json()["created"] == 1
     assert client.post("/learning/ops/observe-review/recheck", json={"limit": 3}).json()["processed"] == 1
     assert client.get("/learning/ops/observe-review/lifecycle?limit=2").json()["returned"] == 1
+    assert client.get("/learning/ops/observe-review/ready-for-watch?limit=2").json()["items"][0]["token"] == "token-ready"
     action = client.post(
         "/learning/ops/observe-review/token-route-observe/action",
-        json={"action": "track_shadow_only", "note": "route test"},
+        json={"action": "approve_watch_override", "note": "route test"},
     ).json()
     assert action["token"] == "token-route-observe"
     assert client.get("/learning/ops/wallet-guard/feedback?hours=24&limit=10").json()["sample_size"] == 1
