@@ -27,6 +27,7 @@ from app.services.signal_learning_service import (
     get_ready_for_watch_queue,
     get_active_watch_override,
     get_watch_overrides,
+    get_watch_override_autopilot_status,
     get_wallet_guard_feedback,
     ingest_signal_decision,
     ingest_signal_event,
@@ -60,6 +61,7 @@ from app.services.signal_learning_service import (
     render_ready_for_watch_html,
     render_ready_for_watch_text,
     revoke_watch_override,
+    run_watch_override_autopilot,
     render_live_validation_html,
     render_learning_digest_html,
     render_learning_report_html,
@@ -921,6 +923,23 @@ def learning_ops_observe_review_action(token: str, payload: dict[str, object] = 
 @router.get("/learning/ops/watch-overrides")
 def learning_ops_watch_overrides(limit: int = 100, status: str | None = None, token: str | None = None):
     return get_watch_overrides(limit=max(1, limit), status=status, token=token)
+
+
+@router.get("/learning/ops/watch-overrides/autopilot")
+def learning_ops_watch_override_autopilot_status(ready_limit: int = 25):
+    return get_watch_override_autopilot_status(ready_limit=max(1, ready_limit))
+
+
+@router.post("/learning/ops/watch-overrides/autopilot/run")
+def learning_ops_watch_override_autopilot_run(payload: dict[str, object] = Body(default={})):
+    return run_watch_override_autopilot(
+        limit=int(payload["limit"]) if payload.get("limit") is not None else None,
+        max_active=int(payload["max_active"]) if payload.get("max_active") is not None else None,
+        min_graduation_score=float(payload["min_graduation_score"]) if payload.get("min_graduation_score") is not None else None,
+        min_market_cap_change_pct=float(payload["min_market_cap_change_pct"]) if payload.get("min_market_cap_change_pct") is not None else None,
+        min_priority=float(payload["min_priority"]) if payload.get("min_priority") is not None else None,
+        operator=str(payload.get("operator") or "api"),
+    )
 
 
 @router.get("/learning/ops/watch-overrides/{token}/active")

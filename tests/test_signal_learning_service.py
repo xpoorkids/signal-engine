@@ -3344,6 +3344,67 @@ def test_watch_override_approval_requires_current_market_floor_and_revokes(tmp_p
     assert sls.get_active_watch_override("token-watch-override") is None
 
 
+def test_watch_override_autopilot_fills_bounded_top_slots(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setattr(sls.time, "time", lambda: 1_773_960_000)
+    sls.init()
+
+    rows = [
+        ("token-auto-1", 120.0, 94.0, 150.0),
+        ("token-auto-2", 112.0, 93.0, 108.0),
+        ("token-auto-low", 130.0, 89.0, 180.0),
+    ]
+    prepared_rows = []
+    for token, priority, score, mc_change in rows:
+        signal_id = sls.record_signal_decision(
+            token=token,
+            event_type="candidate",
+            stage="candidate",
+            decision="candidate_gate_skip",
+            action_taken="hold",
+            reasons=["wallet_top_holder_concentration"],
+            features={"wallet_guard_category": "concentration_watch", "wallet_guard_watch_only": True},
+            ts_value=1_773_960_000,
+        )
+        prepared_rows.append((token, signal_id, priority, score, mc_change))
+
+    with sls._connect() as c:
+        for token, signal_id, priority, score, mc_change in prepared_rows:
+            c.execute(
+                """
+                INSERT INTO observe_reviews (
+                    token, first_signal_id, latest_signal_id, status, action, priority, graduation_score,
+                    graduation_stage, wallet_category, reasons_json, payload_json, first_seen_ts,
+                    updated_ts, next_recheck_ts, recheck_count
+                ) VALUES (?, ?, ?, 'ready_for_watch', 'watch_now', ?, ?, 'graduated', 'concentration_watch', ?, ?, ?, ?, NULL, 0)
+                """,
+                (
+                    token,
+                    signal_id,
+                    signal_id,
+                    priority,
+                    score,
+                    json.dumps(["wallet_top_holder_concentration"]),
+                    json.dumps({"market_cap_change_pct": mc_change}),
+                    1_773_960_000,
+                    1_773_960_000,
+                ),
+            )
+
+    run = sls.run_watch_override_autopilot(limit=5, max_active=2, operator="pytest")
+    active = sls.get_watch_overrides(status="active", limit=10)["items"]
+    second_run = sls.run_watch_override_autopilot(limit=5, max_active=2, operator="pytest")
+    status = sls.get_watch_override_autopilot_status(ready_limit=10)
+
+    assert run["status"] == "activated"
+    assert run["activated_count"] == 2
+    assert {item["token"] for item in active} == {"token-auto-1", "token-auto-2"}
+    assert second_run["status"] == "full"
+    low_row = next(item for item in status["ready"] if item["token"] == "token-auto-low")
+    assert "graduation_score_below_autopilot_floor" in low_row["autopilot_blockers"]
+
+
 def test_wallet_guard_feedback_groups_watch_only_outcomes(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

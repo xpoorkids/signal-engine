@@ -331,6 +331,16 @@ def test_learning_observe_ops_routes(monkeypatch):
     )
     monkeypatch.setattr(
         learning_route,
+        "get_watch_override_autopilot_status",
+        lambda **kwargs: {"enabled": False, "available_slots": 2, "ready": [], **kwargs},
+    )
+    monkeypatch.setattr(
+        learning_route,
+        "run_watch_override_autopilot",
+        lambda **kwargs: {"status": "activated", "activated_count": 1, **kwargs},
+    )
+    monkeypatch.setattr(
+        learning_route,
         "get_active_watch_override",
         lambda token: {"token": token, "status": "active", "target_market_cap_usd": 100000.0},
     )
@@ -360,6 +370,13 @@ def test_learning_observe_ops_routes(monkeypatch):
     ).json()
     assert action["token"] == "token-route-observe"
     assert client.get("/learning/ops/watch-overrides?limit=2").json()["items"][0]["status"] == "active"
+    assert client.get("/learning/ops/watch-overrides/autopilot?ready_limit=3").json()["available_slots"] == 2
+    autopilot = client.post(
+        "/learning/ops/watch-overrides/autopilot/run",
+        json={"limit": 1, "max_active": 2, "operator": "route"},
+    ).json()
+    assert autopilot["status"] == "activated"
+    assert autopilot["activated_count"] == 1
     assert client.get("/learning/ops/watch-overrides/token-route-observe/active").json()["target_market_cap_usd"] == 100000.0
     revoke = client.post(
         "/learning/ops/watch-overrides/token-route-observe/revoke",

@@ -6927,7 +6927,7 @@ def get_ready_for_watch_queue(*, limit: int = 50) -> dict[str, Any]:
         "total_ready": len(items),
         "items": selected,
         "notes": [
-            "Approve watch overrides only after manual review.",
+            "Approve manually or run watch override autopilot for bounded top-slot activation.",
             "This queue is sourced from observe lifecycle rows, not raw event volume.",
         ],
     }
@@ -7174,6 +7174,153 @@ def get_watch_overrides(*, limit: int = 100, status: str | None = None, token: s
     return {"returned": len(items), "status_counts": counts, "items": items}
 
 
+def _watch_override_autopilot_defaults(
+    *,
+    limit: int | None = None,
+    max_active: int | None = None,
+    min_graduation_score: float | None = None,
+    min_market_cap_change_pct: float | None = None,
+    min_priority: float | None = None,
+) -> dict[str, Any]:
+    return {
+        "limit": max(1, min(int(limit if limit is not None else os.getenv("SIGNAL_ENGINE_WATCH_OVERRIDE_AUTOPILOT_LIMIT", "5")), 50)),
+        "max_active": max(1, min(int(max_active if max_active is not None else os.getenv("SIGNAL_ENGINE_WATCH_OVERRIDE_AUTOPILOT_MAX_ACTIVE", "10")), 100)),
+        "min_graduation_score": float(
+            min_graduation_score
+            if min_graduation_score is not None
+            else os.getenv("SIGNAL_ENGINE_WATCH_OVERRIDE_AUTOPILOT_MIN_SCORE", "90")
+        ),
+        "min_market_cap_change_pct": float(
+            min_market_cap_change_pct
+            if min_market_cap_change_pct is not None
+            else os.getenv("SIGNAL_ENGINE_WATCH_OVERRIDE_AUTOPILOT_MIN_MC_CHANGE_PCT", "100")
+        ),
+        "min_priority": float(
+            min_priority
+            if min_priority is not None
+            else os.getenv("SIGNAL_ENGINE_WATCH_OVERRIDE_AUTOPILOT_MIN_PRIORITY", "100")
+        ),
+    }
+
+
+def get_watch_override_autopilot_status(*, ready_limit: int = 25) -> dict[str, Any]:
+    config = _watch_override_autopilot_defaults()
+    active = get_watch_overrides(status="active", limit=int(config["max_active"]) + 50)
+    queue = get_ready_for_watch_queue(limit=max(1, min(int(ready_limit), 200)))
+    active_tokens = {str(item.get("token") or "") for item in active.get("items") or [] if isinstance(item, dict)}
+    eligible: list[dict[str, Any]] = []
+    for item in queue.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        token = str(item.get("token") or "")
+        score = float(item.get("graduation_score") or 0.0)
+        mc_change = float(item.get("market_cap_change_pct") or 0.0)
+        priority = float(item.get("priority") or 0.0)
+        blockers: list[str] = []
+        if token in active_tokens:
+            blockers.append("already_active")
+        if score < float(config["min_graduation_score"]):
+            blockers.append("graduation_score_below_autopilot_floor")
+        if mc_change < float(config["min_market_cap_change_pct"]):
+            blockers.append("market_cap_change_below_autopilot_floor")
+        if priority < float(config["min_priority"]):
+            blockers.append("priority_below_autopilot_floor")
+        eligible.append({**item, "autopilot_eligible": not blockers, "autopilot_blockers": blockers})
+    available_slots = max(0, int(config["max_active"]) - int(active.get("returned") or 0))
+    return {
+        "enabled": os.getenv("SIGNAL_ENGINE_ENABLE_WATCH_OVERRIDE_AUTOPILOT", "0").strip().lower()
+        not in {"0", "false", "no", "off"},
+        "config": config,
+        "active_count": int(active.get("returned") or 0),
+        "available_slots": available_slots,
+        "active": active.get("items") or [],
+        "ready_total": queue.get("total_ready"),
+        "eligible_ready_count": sum(1 for item in eligible if item.get("autopilot_eligible")),
+        "ready": eligible,
+    }
+
+
+def run_watch_override_autopilot(
+    *,
+    limit: int | None = None,
+    max_active: int | None = None,
+    min_graduation_score: float | None = None,
+    min_market_cap_change_pct: float | None = None,
+    min_priority: float | None = None,
+    operator: str | None = "watch_override_autopilot",
+) -> dict[str, Any]:
+    _ensure_schema()
+    config = _watch_override_autopilot_defaults(
+        limit=limit,
+        max_active=max_active,
+        min_graduation_score=min_graduation_score,
+        min_market_cap_change_pct=min_market_cap_change_pct,
+        min_priority=min_priority,
+    )
+    active = get_watch_overrides(status="active", limit=int(config["max_active"]) + 50)
+    active_tokens = {str(item.get("token") or "") for item in active.get("items") or [] if isinstance(item, dict)}
+    available_slots = max(0, int(config["max_active"]) - len(active_tokens))
+    queue = get_ready_for_watch_queue(limit=max(int(config["limit"]) * 4, int(config["limit"])))
+    activated: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    if available_slots <= 0:
+        return {
+            "status": "full",
+            "config": config,
+            "active_count": len(active_tokens),
+            "available_slots": 0,
+            "activated": activated,
+            "skipped": [],
+        }
+
+    for item in queue.get("items") or []:
+        if len(activated) >= min(int(config["limit"]), available_slots):
+            break
+        if not isinstance(item, dict):
+            continue
+        token = str(item.get("token") or "")
+        score = float(item.get("graduation_score") or 0.0)
+        mc_change = float(item.get("market_cap_change_pct") or 0.0)
+        priority = float(item.get("priority") or 0.0)
+        blockers: list[str] = []
+        if not token:
+            blockers.append("missing_token")
+        if token in active_tokens:
+            blockers.append("already_active")
+        if score < float(config["min_graduation_score"]):
+            blockers.append("graduation_score_below_autopilot_floor")
+        if mc_change < float(config["min_market_cap_change_pct"]):
+            blockers.append("market_cap_change_below_autopilot_floor")
+        if priority < float(config["min_priority"]):
+            blockers.append("priority_below_autopilot_floor")
+        if blockers:
+            skipped.append({"token": token, "blockers": blockers, "graduation_score": score, "market_cap_change_pct": mc_change, "priority": priority})
+            continue
+        try:
+            override = create_watch_override_from_observe(
+                token,
+                note="watch override autopilot activation",
+                operator=operator,
+            )
+            activated.append(override)
+            active_tokens.add(token)
+        except Exception as exc:
+            skipped.append({"token": token, "blockers": [str(exc)], "graduation_score": score, "market_cap_change_pct": mc_change, "priority": priority})
+
+    return {
+        "status": "activated" if activated else "no_eligible_tokens",
+        "config": config,
+        "active_count_before": int(active.get("returned") or 0),
+        "active_count_after": len(active_tokens),
+        "available_slots_before": available_slots,
+        "activated_count": len(activated),
+        "activated": activated,
+        "skipped": skipped[:50],
+        "ready_total": queue.get("total_ready"),
+    }
+
+
 def resolve_watch_override_for_worker(
     token: str,
     *,
@@ -7370,6 +7517,15 @@ def _observe_recheck_poll_seconds() -> int:
         return 120
 
 
+def _watch_override_autopilot_enabled() -> bool:
+    return os.getenv("SIGNAL_ENGINE_ENABLE_WATCH_OVERRIDE_AUTOPILOT", "0").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 async def observe_recheck_worker() -> None:
     init()
     while True:
@@ -7385,6 +7541,14 @@ async def observe_recheck_worker() -> None:
                 sync.get("updated"),
                 recheck.get("processed"),
             )
+            if _watch_override_autopilot_enabled():
+                autopilot = run_watch_override_autopilot()
+                logger.info(
+                    "[watch-override-autopilot] status=%s activated=%s active_after=%s",
+                    autopilot.get("status"),
+                    autopilot.get("activated_count"),
+                    autopilot.get("active_count_after"),
+                )
         except Exception as exc:
             logger.exception("[observe-recheck] worker iteration failed: %s", exc)
         await asyncio.sleep(_observe_recheck_poll_seconds())
