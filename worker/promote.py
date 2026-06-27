@@ -264,6 +264,7 @@ from worker.wallet_risk import score_wallet_risk
 from worker.dex import dex_enrich_token, select_best_pair, summarize_pair
 from worker.forensics import analyze_risk
 from worker.execution import estimate_edge
+from worker.expected_value import evaluate_candidate_ev
 from worker.trade_validator import validate_trade
 from worker.attention import compute_attention, register_buyer
 from worker.token_state import _ts
@@ -541,20 +542,32 @@ def _record_decision(
     dex_summary = extra.get("dex_summary") if isinstance(extra.get("dex_summary"), dict) else {}
     attention_metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
     route_decision = extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}
+    trade_validation = extra.get("trade_validation") if isinstance(extra.get("trade_validation"), dict) else {}
+    candidate_ev = extra.get("candidate_ev") if isinstance(extra.get("candidate_ev"), dict) else {}
+    buy_quote = trade_validation.get("buy_quote") if isinstance(trade_validation.get("buy_quote"), dict) else {}
+    sell_quote = trade_validation.get("sell_quote") if isinstance(trade_validation.get("sell_quote"), dict) else {}
+    route_labels = []
+    for quote in (buy_quote, sell_quote):
+        labels = quote.get("route_labels") if isinstance(quote.get("route_labels"), list) else []
+        route_labels.extend(str(label) for label in labels if label)
     features = {
         "attention_score": attention_score,
         "risk_score": risk_score,
         "confidence_score": confidence_score,
         "creator_score": creator_score,
         "lifecycle": lifecycle,
-        "market_cap_usd": dex_summary.get("market_cap") or dex_summary.get("fdv"),
+        "market_cap_usd": dex_summary.get("market_cap_usd") or dex_summary.get("market_cap") or dex_summary.get("fdv"),
+        "price_usd": dex_summary.get("price_usd"),
         "liquidity_usd": dex_summary.get("liquidity_usd"),
         "volume_m5_usd": dex_summary.get("volume_m5"),
+        "volume_h1_usd": dex_summary.get("volume_h1"),
         "age_minutes": dex_summary.get("age_minutes"),
         "price_change_m5": dex_summary.get("price_change_m5"),
         "price_change_h1": dex_summary.get("price_change_h1"),
         "txns_m5_buys": dex_summary.get("txns_m5_buys"),
         "txns_m5_sells": dex_summary.get("txns_m5_sells"),
+        "txns_h1_buys": dex_summary.get("txns_h1_buys"),
+        "txns_h1_sells": dex_summary.get("txns_h1_sells"),
         "unique_buyers_5m": attention_metrics.get("unique_buyers_5m"),
         "unique_buyers_15m": attention_metrics.get("unique_buyers_15m"),
         "burst_count_60s": attention_metrics.get("burst_count_60s"),
@@ -574,6 +587,25 @@ def _record_decision(
         "has_dex_pool": bool(dex_summary),
         "lp_drain": extra.get("lp_drain"),
         "creator_sell": extra.get("creator_sold"),
+        "trade_validation_approved": trade_validation.get("approved"),
+        "trade_validation_reasons": trade_validation.get("reasons") or [],
+        "trade_validation_warnings": trade_validation.get("warnings") or [],
+        "trade_validation_size_usd": trade_validation.get("intended_size_usd"),
+        "trade_validation_pair_address": trade_validation.get("pair_address"),
+        "trade_validation_dex_id": trade_validation.get("dex_id"),
+        "buy_slippage_bps": buy_quote.get("slippage_bps"),
+        "sell_slippage_bps": sell_quote.get("slippage_bps"),
+        "buy_price_impact_pct": buy_quote.get("price_impact_pct"),
+        "sell_price_impact_pct": sell_quote.get("price_impact_pct"),
+        "route_labels": list(dict.fromkeys(route_labels)),
+        "candidate_ev_approved": candidate_ev.get("approved"),
+        "candidate_ev_net_edge_bps": candidate_ev.get("net_edge_bps"),
+        "candidate_ev_gross_upside_bps": candidate_ev.get("gross_upside_bps"),
+        "candidate_ev_cost_bps": candidate_ev.get("cost_bps"),
+        "candidate_ev_risk_penalty_bps": candidate_ev.get("risk_penalty_bps"),
+        "candidate_ev_round_trip_slippage_bps": candidate_ev.get("round_trip_slippage_bps"),
+        "candidate_ev_max_price_impact_pct": candidate_ev.get("max_price_impact_pct"),
+        "candidate_ev_reasons": candidate_ev.get("reasons") or [],
     }
     features.update(classify_policy_regime(features, stage=stage, ts_value=e.ts))
     log_event(
@@ -1513,6 +1545,31 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     send_eligible = True
                     send_reasons = list(dict.fromkeys(["watch_override_approved", *send_reasons]))
                     confirmation_signals = list(dict.fromkeys(["watch_override", *confirmation_signals]))
+                trade_validation_payload = extra.get("trade_validation") if isinstance(extra.get("trade_validation"), dict) else None
+                if trade_validation_payload is not None:
+                    candidate_ev = evaluate_candidate_ev(
+                        trade_validation_payload,
+                        attention_score=attention_score,
+                        risk_score=risk_score,
+                        dex_summary=dex_summary,
+                        watch_override=isinstance(extra.get("watch_override"), dict),
+                    )
+                    extra["candidate_ev"] = candidate_ev
+                    if send_eligible and not candidate_ev.get("approved"):
+                        ev_reasons = [
+                            f"ev_gate:{reason}"
+                            for reason in candidate_ev.get("reasons", [])
+                            if reason != "ev_gate_passed"
+                        ]
+                        send_eligible = False
+                        send_reasons = list(dict.fromkeys([*send_reasons, *ev_reasons]))
+                        logger.info(
+                            "[candidate-ev-skip] token=%s net_edge_bps=%s cost_bps=%s reasons=%s",
+                            e.token,
+                            candidate_ev.get("net_edge_bps"),
+                            candidate_ev.get("cost_bps"),
+                            candidate_ev.get("reasons") or [],
+                        )
                 allow_rate = allow_candidate_rate_limit(EARLY_WATCH_RATE_LIMIT_PER_HOUR) if send_eligible else False
                 should_send = send_eligible and allow_rate
                 extra["candidate_rate_limit_allowed"] = allow_rate
