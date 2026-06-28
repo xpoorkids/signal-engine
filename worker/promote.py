@@ -448,6 +448,37 @@ def _candidate_send_decision(
     return eligible, reasons, confirmations
 
 
+def _apply_candidate_ev_gate(
+    *,
+    send_eligible: bool,
+    send_reasons: list[str],
+    extra: dict[str, Any],
+    dex_summary: dict[str, Any] | None,
+    attention_score: float | None,
+    risk_score: float | None,
+) -> tuple[bool, list[str], dict[str, Any]]:
+    trade_validation_payload = (
+        extra.get("trade_validation") if isinstance(extra.get("trade_validation"), dict) else None
+    )
+    candidate_ev = evaluate_candidate_ev(
+        trade_validation_payload,
+        attention_score=attention_score,
+        risk_score=risk_score,
+        dex_summary=dex_summary,
+        watch_override=isinstance(extra.get("watch_override"), dict),
+    )
+    extra["candidate_ev"] = candidate_ev
+    if send_eligible and not candidate_ev.get("approved"):
+        ev_reasons = [
+            f"ev_gate:{reason}"
+            for reason in candidate_ev.get("reasons", [])
+            if reason != "ev_gate_passed"
+        ]
+        send_eligible = False
+        send_reasons = list(dict.fromkeys([*send_reasons, *ev_reasons]))
+    return send_eligible, send_reasons, candidate_ev
+
+
 def _route_precedence_rank(event: Event) -> int:
     extra = event.extra if isinstance(event.extra, dict) else {}
     route = extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}
@@ -1545,31 +1576,22 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     send_eligible = True
                     send_reasons = list(dict.fromkeys(["watch_override_approved", *send_reasons]))
                     confirmation_signals = list(dict.fromkeys(["watch_override", *confirmation_signals]))
-                trade_validation_payload = extra.get("trade_validation") if isinstance(extra.get("trade_validation"), dict) else None
-                if trade_validation_payload is not None:
-                    candidate_ev = evaluate_candidate_ev(
-                        trade_validation_payload,
-                        attention_score=attention_score,
-                        risk_score=risk_score,
-                        dex_summary=dex_summary,
-                        watch_override=isinstance(extra.get("watch_override"), dict),
+                send_eligible, send_reasons, candidate_ev = _apply_candidate_ev_gate(
+                    send_eligible=send_eligible,
+                    send_reasons=send_reasons,
+                    extra=extra,
+                    dex_summary=dex_summary,
+                    attention_score=attention_score,
+                    risk_score=risk_score,
+                )
+                if send_eligible is False and any(reason.startswith("ev_gate:") for reason in send_reasons):
+                    logger.info(
+                        "[candidate-ev-skip] token=%s net_edge_bps=%s cost_bps=%s reasons=%s",
+                        e.token,
+                        candidate_ev.get("net_edge_bps"),
+                        candidate_ev.get("cost_bps"),
+                        candidate_ev.get("reasons") or [],
                     )
-                    extra["candidate_ev"] = candidate_ev
-                    if send_eligible and not candidate_ev.get("approved"):
-                        ev_reasons = [
-                            f"ev_gate:{reason}"
-                            for reason in candidate_ev.get("reasons", [])
-                            if reason != "ev_gate_passed"
-                        ]
-                        send_eligible = False
-                        send_reasons = list(dict.fromkeys([*send_reasons, *ev_reasons]))
-                        logger.info(
-                            "[candidate-ev-skip] token=%s net_edge_bps=%s cost_bps=%s reasons=%s",
-                            e.token,
-                            candidate_ev.get("net_edge_bps"),
-                            candidate_ev.get("cost_bps"),
-                            candidate_ev.get("reasons") or [],
-                        )
                 allow_rate = allow_candidate_rate_limit(EARLY_WATCH_RATE_LIMIT_PER_HOUR) if send_eligible else False
                 should_send = send_eligible and allow_rate
                 extra["candidate_rate_limit_allowed"] = allow_rate
