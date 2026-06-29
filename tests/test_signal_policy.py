@@ -129,6 +129,137 @@ def test_adversarial_signal_flags_detect_bursty_shallow_liquidity_pattern():
     assert "sell_pressure_elevated" in flags
 
 
+def test_adversarial_signal_flags_detect_supply_control_from_holder_and_volume():
+    flags = adversarial_signal_flags(
+        metrics={
+            "unique_buyers_5m": 5,
+            "burst_count_60s": 8,
+            "tracked_wallet_hits": 0,
+            "kol_wallet_hits": 0,
+            "top_holder_ratio": 0.052,
+        },
+        dex_summary={
+            "liquidity_usd": 26000.0,
+            "volume_h24": 70000.0,
+            "market_cap_usd": 100000.0,
+            "txns_m5_buys": 12,
+            "txns_m5_sells": 5,
+        },
+        anti_wash_top_wallet_share=0.70,
+        anti_wash_unique_wallets_30s=2,
+        min_unique_buyers_5m=3,
+        min_burst_count_60s=6,
+        max_sell_ratio_5m=1.2,
+        max_vol_liq_ratio_5m=4.0,
+        shallow_liq_usd=12000.0,
+        max_single_holder_ratio=0.035,
+        min_volume_market_cap_ratio=0.80,
+    )
+
+    assert "single_holder_supply_control" in flags
+    assert "low_volume_market_cap_imbalance" in flags
+
+
+def test_candidate_send_reasons_reject_supply_control_setup_without_hard_quality():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.76,
+        creator_score=0.50,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 5,
+                "burst_count_60s": 8,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+                "top_holder_ratio": 0.041,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 26000.0,
+            "volume_h24": 79000.0,
+            "market_cap_usd": 100000.0,
+            "txns_m5_buys": 12,
+            "txns_m5_sells": 5,
+        },
+    )
+
+    assert eligible is False
+    assert "buyer_breadth" in confirmations
+    assert "burst_strength" in confirmations
+    assert "single_holder_supply_control" in reasons
+    assert "low_volume_market_cap_imbalance" in reasons
+
+
+def test_candidate_send_reasons_reject_supply_control_even_with_kol_flow():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.76,
+        creator_score=0.60,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 5,
+                "burst_count_60s": 8,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 1,
+                "top_holder_ratio": 0.052,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 26000.0,
+            "volume_h24": 70000.0,
+            "market_cap_usd": 100000.0,
+            "txns_m5_buys": 12,
+            "txns_m5_sells": 5,
+        },
+    )
+
+    assert eligible is False
+    assert "kol_wallet_flow" in confirmations
+    assert "single_holder_supply_control" in reasons
+    assert "low_volume_market_cap_imbalance" in reasons
+
+
+def test_candidate_send_reasons_reject_paid_visibility_without_flow():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.62,
+        creator_score=0.70,
+        extra={
+            "attention_metrics": {
+                "dexscreener_boosts_count": 2,
+                "unique_buyers_5m": 1,
+                "burst_count_60s": 2,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={"liquidity_usd": 22000.0, "txns_m5_buys": 10, "txns_m5_sells": 4},
+    )
+
+    assert eligible is False
+    assert "market_support" in confirmations
+    assert "paid_visibility_without_flow" in reasons
+
+
+def test_candidate_send_reasons_reject_social_echo_chamber_without_trusted_flow():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.72,
+        creator_score=0.55,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 4,
+                "burst_count_60s": 8,
+                "x_tweet_count": 12,
+                "x_unique_authors": 2,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={"liquidity_usd": 18000.0, "txns_m5_buys": 10, "txns_m5_sells": 4},
+    )
+
+    assert eligible is False
+    assert "social_support" not in confirmations
+    assert "social_echo_chamber" in reasons
+
+
 def test_candidate_send_reasons_reject_adversarial_burst_without_hard_quality():
     eligible, reasons, _confirmations = candidate_send_reasons(
         attention_score=0.78,
@@ -238,6 +369,41 @@ def test_promotion_confirmation_target_penalizes_adversarial_market_shape():
 
     assert target >= 3
     assert "volume_liquidity_imbalance" in reasons
+
+
+def test_promotion_confirmation_target_penalizes_kol_supported_supply_control():
+    target, reasons = promotion_confirmation_target(
+        confidence_score=0.88,
+        confidence_min=0.80,
+        attention_score=0.70,
+        attention_min=0.50,
+        risk_score=0.35,
+        risk_max=0.60,
+        liquidity_usd=26000.0,
+        liquidity_min=12000.0,
+        buyers_15m=40,
+        buyers_15m_min=30,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 5,
+                "burst_count_60s": 8,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 1,
+                "top_holder_ratio": 0.052,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 26000.0,
+            "volume_h24": 70000.0,
+            "market_cap_usd": 100000.0,
+            "txns_m5_buys": 12,
+            "txns_m5_sells": 5,
+        },
+    )
+
+    assert target >= 2
+    assert "single_holder_supply_control" in reasons
+    assert "low_volume_market_cap_imbalance" in reasons
 
 
 def test_classify_route_signal_distinguishes_sniper_from_watch():

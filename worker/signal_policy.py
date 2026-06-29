@@ -19,6 +19,23 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _first_positive_float(*sources: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            try:
+                value = source.get(key)
+                if value in (None, ""):
+                    continue
+                parsed = float(value)
+            except Exception:
+                continue
+            if parsed > 0.0:
+                return parsed
+    return None
+
+
 @dataclass(frozen=True)
 class MarketQualityThresholds:
     min_liq: float
@@ -52,6 +69,10 @@ class CandidateSignalPolicy:
     adversarial_max_sell_ratio_5m: float
     adversarial_max_vol_liq_ratio_5m: float
     adversarial_shallow_liq_usd: float
+    adversarial_max_single_holder_ratio: float
+    adversarial_min_volume_market_cap_ratio: float
+    adversarial_social_min_author_ratio: float
+    adversarial_social_min_mentions: int
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -301,6 +322,10 @@ def candidate_signal_policy() -> CandidateSignalPolicy:
         adversarial_max_sell_ratio_5m=_env_float("SIGNAL_ENGINE_CANDIDATE_ADVERSARIAL_MAX_SELL_RATIO_5M", 1.25),
         adversarial_max_vol_liq_ratio_5m=_env_float("SIGNAL_ENGINE_CANDIDATE_ADVERSARIAL_MAX_VOL_LIQ_RATIO_5M", 4.0),
         adversarial_shallow_liq_usd=_env_float("SIGNAL_ENGINE_CANDIDATE_ADVERSARIAL_SHALLOW_LIQ_USD", 10000.0),
+        adversarial_max_single_holder_ratio=_env_float("SIGNAL_ENGINE_CANDIDATE_ADVERSARIAL_MAX_SINGLE_HOLDER_RATIO", 0.035),
+        adversarial_min_volume_market_cap_ratio=_env_float("SIGNAL_ENGINE_CANDIDATE_ADVERSARIAL_MIN_VOLUME_MARKET_CAP_RATIO", 0.80),
+        adversarial_social_min_author_ratio=_env_float("SIGNAL_ENGINE_CANDIDATE_ADVERSARIAL_SOCIAL_MIN_AUTHOR_RATIO", 0.35),
+        adversarial_social_min_mentions=_env_int("SIGNAL_ENGINE_CANDIDATE_ADVERSARIAL_SOCIAL_MIN_MENTIONS", 8),
     )
 
 
@@ -632,6 +657,10 @@ def adversarial_signal_flags(
     max_sell_ratio_5m: float,
     max_vol_liq_ratio_5m: float,
     shallow_liq_usd: float,
+    max_single_holder_ratio: float | None = None,
+    min_volume_market_cap_ratio: float | None = None,
+    social_min_author_ratio: float | None = None,
+    social_min_mentions: int | None = None,
 ) -> list[str]:
     payload = metrics if isinstance(metrics, dict) else {}
     flags: list[str] = []
@@ -641,18 +670,19 @@ def adversarial_signal_flags(
     burst_60s = int(payload.get("burst_count_60s") or 0)
     top_wallet_share = float(payload.get("top_wallet_share_30s") or 0.0)
     unique_wallets_30s = int(payload.get("unique_wallets_30s") or 0)
-    smart_money_support = tracked_hits > 0 or kol_hits > 0
+    trusted_wallet_support = tracked_hits > 0
+    any_wallet_support = tracked_hits > 0 or kol_hits > 0
 
     if (
         burst_60s >= min_burst_count_60s
         and buyers_5m < min_unique_buyers_5m
-        and not smart_money_support
+        and not any_wallet_support
     ):
         flags.append("burst_without_breadth")
     if (
         top_wallet_share >= anti_wash_top_wallet_share
         and unique_wallets_30s <= max(anti_wash_unique_wallets_30s + 1, 3)
-        and not smart_money_support
+        and not any_wallet_support
     ):
         flags.append("concentrated_wallet_flow")
 
@@ -663,14 +693,68 @@ def adversarial_signal_flags(
     sells5m = int(summary.get("txns_m5_sells") or 0)
 
     if liq > 0.0:
-        if liq < shallow_liq_usd and vol5m >= liq and not smart_money_support:
+        if liq < shallow_liq_usd and vol5m >= liq and not any_wallet_support:
             flags.append("shallow_liquidity_hype")
-        if (vol5m / liq) > max_vol_liq_ratio_5m and not smart_money_support:
+        if (vol5m / liq) > max_vol_liq_ratio_5m and not any_wallet_support:
             flags.append("volume_liquidity_imbalance")
     if buys5m > 0:
         sell_ratio = float(sells5m) / float(buys5m)
-        if sell_ratio > max_sell_ratio_5m and not smart_money_support:
+        if sell_ratio > max_sell_ratio_5m and not any_wallet_support:
             flags.append("sell_pressure_elevated")
+
+    holder_ratio = _first_positive_float(
+        payload,
+        summary,
+        keys=("top_holder_ratio", "top_holder_pct", "wallet_top_holder_pct"),
+    )
+    if (
+        holder_ratio is not None
+        and max_single_holder_ratio is not None
+        and holder_ratio > max_single_holder_ratio
+        and not trusted_wallet_support
+    ):
+        flags.append("single_holder_supply_control")
+
+    market_cap = _first_positive_float(
+        summary,
+        payload,
+        keys=("market_cap_usd", "market_cap", "fdv"),
+    )
+    volume = _first_positive_float(
+        summary,
+        payload,
+        keys=("volume_h24", "volume_24h", "volume_h24_usd", "volume_24h_usd", "volume_usd"),
+    )
+    if volume is None:
+        volume = _first_positive_float(summary, payload, keys=("volume_h1", "volume_h1_usd"))
+    if (
+        market_cap is not None
+        and volume is not None
+        and min_volume_market_cap_ratio is not None
+        and (volume / market_cap) < min_volume_market_cap_ratio
+        and not trusted_wallet_support
+    ):
+        flags.append("low_volume_market_cap_imbalance")
+
+    boosts = int(payload.get("dexscreener_boosts_count") or payload.get("dex_boosts") or 0)
+    if (
+        boosts > 0
+        and buyers_5m < min_unique_buyers_5m
+        and burst_60s < min_burst_count_60s
+        and not trusted_wallet_support
+    ):
+        flags.append("paid_visibility_without_flow")
+
+    x_mentions = int(payload.get("x_tweet_count") or 0)
+    x_authors = int(payload.get("x_unique_authors") or 0)
+    min_social_mentions = int(social_min_mentions or 0)
+    if (
+        x_mentions >= min_social_mentions > 0
+        and social_min_author_ratio is not None
+        and (float(x_authors) / float(x_mentions)) < social_min_author_ratio
+        and not trusted_wallet_support
+    ):
+        flags.append("social_echo_chamber")
 
     deduped: list[str] = []
     for item in flags:
@@ -707,15 +791,17 @@ def candidate_send_reasons(
         max_sell_ratio_5m=policy.adversarial_max_sell_ratio_5m,
         max_vol_liq_ratio_5m=policy.adversarial_max_vol_liq_ratio_5m,
         shallow_liq_usd=policy.adversarial_shallow_liq_usd,
+        max_single_holder_ratio=policy.adversarial_max_single_holder_ratio,
+        min_volume_market_cap_ratio=policy.adversarial_min_volume_market_cap_ratio,
+        social_min_author_ratio=policy.adversarial_social_min_author_ratio,
+        social_min_mentions=policy.adversarial_social_min_mentions,
     )
     confirmation_set = set(confirmations)
     if payload.get("wallet_guard_watch_only"):
         reasons.append("wallet_guard_watch_only")
-    hard_quality_confirmed = bool(
-        {"tracked_wallet_flow", "kol_wallet_flow", "market_support"} & confirmation_set
-    )
+    hard_quality_confirmed = bool({"tracked_wallet_flow", "market_support"} & confirmation_set)
     soft_quality_confirmed = bool(
-        {"social_support", "narrative_alignment"} & confirmation_set
+        {"kol_wallet_flow", "social_support", "narrative_alignment"} & confirmation_set
     )
     flow_strength_confirmed = {"buyer_breadth", "burst_strength"}.issubset(confirmation_set)
     route_fast_lane = route_tier == "sniper" or (route_tier == "heating_up" and route_confidence >= 0.75)
@@ -739,7 +825,14 @@ def candidate_send_reasons(
         or route_fast_lane
     ):
         reasons.append("quality_confirmation_missing")
-    if adversarial_flags and not (hard_quality_confirmed or route_fast_lane):
+    severe_adversarial_flags = {
+        "single_holder_supply_control",
+        "low_volume_market_cap_imbalance",
+        "paid_visibility_without_flow",
+        "social_echo_chamber",
+    }
+    has_severe_adversarial_flag = bool(severe_adversarial_flags & set(adversarial_flags))
+    if adversarial_flags and not route_fast_lane and (not hard_quality_confirmed or has_severe_adversarial_flag):
         reasons.extend(item for item in adversarial_flags if item not in reasons)
 
     eligible = (has_attention_only or has_creator_support or has_balanced_quality) and not reasons
@@ -814,8 +907,19 @@ def promotion_confirmation_target(
             max_sell_ratio_5m=policy.max_sell_ratio5m,
             max_vol_liq_ratio_5m=route_signal_policy().adversarial_max_vol_liq_ratio_5m,
             shallow_liq_usd=route_signal_policy().adversarial_shallow_liq_usd,
+            max_single_holder_ratio=candidate_signal_policy().adversarial_max_single_holder_ratio,
+            min_volume_market_cap_ratio=candidate_signal_policy().adversarial_min_volume_market_cap_ratio,
+            social_min_author_ratio=candidate_signal_policy().adversarial_social_min_author_ratio,
+            social_min_mentions=candidate_signal_policy().adversarial_social_min_mentions,
         )
-        if adversarial_flags and not (tracked_hits > 0 or kol_hits > 0):
+        severe_adversarial_flags = {
+            "single_holder_supply_control",
+            "low_volume_market_cap_imbalance",
+            "paid_visibility_without_flow",
+            "social_echo_chamber",
+        }
+        has_severe_adversarial_flag = bool(severe_adversarial_flags & set(adversarial_flags))
+        if adversarial_flags and (tracked_hits <= 0 or has_severe_adversarial_flag):
             confirm_target += 1
             reasons.extend(item for item in adversarial_flags if item not in reasons)
     return confirm_target, reasons
@@ -874,6 +978,10 @@ def classify_route_signal(
         max_sell_ratio_5m=policy.adversarial_max_sell_ratio_5m,
         max_vol_liq_ratio_5m=policy.adversarial_max_vol_liq_ratio_5m,
         shallow_liq_usd=policy.adversarial_shallow_liq_usd,
+        max_single_holder_ratio=candidate_signal_policy().adversarial_max_single_holder_ratio,
+        min_volume_market_cap_ratio=candidate_signal_policy().adversarial_min_volume_market_cap_ratio,
+        social_min_author_ratio=candidate_signal_policy().adversarial_social_min_author_ratio,
+        social_min_mentions=candidate_signal_policy().adversarial_social_min_mentions,
     )
 
     flow_confirmations = [item for item in confirmations if item in {"buyer_breadth", "burst_strength"}]
@@ -886,7 +994,7 @@ def classify_route_signal(
     hard_quality_confirmations = [
         item
         for item in confirmations
-        if item in {"tracked_wallet_flow", "kol_wallet_flow", "market_support"}
+        if item in {"tracked_wallet_flow", "market_support"}
     ]
     core_sniper_met = (
         unique_10s >= policy.sniper_min_unique_10s

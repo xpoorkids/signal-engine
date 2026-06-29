@@ -855,6 +855,10 @@ def _pretty_reason(reason: str) -> str:
         "tracked_wallet_flow": "Smart wallet flow detected",
         "kol_wallet_flow": "KOL wallet flow detected",
         "x_social_momentum": "X social momentum detected",
+        "single_holder_supply_control": "Single-holder supply control risk",
+        "low_volume_market_cap_imbalance": "Volume is weak versus market cap",
+        "paid_visibility_without_flow": "Paid visibility without real flow",
+        "social_echo_chamber": "Social momentum is author-concentrated",
     }
     if reason in mapping:
         return mapping[reason]

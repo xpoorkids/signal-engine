@@ -164,6 +164,8 @@ def summarize_pair(pair: Dict[str, Any]) -> Dict[str, Any]:
     price_change = pair.get("priceChange") or {}
 
     m5_txns = txns.get("m5") or {}
+    h1_txns = txns.get("h1") or {}
+    h24_txns = txns.get("h24") or {}
     info = pair.get("info") or {}
     socials = info.get("socials") or []
     websites = info.get("websites") or []
@@ -202,8 +204,14 @@ def summarize_pair(pair: Dict[str, Any]) -> Dict[str, Any]:
         "liquidity_usd": liq,
         "volume_m5": vol.get("m5"),
         "volume_h1": vol.get("h1"),
+        "volume_h6": vol.get("h6"),
+        "volume_h24": vol.get("h24"),
         "txns_m5_buys": m5_txns.get("buys"),
         "txns_m5_sells": m5_txns.get("sells"),
+        "txns_h1_buys": h1_txns.get("buys"),
+        "txns_h1_sells": h1_txns.get("sells"),
+        "txns_h24_buys": h24_txns.get("buys"),
+        "txns_h24_sells": h24_txns.get("sells"),
         "price_change_m5": price_change.get("m5"),
         "price_change_h1": price_change.get("h1"),
         "price_change_h24": price_change.get("h24"),

@@ -1054,6 +1054,10 @@ def _reason_family(reason: str) -> str:
         return "unknown"
     if text.startswith("age") or "ttl" in text or "bypass" in text:
         return "timing"
+    if "paid_visibility" in text or "social_echo" in text:
+        return "social_quality"
+    if "supply_control" in text:
+        return "wallet_quality"
     if "liq" in text or "volume" in text or "pool" in text or "market_support" in text:
         return "market_quality"
     if "wallet" in text or "holder" in text or "buyer" in text or "kol" in text or "tracked" in text:
