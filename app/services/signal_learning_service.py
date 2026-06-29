@@ -1080,6 +1080,24 @@ def _extract_bypass_flags(features: dict[str, Any]) -> list[str]:
     return bypasses
 
 
+def _decision_action_bucket(action_taken: str | None, decision: str | None) -> str:
+    action_name = str(action_taken or "").strip().lower()
+    if action_name:
+        return action_name
+    decision_name = str(decision or "").strip().lower()
+    if not decision_name:
+        return "unknown"
+    if decision_name.endswith("_sent") or decision_name.endswith("sent"):
+        return "emit"
+    if "skip" in decision_name or "fail" in decision_name or "veto" in decision_name:
+        return "skip"
+    if "block" in decision_name:
+        return "block"
+    if decision_name.endswith("_buffered") or decision_name.endswith("_wait_confirm"):
+        return "hold"
+    return "unknown"
+
+
 def _decision_route_class(
     *,
     signal_event_type: str | None,
@@ -4896,7 +4914,7 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
             action_taken,
         ) = row
         counts_by_decision[decision] = counts_by_decision.get(decision, 0) + 1
-        action_key = action_taken or "unknown"
+        action_key = _decision_action_bucket(action_taken, decision)
         counts_by_action[action_key] = counts_by_action.get(action_key, 0) + 1
         stage_key = stage or "unknown"
         stage_counts[stage_key] = stage_counts.get(stage_key, 0) + 1

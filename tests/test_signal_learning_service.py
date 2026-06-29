@@ -428,6 +428,8 @@ def test_diagnostics_summary_aggregates_decisions(tmp_path, monkeypatch):
 
     assert summary["counts_by_decision"]["candidate_gate_skip"] == 1
     assert summary["counts_by_decision"]["promotion_block"] == 1
+    assert summary["counts_by_action"]["skip"] == 1
+    assert summary["counts_by_action"]["block"] == 1
     reasons = {item["reason"]: item["count"] for item in summary["top_skip_reasons"]}
     assert reasons["attention<0.20"] == 1
     assert reasons["buyers_low"] == 1
