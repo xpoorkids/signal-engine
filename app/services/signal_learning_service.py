@@ -6157,6 +6157,9 @@ def _infer_wallet_guard_category(features: dict[str, Any], reasons: list[Any]) -
     observe_blockers = features.get("wallet_guard_observe_blockers")
     if isinstance(observe_blockers, list):
         normalized.update(str(reason or "").strip() for reason in observe_blockers if str(reason or "").strip())
+    verdict = str(features.get("wallet_cluster_verdict") or "").strip()
+    if verdict in {"toxic_cluster", "smart_accumulation", "coordinated_accumulation", "uncertain_concentration"}:
+        return verdict
     if normalized & {"wallet_distribution_high_risk", "wallet_top_holder_concentration"}:
         return "concentration_watch"
     if normalized & {"concentrated_wallet_flow", "wallet_flow_concentration"}:
@@ -6177,6 +6180,13 @@ def _wallet_guard_payload(features: dict[str, Any], reasons: list[Any]) -> dict[
         if isinstance(features.get("wallet_guard_observe_blockers"), list)
         else []
     )
+    cluster_review = {
+        "verdict": features.get("wallet_cluster_verdict"),
+        "score": features.get("wallet_cluster_score"),
+        "signals": features.get("wallet_cluster_signals") if isinstance(features.get("wallet_cluster_signals"), list) else [],
+        "blockers": features.get("wallet_cluster_blockers") if isinstance(features.get("wallet_cluster_blockers"), list) else [],
+        "metrics": features.get("wallet_cluster_metrics") if isinstance(features.get("wallet_cluster_metrics"), dict) else {},
+    }
     category = _infer_wallet_guard_category(features, reasons)
     inferred_reasons = [
         str(reason)
@@ -6191,6 +6201,7 @@ def _wallet_guard_payload(features: dict[str, Any], reasons: list[Any]) -> dict[
         "watch_only": watch_only,
         "original_reasons": original_reasons,
         "observe_blockers": observe_blockers,
+        "cluster_review": cluster_review,
         "inferred": not bool(str(features.get("wallet_guard_category") or "").strip()),
     }
 

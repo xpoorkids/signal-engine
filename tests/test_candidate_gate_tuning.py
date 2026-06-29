@@ -1,6 +1,7 @@
 from worker.alert_gate import admission_check_candidate
 from worker.promote import (
     _candidate_send_eligible,
+    _wallet_cluster_review,
     _wallet_guard_category,
     _wallet_distribution_fail_reasons,
     _wallet_guard_observe_decision,
@@ -126,6 +127,21 @@ def test_wallet_distribution_fail_reasons_keeps_common_launch_concentration_out_
 
 
 def test_wallet_guard_observe_allows_confirmed_wallet_only_block():
+    cluster = _wallet_cluster_review(
+        {"risk": "high", "top_holder_pct": 0.36},
+        total_buys_30s=7,
+        unique_wallets_30s=5,
+        top_wallet_share=0.42,
+        attention_metrics={"unique_buyers_5m": 5, "burst_count_60s": 9},
+        dex_summary={
+            "liquidity_usd": 30000.0,
+            "txns_m5_buys": 14,
+            "txns_m5_sells": 8,
+            "volume_m5": 25000.0,
+            "price_change_m5": 12.0,
+        },
+        risk_score=0.50,
+    )
     allowed, blockers = _wallet_guard_observe_decision(
         ["wallet_distribution_high_risk", "wallet_top_holder_concentration"],
         attention_score=0.52,
@@ -138,10 +154,48 @@ def test_wallet_guard_observe_allows_confirmed_wallet_only_block():
             "volume_m5": 25000.0,
             "price_change_m5": 12.0,
         },
+        wallet_cluster_review=cluster,
     )
 
+    assert cluster["verdict"] == "coordinated_accumulation"
     assert allowed is True
     assert blockers == []
+
+
+def test_wallet_cluster_review_blocks_toxic_bundle_shape():
+    cluster = _wallet_cluster_review(
+        {"risk": "high", "top_holder_pct": 0.48, "top10_pct": 0.76},
+        total_buys_30s=8,
+        unique_wallets_30s=2,
+        top_wallet_share=0.78,
+        attention_metrics={"unique_buyers_5m": 2, "burst_count_60s": 9},
+        dex_summary={
+            "liquidity_usd": 30000.0,
+            "txns_m5_buys": 14,
+            "txns_m5_sells": 8,
+            "volume_m5": 25000.0,
+            "price_change_m5": 12.0,
+        },
+        risk_score=0.50,
+    )
+    allowed, blockers = _wallet_guard_observe_decision(
+        ["wallet_distribution_high_risk", "wallet_top_holder_concentration"],
+        attention_score=0.70,
+        risk_score=0.50,
+        attention_metrics={"unique_buyers_5m": 8, "burst_count_60s": 12},
+        dex_summary={
+            "liquidity_usd": 30000.0,
+            "txns_m5_buys": 14,
+            "txns_m5_sells": 8,
+            "volume_m5": 25000.0,
+            "price_change_m5": 12.0,
+        },
+        wallet_cluster_review=cluster,
+    )
+
+    assert cluster["verdict"] == "toxic_cluster"
+    assert allowed is False
+    assert "wallet_cluster_toxic" in blockers
 
 
 def test_wallet_guard_observe_blocks_mixed_or_weak_hard_fail():
@@ -174,4 +228,18 @@ def test_wallet_guard_v2_categories_separate_fraud_and_accumulation():
         == "smart_accumulation"
     )
     assert _wallet_guard_category(["wallet_distribution_high_risk"]) == "early_concentration"
+    assert (
+        _wallet_guard_category(
+            ["wallet_distribution_high_risk"],
+            wallet_cluster_review={"verdict": "coordinated_accumulation"},
+        )
+        == "coordinated_accumulation"
+    )
+    assert (
+        _wallet_guard_category(
+            ["wallet_distribution_high_risk"],
+            wallet_cluster_review={"verdict": "toxic_cluster"},
+        )
+        == "toxic_wallet_cluster"
+    )
     assert _wallet_guard_category(["liquidity_unknown"]) == "unknown_wallet_structure"

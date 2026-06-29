@@ -343,6 +343,156 @@ def _wallet_distribution_fail_reasons(
     return deduped
 
 
+def _wallet_cluster_review(
+    wallet_risk: dict[str, Any] | None,
+    *,
+    total_buys_30s: int,
+    unique_wallets_30s: int,
+    top_wallet_share: float,
+    attention_metrics: dict[str, Any] | None,
+    dex_summary: dict[str, Any] | None,
+    risk_score: float | None,
+) -> dict[str, Any]:
+    payload = wallet_risk if isinstance(wallet_risk, dict) else {}
+    metrics = attention_metrics if isinstance(attention_metrics, dict) else {}
+    dex = dex_summary if isinstance(dex_summary, dict) else {}
+    policy = route_signal_policy()
+    candidate_policy = candidate_signal_policy()
+
+    wallet_level = str(payload.get("risk") or "").strip().lower()
+    try:
+        top_holder_pct = float(payload.get("top_holder_pct"))
+    except Exception:
+        top_holder_pct = None
+    try:
+        top10_pct = float(payload.get("top10_pct"))
+    except Exception:
+        top10_pct = None
+
+    liq = float(dex.get("liquidity_usd") or 0.0)
+    buys5m = int(dex.get("txns_m5_buys") or 0)
+    sells5m = int(dex.get("txns_m5_sells") or 0)
+    vol5m = float(dex.get("volume_m5") or 0.0)
+    price_change_m5 = float(dex.get("price_change_m5") or 0.0)
+    buyers_5m = int(metrics.get("unique_buyers_5m") or 0)
+    burst_60s = int(metrics.get("burst_count_60s") or 0)
+    tracked_hits = int(metrics.get("tracked_wallet_hits") or 0)
+    kol_hits = int(metrics.get("kol_wallet_hits") or 0)
+    smart_wallet_hits = tracked_hits + kol_hits
+    risk = float(risk_score) if isinstance(risk_score, (int, float)) else None
+    sell_ratio = (float(sells5m) / float(buys5m)) if buys5m > 0 else 0.0
+    vol_liq_ratio = (vol5m / liq) if liq > 0.0 else 0.0
+
+    signals: list[str] = []
+    blockers: list[str] = []
+    score = 0
+
+    if wallet_level == "high":
+        blockers.append("wallet_cluster_high_risk")
+        score -= 20
+    if top_holder_pct is not None and top_holder_pct >= 0.45:
+        blockers.append("wallet_cluster_single_holder_dominant")
+        score -= 35
+    elif top_holder_pct is not None and top_holder_pct >= WALLET_DISTRIBUTION_HARD_FAIL_TOP_HOLDER_PCT:
+        blockers.append("wallet_cluster_top_holder_watch")
+        score -= 15
+    if top10_pct is not None and top10_pct >= 0.70:
+        blockers.append("wallet_cluster_top10_dominant")
+        score -= 20
+    if total_buys_30s >= 6 and unique_wallets_30s <= 2 and top_wallet_share >= 0.70:
+        blockers.append("wallet_cluster_bundle_pattern")
+        score -= 35
+    elif unique_wallets_30s >= 4 and top_wallet_share <= 0.55:
+        signals.append("wallet_cluster_local_breadth")
+        score += 18
+    if buyers_5m >= max(candidate_policy.min_unique_buyers_5m + 2, 5):
+        signals.append("wallet_cluster_buyer_breadth")
+        score += 18
+    if burst_60s >= policy.route_burst_strength_min:
+        signals.append("wallet_cluster_burst_confirmed")
+        score += 10
+    if buys5m >= policy.route_market_support_min_buys5m:
+        signals.append("wallet_cluster_market_buys")
+        score += 12
+    if liq >= policy.heating_min_liq_usd:
+        signals.append("wallet_cluster_liquidity_floor")
+        score += 12
+    if smart_wallet_hits > 0:
+        signals.append("wallet_cluster_smart_wallet_support")
+        score += 18
+    if buys5m > 0 and sell_ratio <= policy.adversarial_max_sell_ratio_5m:
+        signals.append("wallet_cluster_sell_pressure_ok")
+        score += 8
+    elif buys5m > 0:
+        blockers.append("wallet_cluster_sell_pressure_high")
+        score -= 18
+    if liq > 0.0 and vol_liq_ratio > policy.adversarial_max_vol_liq_ratio_5m:
+        blockers.append("wallet_cluster_volume_liquidity_spike")
+        score -= 16
+    if price_change_m5 < -18.0:
+        blockers.append("wallet_cluster_dumping")
+        score -= 25
+    if risk is not None and risk > 0.60:
+        blockers.append("wallet_cluster_risk_score_high")
+        score -= 18
+
+    toxic_markers = {
+        "wallet_cluster_single_holder_dominant",
+        "wallet_cluster_top10_dominant",
+        "wallet_cluster_bundle_pattern",
+        "wallet_cluster_sell_pressure_high",
+        "wallet_cluster_volume_liquidity_spike",
+        "wallet_cluster_dumping",
+        "wallet_cluster_risk_score_high",
+    }
+    toxic = bool(toxic_markers & set(blockers))
+    constructive = (
+        liq >= policy.heating_min_liq_usd
+        and buys5m >= policy.route_market_support_min_buys5m
+        and buyers_5m >= max(candidate_policy.min_unique_buyers_5m + 2, 5)
+        and (sell_ratio == 0.0 or sell_ratio <= policy.adversarial_max_sell_ratio_5m)
+        and (vol_liq_ratio == 0.0 or vol_liq_ratio <= policy.adversarial_max_vol_liq_ratio_5m)
+        and price_change_m5 >= -18.0
+        and (risk is None or risk <= 0.60)
+    )
+    if toxic:
+        verdict = "toxic_cluster"
+    elif constructive and smart_wallet_hits > 0:
+        verdict = "smart_accumulation"
+    elif constructive and (len(signals) >= 4 or unique_wallets_30s >= 4):
+        verdict = "coordinated_accumulation"
+    else:
+        verdict = "uncertain_concentration"
+        if "wallet_cluster_insufficient_constructive_flow" not in blockers:
+            blockers.append("wallet_cluster_insufficient_constructive_flow")
+
+    return {
+        "verdict": verdict,
+        "score": max(-100, min(100, score)),
+        "signals": list(dict.fromkeys(signals)),
+        "blockers": list(dict.fromkeys(blockers)),
+        "metrics": {
+            "wallet_risk": wallet_level or None,
+            "top_holder_pct": top_holder_pct,
+            "top10_pct": top10_pct,
+            "total_buys_30s": total_buys_30s,
+            "unique_wallets_30s": unique_wallets_30s,
+            "top_wallet_share_30s": round(float(top_wallet_share or 0.0), 4),
+            "unique_buyers_5m": buyers_5m,
+            "burst_count_60s": burst_60s,
+            "tracked_wallet_hits": tracked_hits,
+            "kol_wallet_hits": kol_hits,
+            "liquidity_usd": liq,
+            "txns_m5_buys": buys5m,
+            "txns_m5_sells": sells5m,
+            "sell_ratio_5m": round(sell_ratio, 4),
+            "volume_liquidity_ratio_5m": round(vol_liq_ratio, 4),
+            "price_change_m5": price_change_m5,
+            "risk_score": risk,
+        },
+    }
+
+
 WALLET_GUARD_REASONS = {
     "wallet_distribution_high_risk",
     "wallet_top_holder_concentration",
@@ -354,12 +504,21 @@ def _wallet_guard_category(
     *,
     wallet_observe_ok: bool = False,
     attention_metrics: dict[str, Any] | None = None,
+    wallet_cluster_review: dict[str, Any] | None = None,
 ) -> str:
     reason_set = {str(reason) for reason in reasons}
     metrics = attention_metrics if isinstance(attention_metrics, dict) else {}
     smart_wallet_hits = int(metrics.get("tracked_wallet_hits") or 0) + int(metrics.get("kol_wallet_hits") or 0)
+    cluster = wallet_cluster_review if isinstance(wallet_cluster_review, dict) else {}
+    verdict = str(cluster.get("verdict") or "").strip()
     if reason_set & {"mint_authority_active", "freeze_authority_active", "bundle_pattern_detected"}:
         return "hard_fraud"
+    if verdict == "toxic_cluster":
+        return "toxic_wallet_cluster"
+    if verdict == "smart_accumulation":
+        return "smart_accumulation"
+    if verdict == "coordinated_accumulation":
+        return "coordinated_accumulation"
     if wallet_observe_ok:
         return "smart_accumulation" if smart_wallet_hits > 0 else "early_concentration"
     if reason_set & WALLET_GUARD_REASONS:
@@ -376,10 +535,17 @@ def _wallet_guard_observe_decision(
     risk_score: float | None,
     attention_metrics: dict[str, Any] | None,
     dex_summary: dict[str, Any] | None,
+    wallet_cluster_review: dict[str, Any] | None = None,
 ) -> tuple[bool, list[str]]:
     reasons = list(dict.fromkeys(hard_fail_reasons))
     if not reasons or not set(reasons).issubset(WALLET_GUARD_REASONS):
         return False, ["non_wallet_hard_fail"]
+    cluster = wallet_cluster_review if isinstance(wallet_cluster_review, dict) else {}
+    verdict = str(cluster.get("verdict") or "").strip()
+    if verdict == "toxic_cluster":
+        return False, [*(cluster.get("blockers") if isinstance(cluster.get("blockers"), list) else []), "wallet_cluster_toxic"]
+    if verdict and verdict not in {"smart_accumulation", "coordinated_accumulation"}:
+        return False, [*(cluster.get("blockers") if isinstance(cluster.get("blockers"), list) else []), "wallet_cluster_not_constructive"]
 
     metrics = attention_metrics if isinstance(attention_metrics, dict) else {}
     dex = dex_summary if isinstance(dex_summary, dict) else {}
@@ -574,6 +740,7 @@ def _record_decision(
     attention_metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
     route_decision = extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}
     entry_quality = route_decision.get("entry_quality") if isinstance(route_decision.get("entry_quality"), dict) else {}
+    wallet_cluster = extra.get("wallet_cluster_review") if isinstance(extra.get("wallet_cluster_review"), dict) else {}
     trade_validation = extra.get("trade_validation") if isinstance(extra.get("trade_validation"), dict) else {}
     candidate_ev = extra.get("candidate_ev") if isinstance(extra.get("candidate_ev"), dict) else {}
     buy_quote = trade_validation.get("buy_quote") if isinstance(trade_validation.get("buy_quote"), dict) else {}
@@ -614,6 +781,11 @@ def _record_decision(
         "wallet_guard_watch_only": bool(extra.get("wallet_guard_watch_only")),
         "wallet_guard_original_reasons": extra.get("wallet_guard_original_reasons") or [],
         "wallet_guard_observe_blockers": extra.get("wallet_guard_observe_blockers") or [],
+        "wallet_cluster_verdict": wallet_cluster.get("verdict"),
+        "wallet_cluster_score": wallet_cluster.get("score"),
+        "wallet_cluster_signals": wallet_cluster.get("signals") or [],
+        "wallet_cluster_blockers": wallet_cluster.get("blockers") or [],
+        "wallet_cluster_metrics": wallet_cluster.get("metrics") if isinstance(wallet_cluster.get("metrics"), dict) else {},
         "watch_override": extra.get("watch_override") if isinstance(extra.get("watch_override"), dict) else None,
         "watch_override_gate_bypass": extra.get("watch_override_gate_bypass") or [],
         "has_dex_pool": bool(dex_summary),
@@ -1027,6 +1199,16 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             pass
 
         token_wallet_risk = wallet_risk_score(e.token)
+        wallet_cluster = _wallet_cluster_review(
+            token_wallet_risk,
+            total_buys_30s=len(st.buys_30s),
+            unique_wallets_30s=unique_30s,
+            top_wallet_share=top_share,
+            attention_metrics=attn_metrics,
+            dex_summary=dex_summary,
+            risk_score=risk_score,
+        )
+        extra["wallet_cluster_review"] = wallet_cluster
         distribution_fail_reasons = _wallet_distribution_fail_reasons(
             token_wallet_risk,
             total_buys_30s=len(st.buys_30s),
@@ -1206,6 +1388,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 risk_score=risk_score,
                 attention_metrics=attn_metrics,
                 dex_summary=dex_summary,
+                wallet_cluster_review=extra.get("wallet_cluster_review") if isinstance(extra.get("wallet_cluster_review"), dict) else None,
             )
             extra["wallet_guard_original_reasons"] = list(dict.fromkeys(hard_fail_reasons))
             extra["wallet_guard_observe_blockers"] = wallet_observe_blockers
@@ -1213,6 +1396,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 hard_fail_reasons,
                 wallet_observe_ok=wallet_observe_ok,
                 attention_metrics=attn_metrics,
+                wallet_cluster_review=extra.get("wallet_cluster_review") if isinstance(extra.get("wallet_cluster_review"), dict) else None,
             )
             if wallet_observe_ok:
                 hard_fail = False

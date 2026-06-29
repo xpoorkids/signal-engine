@@ -54,6 +54,13 @@ def test_record_decision_persists_tradeability_and_ev_features(tmp_path, monkeyp
                 "max_price_impact_pct": 0.9,
                 "reasons": ["ev_gate_passed"],
             },
+            "wallet_cluster_review": {
+                "verdict": "coordinated_accumulation",
+                "score": 43,
+                "signals": ["wallet_cluster_buyer_breadth"],
+                "blockers": ["wallet_cluster_top_holder_watch"],
+                "metrics": {"top_holder_pct": 0.36, "unique_buyers_5m": 6},
+            },
         },
     )
 
@@ -85,5 +92,10 @@ def test_record_decision_persists_tradeability_and_ev_features(tmp_path, monkeyp
     assert features["buy_slippage_bps"] == 105.0
     assert features["sell_slippage_bps"] == 135.0
     assert features["route_labels"] == ["Raydium"]
+    assert features["wallet_cluster_verdict"] == "coordinated_accumulation"
+    assert features["wallet_cluster_score"] == 43
+    assert features["wallet_cluster_signals"] == ["wallet_cluster_buyer_breadth"]
+    assert features["wallet_cluster_blockers"] == ["wallet_cluster_top_holder_watch"]
+    assert features["wallet_cluster_metrics"]["top_holder_pct"] == 0.36
     assert features["candidate_ev_approved"] is True
     assert features["candidate_ev_net_edge_bps"] == 640.0
