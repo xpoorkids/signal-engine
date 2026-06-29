@@ -6014,7 +6014,7 @@ def _build_missed_runner_analysis(
         action = "review"
         if count >= 2 or int(item["missed_sniper"] or 0) > 0:
             action = "shadow_relax"
-        if str(item.get("family") or "") in {"authority", "wallet", "risk"}:
+        if str(item.get("family") or "") in {"authority", "wallet", "wallet_quality", "risk", "risk_control"}:
             action = "inspect_before_relax"
         blocker_review.append(
             {

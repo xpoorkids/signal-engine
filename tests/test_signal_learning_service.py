@@ -3033,7 +3033,7 @@ def test_live_validation_summary_tracks_alert_outcomes_and_buckets(tmp_path, mon
         stage="candidate",
         decision="candidate_gate_skip",
         action_taken="hold",
-        reasons=["attention<0.20", "buyers_low"],
+        reasons=["attention<0.20", "buyers_low", "wallet_top_holder_concentration"],
         attention_score=0.19,
         risk_score=0.16,
         confidence_score=0.44,
@@ -3118,8 +3118,10 @@ def test_live_validation_summary_tracks_alert_outcomes_and_buckets(tmp_path, mon
         item["reason"]: item
         for item in summary["missed_runner_analysis"]["blocker_review"]
     }
-    assert blocker_review["buyers_low"]["recommended_action"] == "shadow_relax"
+    assert blocker_review["attention<0.20"]["recommended_action"] == "shadow_relax"
+    assert blocker_review["buyers_low"]["recommended_action"] == "inspect_before_relax"
     assert blocker_review["buyers_low"]["missed_sniper"] >= 1
+    assert blocker_review["wallet_top_holder_concentration"]["recommended_action"] == "inspect_before_relax"
     assert summary["policy_comparison"]["variant_count"] >= 1
     assert summary["alerts"][0]["thresholds_used"]["policy_name"] == "live_policy"
 
