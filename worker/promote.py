@@ -573,6 +573,7 @@ def _record_decision(
     dex_summary = extra.get("dex_summary") if isinstance(extra.get("dex_summary"), dict) else {}
     attention_metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
     route_decision = extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}
+    entry_quality = route_decision.get("entry_quality") if isinstance(route_decision.get("entry_quality"), dict) else {}
     trade_validation = extra.get("trade_validation") if isinstance(extra.get("trade_validation"), dict) else {}
     candidate_ev = extra.get("candidate_ev") if isinstance(extra.get("candidate_ev"), dict) else {}
     buy_quote = trade_validation.get("buy_quote") if isinstance(trade_validation.get("buy_quote"), dict) else {}
@@ -629,6 +630,10 @@ def _record_decision(
         "buy_price_impact_pct": buy_quote.get("price_impact_pct"),
         "sell_price_impact_pct": sell_quote.get("price_impact_pct"),
         "route_labels": list(dict.fromkeys(route_labels)),
+        "entry_quality_tier": entry_quality.get("tier"),
+        "entry_quality_score": entry_quality.get("score"),
+        "entry_quality_reasons": entry_quality.get("reasons") or [],
+        "entry_quality_supports": entry_quality.get("supports") or [],
         "candidate_ev_approved": candidate_ev.get("approved"),
         "candidate_ev_net_edge_bps": candidate_ev.get("net_edge_bps"),
         "candidate_ev_gross_upside_bps": candidate_ev.get("gross_upside_bps"),

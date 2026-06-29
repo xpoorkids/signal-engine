@@ -3,6 +3,7 @@ from worker.signal_policy import (
     candidate_confirmation_signals,
     candidate_send_reasons,
     classify_route_signal,
+    entry_quality_profile,
     heating_delivery_decision,
     promotion_confirmation_target,
 )
@@ -258,6 +259,54 @@ def test_candidate_send_reasons_reject_social_echo_chamber_without_trusted_flow(
     assert eligible is False
     assert "social_support" not in confirmations
     assert "social_echo_chamber" in reasons
+
+
+def test_entry_quality_profile_marks_extended_chase_without_breadth():
+    profile = entry_quality_profile(
+        metrics={
+            "unique_buyers_5m": 2,
+            "tracked_wallet_hits": 0,
+            "kol_wallet_hits": 0,
+        },
+        dex_summary={
+            "liquidity_usd": 9000.0,
+            "price_change_m5": 52.0,
+            "price_change_h1": 180.0,
+            "txns_m5_buys": 8,
+            "txns_m5_sells": 9,
+        },
+    )
+
+    assert profile["tier"] == "chase_risk"
+    assert "entry_extended_without_breadth" in profile["reasons"]
+    assert "entry_extended_thin_liquidity" in profile["reasons"]
+
+
+def test_candidate_send_reasons_reject_chase_entry_without_trusted_flow():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.78,
+        creator_score=0.70,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 2,
+                "burst_count_60s": 8,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 9000.0,
+            "price_change_m5": 52.0,
+            "price_change_h1": 180.0,
+            "txns_m5_buys": 8,
+            "txns_m5_sells": 9,
+        },
+    )
+
+    assert eligible is False
+    assert "entry_extended_without_breadth" in reasons
+    assert "entry_extended_thin_liquidity" in reasons
+    assert "burst_strength" in confirmations
 
 
 def test_candidate_send_reasons_reject_adversarial_burst_without_hard_quality():

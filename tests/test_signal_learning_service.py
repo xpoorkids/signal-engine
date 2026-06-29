@@ -3114,6 +3114,12 @@ def test_live_validation_summary_tracks_alert_outcomes_and_buckets(tmp_path, mon
     ) >= 1
     assert summary["missed_runner_analysis"]["missed_runner_count"] >= 1
     assert summary["missed_runner_analysis"]["missed_runners"][0]["miss_bucket"] == "missed_sniper"
+    blocker_review = {
+        item["reason"]: item
+        for item in summary["missed_runner_analysis"]["blocker_review"]
+    }
+    assert blocker_review["buyers_low"]["recommended_action"] == "shadow_relax"
+    assert blocker_review["buyers_low"]["missed_sniper"] >= 1
     assert summary["policy_comparison"]["variant_count"] >= 1
     assert summary["alerts"][0]["thresholds_used"]["policy_name"] == "live_policy"
 

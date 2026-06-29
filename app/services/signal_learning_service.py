@@ -5885,6 +5885,8 @@ def get_live_validation_records(
                 "unique_buyers_5m": features.get("unique_buyers_5m"),
                 "top_wallet_share_30s": features.get("top_wallet_share_30s"),
                 "route_confidence": features.get("route_confidence"),
+                "entry_quality_tier": features.get("entry_quality_tier"),
+                "entry_quality_score": features.get("entry_quality_score"),
             },
             "thresholds_used": policy_descriptor,
             "parameter_fingerprint": str(features.get("parameter_fingerprint") or _policy_config_fingerprint(policy_descriptor)),
@@ -5895,6 +5897,12 @@ def get_live_validation_records(
             "route_confirmations": features.get("route_confirmations") if isinstance(features.get("route_confirmations"), list) else [],
             "route_blockers": features.get("route_blockers") if isinstance(features.get("route_blockers"), list) else [],
             "sniper_blockers": features.get("sniper_blockers") if isinstance(features.get("sniper_blockers"), list) else [],
+            "entry_quality": {
+                "tier": features.get("entry_quality_tier"),
+                "score": features.get("entry_quality_score"),
+                "reasons": features.get("entry_quality_reasons") if isinstance(features.get("entry_quality_reasons"), list) else [],
+                "supports": features.get("entry_quality_supports") if isinstance(features.get("entry_quality_supports"), list) else [],
+            },
             "wallet_guard": _wallet_guard_payload(features, decision_reasons),
             "outcome_label": snapshot.get("outcome_label"),
             "outcome_market_cap_change_pct": snapshot.get("market_cap_change_pct"),
@@ -5936,6 +5944,7 @@ def _build_missed_runner_analysis(
         route_class = str(record.get("final_route_class") or "unknown")
         route_blockers = [str(item) for item in record.get("route_blockers") or []]
         sniper_blockers = [str(item) for item in record.get("sniper_blockers") or []]
+        entry_quality = record.get("entry_quality") if isinstance(record.get("entry_quality"), dict) else {}
         missed.append(
             {
                 "signal_id": record.get("signal_id"),
@@ -5951,6 +5960,7 @@ def _build_missed_runner_analysis(
                 "market_cap_change_pct": record.get("outcome_market_cap_change_pct"),
                 "route_blockers": route_blockers[:6],
                 "sniper_blockers": sniper_blockers[:6],
+                "entry_quality": entry_quality,
                 "thresholds_used": record.get("thresholds_used") if isinstance(record.get("thresholds_used"), dict) else {},
             }
         )
@@ -5962,9 +5972,70 @@ def _build_missed_runner_analysis(
         )
     )
     family_counts: dict[str, int] = {}
+    reason_review: dict[str, dict[str, Any]] = {}
     for item in missed:
+        token = str(item.get("token") or "")
+        mc_change = _to_float(item.get("market_cap_change_pct")) or 0.0
         for family in item.get("binding_gate_families") or []:
             family_counts[family] = family_counts.get(family, 0) + 1
+        for reason in [
+            *[str(value) for value in item.get("binding_reasons") or []],
+            *[str(value) for value in item.get("route_blockers") or []],
+            *[str(value) for value in item.get("sniper_blockers") or []],
+        ]:
+            if not reason:
+                continue
+            bucket = reason_review.setdefault(
+                reason,
+                {
+                    "reason": reason,
+                    "family": _reason_family(reason),
+                    "missed_positive": 0,
+                    "missed_sniper": 0,
+                    "max_market_cap_change_pct": None,
+                    "total_market_cap_change_pct": 0.0,
+                    "sample_tokens": [],
+                },
+            )
+            bucket["missed_positive"] = int(bucket["missed_positive"] or 0) + 1
+            if str(item.get("miss_bucket") or "") == "missed_sniper":
+                bucket["missed_sniper"] = int(bucket["missed_sniper"] or 0) + 1
+            bucket["total_market_cap_change_pct"] = float(bucket["total_market_cap_change_pct"] or 0.0) + mc_change
+            current_max = _to_float(bucket.get("max_market_cap_change_pct"))
+            bucket["max_market_cap_change_pct"] = mc_change if current_max is None else max(current_max, mc_change)
+            samples = bucket["sample_tokens"] if isinstance(bucket.get("sample_tokens"), list) else []
+            if token and token not in samples and len(samples) < 5:
+                samples.append(token)
+            bucket["sample_tokens"] = samples
+    blocker_review: list[dict[str, Any]] = []
+    for item in reason_review.values():
+        count = int(item["missed_positive"] or 0)
+        avg_change = float(item["total_market_cap_change_pct"] or 0.0) / max(1, count)
+        action = "review"
+        if count >= 2 or int(item["missed_sniper"] or 0) > 0:
+            action = "shadow_relax"
+        if str(item.get("family") or "") in {"authority", "wallet", "risk"}:
+            action = "inspect_before_relax"
+        blocker_review.append(
+            {
+                "reason": item["reason"],
+                "family": item["family"],
+                "missed_positive": count,
+                "missed_sniper": int(item["missed_sniper"] or 0),
+                "avg_market_cap_change_pct": round(avg_change, 1),
+                "max_market_cap_change_pct": round(float(item.get("max_market_cap_change_pct") or 0.0), 1),
+                "sample_tokens": item.get("sample_tokens") or [],
+                "recommended_action": action,
+            }
+        )
+    blocker_review.sort(
+        key=lambda item: (
+            -int(item.get("missed_sniper") or 0),
+            -int(item.get("missed_positive") or 0),
+            -float(item.get("max_market_cap_change_pct") or 0.0),
+            str(item.get("reason") or ""),
+        )
+    )
     return {
         "lookback_hours": hours,
         "missed_runner_count": len(missed),
@@ -5972,6 +6043,7 @@ def _build_missed_runner_analysis(
             {"family": family, "count": count}
             for family, count in sorted(family_counts.items(), key=lambda pair: (-pair[1], pair[0]))[:10]
         ],
+        "blocker_review": blocker_review[:12],
         "missed_runners": missed[: max(1, limit)],
     }
 
@@ -7907,6 +7979,7 @@ def render_live_validation_html(*, hours: int = 72, limit: int = 200) -> str:
     borderline_cases = summary.get("borderline_cases") if isinstance(summary.get("borderline_cases"), list) else []
     threshold_effectiveness = summary.get("threshold_effectiveness") if isinstance(summary.get("threshold_effectiveness"), list) else []
     missed = summary.get("missed_runner_analysis") if isinstance(summary.get("missed_runner_analysis"), dict) else {}
+    blocker_review = missed.get("blocker_review") if isinstance(missed.get("blocker_review"), list) else []
     variants = (summary.get("policy_comparison") or {}).get("variants") if isinstance(summary.get("policy_comparison"), dict) else []
 
     def metric_card(label: str, value: Any) -> str:
@@ -7976,6 +8049,17 @@ def render_live_validation_html(*, hours: int = 72, limit: int = 200) -> str:
         "</tr>"
         for item in (missed.get("missed_runners") or [])[:10]
     ) or "<tr><td colspan='4'>No missed runners</td></tr>"
+
+    blocker_review_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('reason') or 'unknown'))}</td>"
+        f"<td>{html.escape(str(item.get('recommended_action') or 'review'))}</td>"
+        f"<td>{int(item.get('missed_positive') or 0)}</td>"
+        f"<td>{int(item.get('missed_sniper') or 0)}</td>"
+        f"<td>{html.escape(str(item.get('max_market_cap_change_pct') or 0))}</td>"
+        "</tr>"
+        for item in blocker_review[:10]
+    ) or "<tr><td colspan='5'>No costly blockers</td></tr>"
 
     variant_rows = "".join(
         "<tr>"
@@ -8060,9 +8144,15 @@ def render_live_validation_html(*, hours: int = 72, limit: int = 200) -> str:
     </div>
     <div class="wide-grid">
       <section class="panel">
+        <h2>Costly Blockers</h2>
+        <table><thead><tr><th>Reason</th><th>Action</th><th>Missed</th><th>Sniper</th><th>Max MC %</th></tr></thead><tbody>{blocker_review_rows}</tbody></table>
+      </section>
+      <section class="panel">
         <h2>Threshold Effectiveness</h2>
         <table><thead><tr><th>Reason</th><th>Action</th><th>Confidence</th><th>Sample</th></tr></thead><tbody>{threshold_rows}</tbody></table>
       </section>
+    </div>
+    <div class="wide-grid">
       <section class="panel">
         <h2>Borderline Review</h2>
         <table><thead><tr><th>Token</th><th>Route</th><th>Bucket</th><th>Outcome</th></tr></thead><tbody>{borderline_rows}</tbody></table>

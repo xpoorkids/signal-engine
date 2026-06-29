@@ -73,6 +73,12 @@ class CandidateSignalPolicy:
     adversarial_min_volume_market_cap_ratio: float
     adversarial_social_min_author_ratio: float
     adversarial_social_min_mentions: int
+    entry_chase_price_change_5m: float
+    entry_chase_price_change_h1: float
+    entry_chase_max_buy_sell_ratio: float
+    entry_chase_min_liq_usd: float
+    entry_confirm_breadth_min: int
+    entry_confirm_buys5m_min: int
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -326,6 +332,12 @@ def candidate_signal_policy() -> CandidateSignalPolicy:
         adversarial_min_volume_market_cap_ratio=_env_float("SIGNAL_ENGINE_CANDIDATE_ADVERSARIAL_MIN_VOLUME_MARKET_CAP_RATIO", 0.80),
         adversarial_social_min_author_ratio=_env_float("SIGNAL_ENGINE_CANDIDATE_ADVERSARIAL_SOCIAL_MIN_AUTHOR_RATIO", 0.35),
         adversarial_social_min_mentions=_env_int("SIGNAL_ENGINE_CANDIDATE_ADVERSARIAL_SOCIAL_MIN_MENTIONS", 8),
+        entry_chase_price_change_5m=_env_float("SIGNAL_ENGINE_ENTRY_CHASE_PRICE_CHANGE_5M", 45.0),
+        entry_chase_price_change_h1=_env_float("SIGNAL_ENGINE_ENTRY_CHASE_PRICE_CHANGE_H1", 140.0),
+        entry_chase_max_buy_sell_ratio=_env_float("SIGNAL_ENGINE_ENTRY_CHASE_MAX_BUY_SELL_RATIO", 1.35),
+        entry_chase_min_liq_usd=_env_float("SIGNAL_ENGINE_ENTRY_CHASE_MIN_LIQ_USD", 15000.0),
+        entry_confirm_breadth_min=_env_int("SIGNAL_ENGINE_ENTRY_CONFIRM_BREADTH_MIN", 5),
+        entry_confirm_buys5m_min=_env_int("SIGNAL_ENGINE_ENTRY_CONFIRM_BUYS5M_MIN", 14),
     )
 
 
@@ -646,6 +658,111 @@ def candidate_confirmation_signals(
     return reasons, confirmations
 
 
+def entry_quality_profile(
+    *,
+    metrics: dict[str, Any] | None,
+    dex_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    policy = candidate_signal_policy()
+    payload = metrics if isinstance(metrics, dict) else {}
+    summary = dex_summary if isinstance(dex_summary, dict) else {}
+
+    price_change_m5 = _first_positive_float(summary, payload, keys=("price_change_m5", "price_change_5m"))
+    price_change_h1 = _first_positive_float(summary, payload, keys=("price_change_h1", "price_change_1h"))
+    liq = _first_positive_float(summary, payload, keys=("liquidity_usd", "liquidity"))
+    vol5m = _first_positive_float(summary, payload, keys=("volume_m5", "volume_m5_usd", "volume_5m"))
+    buys5m = int(summary.get("txns_m5_buys") or payload.get("txns_m5_buys") or 0)
+    sells5m = int(summary.get("txns_m5_sells") or payload.get("txns_m5_sells") or 0)
+    buyers_5m = int(payload.get("unique_buyers_5m") or 0)
+    tracked_hits = int(payload.get("tracked_wallet_hits") or 0)
+    kol_hits = int(payload.get("kol_wallet_hits") or 0)
+    trusted_wallet_support = tracked_hits > 0
+    any_wallet_support = trusted_wallet_support or kol_hits > 0
+    buy_sell_ratio = (float(buys5m) / float(max(sells5m, 1))) if buys5m > 0 else 0.0
+    volume_liquidity_ratio = (
+        float(vol5m) / float(liq)
+        if vol5m is not None and liq is not None and liq > 0.0
+        else None
+    )
+
+    reasons: list[str] = []
+    supports: list[str] = []
+    score = 50
+    is_extended = (
+        (price_change_m5 is not None and price_change_m5 >= policy.entry_chase_price_change_5m)
+        or (price_change_h1 is not None and price_change_h1 >= policy.entry_chase_price_change_h1)
+    )
+    if buyers_5m >= policy.entry_confirm_breadth_min:
+        supports.append("entry_buyer_breadth")
+        score += 12
+    if buys5m >= policy.entry_confirm_buys5m_min:
+        supports.append("entry_buy_pressure")
+        score += 10
+    if buy_sell_ratio >= policy.entry_chase_max_buy_sell_ratio:
+        supports.append("entry_buy_sell_imbalance")
+        score += 8
+    if liq is not None and liq >= policy.entry_chase_min_liq_usd:
+        supports.append("entry_liquidity_floor")
+        score += 8
+    if any_wallet_support:
+        supports.append("entry_wallet_support")
+        score += 10
+
+    if is_extended:
+        reasons.append("entry_extended")
+        score -= 12
+        if liq is None or liq < policy.entry_chase_min_liq_usd:
+            reasons.append("entry_extended_thin_liquidity")
+            score -= 14
+        if buyers_5m < policy.entry_confirm_breadth_min and not any_wallet_support:
+            reasons.append("entry_extended_without_breadth")
+            score -= 14
+        if buy_sell_ratio < policy.entry_chase_max_buy_sell_ratio and not trusted_wallet_support:
+            reasons.append("entry_extended_buy_pressure_missing")
+            score -= 10
+    if volume_liquidity_ratio is not None and volume_liquidity_ratio > 6.0 and not any_wallet_support:
+        reasons.append("entry_hype_volume_liquidity")
+        score -= 10
+
+    score = max(0, min(100, score))
+    if any(reason.startswith("entry_extended_") for reason in reasons):
+        tier = "chase_risk"
+    elif score >= 78:
+        tier = "confirmed_entry"
+    elif score >= 58:
+        tier = "developing_entry"
+    else:
+        tier = "thin_entry"
+
+    return {
+        "tier": tier,
+        "score": score,
+        "reasons": reasons,
+        "supports": supports,
+        "metrics": {
+            "price_change_m5": price_change_m5,
+            "price_change_h1": price_change_h1,
+            "liquidity_usd": liq,
+            "volume_m5": vol5m,
+            "volume_liquidity_ratio": round(volume_liquidity_ratio, 3) if volume_liquidity_ratio is not None else None,
+            "txns_m5_buys": buys5m,
+            "txns_m5_sells": sells5m,
+            "buy_sell_ratio": round(buy_sell_ratio, 3),
+            "unique_buyers_5m": buyers_5m,
+            "tracked_wallet_hits": tracked_hits,
+            "kol_wallet_hits": kol_hits,
+        },
+        "policy": {
+            "entry_chase_price_change_5m": policy.entry_chase_price_change_5m,
+            "entry_chase_price_change_h1": policy.entry_chase_price_change_h1,
+            "entry_chase_max_buy_sell_ratio": policy.entry_chase_max_buy_sell_ratio,
+            "entry_chase_min_liq_usd": policy.entry_chase_min_liq_usd,
+            "entry_confirm_breadth_min": policy.entry_confirm_breadth_min,
+            "entry_confirm_buys5m_min": policy.entry_confirm_buys5m_min,
+        },
+    }
+
+
 def adversarial_signal_flags(
     *,
     metrics: dict[str, Any] | None,
@@ -756,6 +873,10 @@ def adversarial_signal_flags(
     ):
         flags.append("social_echo_chamber")
 
+    entry_profile = entry_quality_profile(metrics=payload, dex_summary=summary)
+    if str(entry_profile.get("tier") or "") == "chase_risk" and not trusted_wallet_support:
+        flags.extend(str(item) for item in entry_profile.get("reasons") or [])
+
     deduped: list[str] = []
     for item in flags:
         if item not in deduped:
@@ -830,6 +951,10 @@ def candidate_send_reasons(
         "low_volume_market_cap_imbalance",
         "paid_visibility_without_flow",
         "social_echo_chamber",
+        "entry_extended_thin_liquidity",
+        "entry_extended_without_breadth",
+        "entry_extended_buy_pressure_missing",
+        "entry_hype_volume_liquidity",
     }
     has_severe_adversarial_flag = bool(severe_adversarial_flags & set(adversarial_flags))
     if adversarial_flags and not route_fast_lane and (not hard_quality_confirmed or has_severe_adversarial_flag):
@@ -917,6 +1042,10 @@ def promotion_confirmation_target(
             "low_volume_market_cap_imbalance",
             "paid_visibility_without_flow",
             "social_echo_chamber",
+            "entry_extended_thin_liquidity",
+            "entry_extended_without_breadth",
+            "entry_extended_buy_pressure_missing",
+            "entry_hype_volume_liquidity",
         }
         has_severe_adversarial_flag = bool(severe_adversarial_flags & set(adversarial_flags))
         if adversarial_flags and (tracked_hits <= 0 or has_severe_adversarial_flag):
@@ -983,6 +1112,7 @@ def classify_route_signal(
         social_min_author_ratio=candidate_signal_policy().adversarial_social_min_author_ratio,
         social_min_mentions=candidate_signal_policy().adversarial_social_min_mentions,
     )
+    entry_profile = entry_quality_profile(metrics=metrics, dex_summary=dex_summary)
 
     flow_confirmations = [item for item in confirmations if item in {"buyer_breadth", "burst_strength"}]
     flow_strength_confirmed = len(flow_confirmations) >= 2
@@ -1129,6 +1259,7 @@ def classify_route_signal(
         "age_bypass_eligible": age_bypass_eligible,
         "age_bypass_ttl_sec": age_bypass_ttl_sec,
         "age_bypass_reason": age_bypass_reason,
+        "entry_quality": entry_profile,
         "policy": policy.as_dict(),
         "metrics": {
             "attention_score": attention,
