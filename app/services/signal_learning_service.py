@@ -6195,7 +6195,11 @@ def _wallet_guard_payload(features: dict[str, Any], reasons: list[Any]) -> dict[
     ]
     if not original_reasons and inferred_reasons:
         original_reasons = inferred_reasons[:8]
-    watch_only = bool(features.get("wallet_guard_watch_only")) or (category != "none" and bool(inferred_reasons))
+    toxic_categories = {"hard_fraud", "toxic_cluster", "toxic_wallet_cluster"}
+    watch_only = bool(features.get("wallet_guard_watch_only")) or (
+        category not in {"none", *toxic_categories}
+        and bool(inferred_reasons)
+    )
     return {
         "category": category,
         "watch_only": watch_only,
@@ -7586,7 +7590,7 @@ def get_wallet_guard_feedback(*, hours: int = 168, limit: int = 1000) -> dict[st
         negative = int(item.get("negative") or 0)
         watch_only = int(item.get("watch_only") or 0)
         recommendation = "keep_observing"
-        if str(item.get("category")) == "hard_fraud":
+        if str(item.get("category")) in {"hard_fraud", "toxic_cluster", "toxic_wallet_cluster"}:
             recommendation = "keep_blocked"
         elif positive_unsent >= 2 and negative <= max(1, positive_unsent // 2):
             recommendation = "graduate_more_with_review"

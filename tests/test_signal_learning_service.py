@@ -3477,6 +3477,72 @@ def test_wallet_guard_feedback_groups_watch_only_outcomes(tmp_path, monkeypatch)
     assert group["recommendation"] in {"graduate_more_with_review", "keep_observing"}
 
 
+def test_wallet_guard_feedback_keeps_toxic_clusters_blocked(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    signal_id = sls.record_signal_decision(
+        token="token-toxic-wallet",
+        event_type="candidate",
+        stage="routing",
+        decision="hard_fail",
+        action_taken="skip",
+        reasons=["wallet_distribution_high_risk", "wallet_top_holder_concentration"],
+        attention_score=0.40,
+        risk_score=0.55,
+        confidence_score=0.45,
+        lifecycle="dex",
+        features={
+            "wallet_cluster_verdict": "toxic_cluster",
+            "wallet_cluster_score": -55,
+            "wallet_cluster_blockers": ["wallet_cluster_single_holder_dominant"],
+            "wallet_guard_category": "toxic_wallet_cluster",
+        },
+        ts_value=1_773_930_000,
+    )
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                60,
+                1_773_933_600,
+                "dex",
+                52000,
+                18000,
+                9000,
+                62.0,
+                10.0,
+                40.0,
+                18,
+                9,
+                80.0,
+                12.0,
+                20.0,
+                "strong_continuation",
+                json.dumps({"outcome_label": "strong_continuation"}),
+            ),
+        )
+
+    record = sls.get_live_validation_records(hours=10_000, limit=10)[0]
+    feedback = sls.get_wallet_guard_feedback(hours=10_000, limit=50)
+    group = next(item for item in feedback["categories"] if item["category"] == "toxic_wallet_cluster")
+
+    assert record["wallet_guard"]["watch_only"] is False
+    assert record["wallet_guard"]["cluster_review"]["verdict"] == "toxic_cluster"
+    assert group["watch_only"] == 0
+    assert group["positive_unsent"] == 1
+    assert group["recommendation"] == "keep_blocked"
+
+
 def test_wallet_guard_category_infers_from_legacy_reasons(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
