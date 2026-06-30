@@ -1094,7 +1094,8 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             e.confidence = bump(e.confidence, CONF_WEIGHTS["token_resolved"], CAPS["heating"])
             e.reasons.append("token_resolved")
 
-        extra: Dict[str, Any] = dict(e.extra)
+        extra: Dict[str, Any] = e.extra if isinstance(e.extra, dict) else {}
+        e.extra = extra
         best_pair = None
         if ENABLE_DEX:
             extra["dex"] = await dex_enrich_token(e.token)
