@@ -474,6 +474,7 @@ def test_learning_policy_routes_return_traces_and_shadow_eval(tmp_path, monkeypa
 def test_learning_emits_summary_route_returns_emit_audit(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "route-v2")
     sls.init()
 
     sls.record_signal_decision(
@@ -500,12 +501,30 @@ def test_learning_emits_summary_route_returns_emit_audit(tmp_path, monkeypatch):
         ts_value=1_773_500_000,
     )
 
-    response = TestClient(main.app).get("/learning/emits/summary?hours=10000&limit=5")
+    sls.record_signal_decision(
+        token="token-route-legacy",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_ready",
+        action_taken="emit",
+        reasons=[],
+        attention_score=0.91,
+        risk_score=0.0,
+        confidence_score=0.40,
+        lifecycle="dex",
+        policy_name="route-policy",
+        policy_version="legacy-route-v1",
+        features={},
+        ts_value=1_773_500_030,
+    )
+
+    response = TestClient(main.app).get("/learning/emits/summary?hours=10000&limit=5&current_only=true")
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["emit_count"] == 1
-    assert payload["counts_by_policy_version"]["route-policy@route-v2"] == 1
+    assert payload["policy_version_filter"] == "route-v2"
+    assert payload["counts_by_policy_version"]["route-v2"] == 1
     assert payload["emits"][0]["token"] == "token-route-emit"
     assert payload["emits"][0]["trade_validation"]["approved"] is True
 

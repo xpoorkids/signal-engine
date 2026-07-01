@@ -189,8 +189,18 @@ def learning_diagnostics_summary(hours: int = 24, sample_limit: int | None = Non
 
 
 @router.get("/learning/emits/summary")
-def learning_emits_summary(hours: int = 24, limit: int = 50):
-    return get_emit_audit_summary(hours=max(1, hours), limit=max(1, limit))
+def learning_emits_summary(
+    hours: int = 24,
+    limit: int = 50,
+    policy_version: str | None = None,
+    current_only: bool = False,
+):
+    return get_emit_audit_summary(
+        hours=max(1, hours),
+        limit=max(1, limit),
+        policy_version=policy_version,
+        current_only=current_only,
+    )
 
 
 @router.get("/learning/policy/traces")

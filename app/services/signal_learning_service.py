@@ -998,6 +998,10 @@ def _default_policy_descriptor() -> dict[str, Any]:
     }
 
 
+def _current_policy_version() -> str:
+    return str(_default_policy_descriptor().get("policy_version") or DEFAULT_POLICY_VERSION)
+
+
 def _normalize_policy_descriptor(
     *,
     policy_name: str | None = None,
@@ -2649,13 +2653,27 @@ def get_policy_trace_summary(
     }
 
 
-def get_emit_audit_summary(*, hours: int = 24, limit: int = 50) -> dict[str, Any]:
+def get_emit_audit_summary(
+    *,
+    hours: int = 24,
+    limit: int = 50,
+    policy_version: str | None = None,
+    current_only: bool = False,
+) -> dict[str, Any]:
     _ensure_schema()
     cutoff = int(time.time()) - max(1, hours) * 3600
     row_limit = max(1, min(500, int(limit)))
+    current_policy_version = _current_policy_version()
+    policy_filter = current_policy_version if current_only else str(policy_version or "").strip()
+    clauses = ["sd.created_ts >= ?", "sd.action_taken = 'emit'"]
+    params: list[Any] = [cutoff]
+    if policy_filter:
+        clauses.append("sd.policy_version = ?")
+        params.append(policy_filter)
+    params.append(row_limit)
     with _connect() as c:
         rows = c.execute(
-            """
+            f"""
             SELECT
                 sd.decision_id,
                 sd.signal_id,
@@ -2690,12 +2708,11 @@ def get_emit_audit_summary(*, hours: int = 24, limit: int = 50) -> dict[str, Any
                 FROM signal_snapshots ss2
                 WHERE ss2.signal_id = sd.signal_id
              )
-            WHERE sd.created_ts >= ?
-              AND sd.action_taken = 'emit'
+            WHERE {" AND ".join(clauses)}
             ORDER BY sd.created_ts DESC
             LIMIT ?
             """,
-            (cutoff, row_limit),
+            tuple(params),
         ).fetchall()
 
     audits: list[dict[str, Any]] = []
@@ -2705,6 +2722,48 @@ def get_emit_audit_summary(*, hours: int = 24, limit: int = 50) -> dict[str, Any
     trade_validation = {"approved": 0, "rejected": 0, "unknown": 0}
     ev_gate = {"approved": 0, "rejected": 0, "unknown": 0}
     snapshot_coverage = {"with_snapshot": 0, "without_snapshot": 0}
+    policy_field_coverage: dict[str, dict[str, int]] = {}
+
+    def _track_policy_field(policy_key: str, field: str, present: bool) -> None:
+        bucket = policy_field_coverage.setdefault(
+            policy_key,
+            {
+                "sample_size": 0,
+                "trade_validation": 0,
+                "candidate_ev": 0,
+                "wallet_cluster": 0,
+                "market_cap": 0,
+                "liquidity": 0,
+                "snapshot": 0,
+            },
+        )
+        if field == "sample_size":
+            bucket[field] += 1
+        elif present:
+            bucket[field] += 1
+
+    def _format_policy_coverage() -> list[dict[str, Any]]:
+        coverage: list[dict[str, Any]] = []
+        for policy_key, counts in policy_field_coverage.items():
+            sample_size = int(counts.get("sample_size") or 0)
+            row: dict[str, Any] = {"policy_version": policy_key, "sample_size": sample_size}
+            complete = True
+            for field in (
+                "trade_validation",
+                "candidate_ev",
+                "wallet_cluster",
+                "market_cap",
+                "liquidity",
+                "snapshot",
+            ):
+                pct = round((int(counts.get(field) or 0) / sample_size) * 100.0, 1) if sample_size else 0.0
+                row[f"{field}_pct"] = pct
+                if pct < 100.0:
+                    complete = False
+            row["complete_audit_coverage"] = complete
+            coverage.append(row)
+        coverage.sort(key=lambda item: (-int(item.get("sample_size") or 0), str(item.get("policy_version") or "")))
+        return coverage
 
     for row in rows:
         reasons: list[str] = []
@@ -2741,13 +2800,21 @@ def get_emit_audit_summary(*, hours: int = 24, limit: int = 50) -> dict[str, Any
         wallet_verdict = str(features.get("wallet_cluster_verdict") or "unknown")
         counts_by_wallet_verdict[wallet_verdict] = counts_by_wallet_verdict.get(wallet_verdict, 0) + 1
         session_key = str(row[16] or "unknown")
-        policy_key = f"{row[7] or 'unknown'}@{row[8] or 'unknown'}"
+        policy_key = str(row[8] or "unknown")
         counts_by_session[session_key] = counts_by_session.get(session_key, 0) + 1
         counts_by_policy_version[policy_key] = counts_by_policy_version.get(policy_key, 0) + 1
+        _track_policy_field(policy_key, "sample_size", True)
+        _track_policy_field(policy_key, "trade_validation", trade_ok is not None)
+        _track_policy_field(policy_key, "candidate_ev", ev_ok is not None)
+        _track_policy_field(policy_key, "wallet_cluster", wallet_verdict != "unknown")
+        _track_policy_field(policy_key, "market_cap", features.get("market_cap_usd") is not None)
+        _track_policy_field(policy_key, "liquidity", features.get("liquidity_usd") is not None)
         if row[18] is None:
             snapshot_coverage["without_snapshot"] += 1
+            _track_policy_field(policy_key, "snapshot", False)
         else:
             snapshot_coverage["with_snapshot"] += 1
+            _track_policy_field(policy_key, "snapshot", True)
 
         wallet_metrics = features.get("wallet_cluster_metrics")
         if not isinstance(wallet_metrics, dict):
@@ -2813,15 +2880,27 @@ def get_emit_audit_summary(*, hours: int = 24, limit: int = 50) -> dict[str, Any
                 }
                 if row[18] is not None
                 else None,
+                "audit_coverage": {
+                    "trade_validation": trade_ok is not None,
+                    "candidate_ev": ev_ok is not None,
+                    "wallet_cluster": wallet_verdict != "unknown",
+                    "market_cap": features.get("market_cap_usd") is not None,
+                    "liquidity": features.get("liquidity_usd") is not None,
+                    "snapshot": row[18] is not None,
+                },
             }
         )
 
     return {
         "lookback_hours": max(1, hours),
         "limit": row_limit,
+        "policy_version_filter": policy_filter or None,
+        "current_only": bool(current_only),
+        "current_policy_version": current_policy_version,
         "emit_count": len(audits),
         "counts_by_session": counts_by_session,
         "counts_by_policy_version": counts_by_policy_version,
+        "field_coverage_by_policy_version": _format_policy_coverage(),
         "counts_by_wallet_verdict": counts_by_wallet_verdict,
         "trade_validation": trade_validation,
         "candidate_ev": ev_gate,

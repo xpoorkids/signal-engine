@@ -438,6 +438,7 @@ def test_diagnostics_summary_aggregates_decisions(tmp_path, monkeypatch):
 def test_emit_audit_summary_and_feature_coverage(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "audit-v1")
     sls.init()
 
     signal_id = sls.record_signal_decision(
@@ -477,6 +478,22 @@ def test_emit_audit_summary_and_feature_coverage(tmp_path, monkeypatch):
             },
         },
         ts_value=1_773_500_000,
+    )
+    sls.record_signal_decision(
+        token="token-legacy-emit",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_ready",
+        action_taken="emit",
+        reasons=[],
+        attention_score=0.92,
+        risk_score=0.0,
+        confidence_score=0.40,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="legacy-v1",
+        features={},
+        ts_value=1_773_500_015,
     )
     sls.record_signal_decision(
         token="token-skip-audit",
@@ -526,19 +543,28 @@ def test_emit_audit_summary_and_feature_coverage(tmp_path, monkeypatch):
         )
 
     audit = sls.get_emit_audit_summary(hours=10_000)
-    assert audit["emit_count"] == 1
+    assert audit["emit_count"] == 2
     assert audit["trade_validation"]["approved"] == 1
+    assert audit["trade_validation"]["unknown"] == 1
     assert audit["candidate_ev"]["approved"] == 1
+    assert audit["candidate_ev"]["unknown"] == 1
     assert audit["snapshot_coverage"]["with_snapshot"] == 1
-    assert audit["emits"][0]["token"] == "token-emit-audit"
-    assert audit["emits"][0]["candidate_ev"]["net_edge_bps"] == 980.5
-    assert audit["emits"][0]["latest_snapshot"]["outcome_label"] == "worked"
+    coverage = {item["policy_version"]: item for item in audit["field_coverage_by_policy_version"]}
+    assert coverage["audit-v1"]["complete_audit_coverage"] is True
+    assert coverage["legacy-v1"]["complete_audit_coverage"] is False
+
+    current_audit = sls.get_emit_audit_summary(hours=10_000, current_only=True)
+    assert current_audit["policy_version_filter"] == "audit-v1"
+    assert current_audit["emit_count"] == 1
+    assert current_audit["emits"][0]["token"] == "token-emit-audit"
+    assert current_audit["emits"][0]["candidate_ev"]["net_edge_bps"] == 980.5
+    assert current_audit["emits"][0]["latest_snapshot"]["outcome_label"] == "worked"
 
     diagnostics = sls.get_diagnostics_summary(hours=10_000)
     by_stage = {item["key"]: item for item in diagnostics["feature_coverage_by_group"]["by_stage"]}
     by_policy = {item["key"]: item for item in diagnostics["feature_coverage_by_group"]["by_policy_version"]}
-    assert by_stage["candidate"]["market_cap_pct"] == 100.0
-    assert by_stage["candidate"]["trade_validation_pct"] == 100.0
+    assert by_stage["candidate"]["market_cap_pct"] == 50.0
+    assert by_stage["candidate"]["trade_validation_pct"] == 50.0
     assert by_stage["routing"]["market_cap_pct"] == 0.0
     assert by_policy["deterministic_engine@audit-v1"]["sample_size"] == 2
 
