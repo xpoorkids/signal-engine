@@ -2649,6 +2649,187 @@ def get_policy_trace_summary(
     }
 
 
+def get_emit_audit_summary(*, hours: int = 24, limit: int = 50) -> dict[str, Any]:
+    _ensure_schema()
+    cutoff = int(time.time()) - max(1, hours) * 3600
+    row_limit = max(1, min(500, int(limit)))
+    with _connect() as c:
+        rows = c.execute(
+            """
+            SELECT
+                sd.decision_id,
+                sd.signal_id,
+                sd.token,
+                sd.event_type,
+                sd.stage,
+                sd.decision,
+                sd.action_taken,
+                sd.policy_name,
+                sd.policy_version,
+                sd.reasons_json,
+                sd.features_json,
+                sd.attention_score,
+                sd.risk_score,
+                sd.confidence_score,
+                sd.creator_score,
+                sd.lifecycle,
+                sd.session_bucket,
+                sd.created_ts,
+                ss.horizon_minutes,
+                ss.outcome_label,
+                ss.market_cap_change_pct,
+                ss.liquidity_change_pct,
+                ss.market_cap_usd,
+                ss.liquidity_usd,
+                ss.captured_ts
+            FROM signal_decisions sd
+            LEFT JOIN signal_snapshots ss
+              ON ss.signal_id = sd.signal_id
+             AND ss.horizon_minutes = (
+                SELECT MAX(ss2.horizon_minutes)
+                FROM signal_snapshots ss2
+                WHERE ss2.signal_id = sd.signal_id
+             )
+            WHERE sd.created_ts >= ?
+              AND sd.action_taken = 'emit'
+            ORDER BY sd.created_ts DESC
+            LIMIT ?
+            """,
+            (cutoff, row_limit),
+        ).fetchall()
+
+    audits: list[dict[str, Any]] = []
+    counts_by_session: dict[str, int] = {}
+    counts_by_policy_version: dict[str, int] = {}
+    counts_by_wallet_verdict: dict[str, int] = {}
+    trade_validation = {"approved": 0, "rejected": 0, "unknown": 0}
+    ev_gate = {"approved": 0, "rejected": 0, "unknown": 0}
+    snapshot_coverage = {"with_snapshot": 0, "without_snapshot": 0}
+
+    for row in rows:
+        reasons: list[str] = []
+        features: dict[str, Any] = {}
+        try:
+            parsed_reasons = json.loads(row[9] or "[]")
+            if isinstance(parsed_reasons, list):
+                reasons = [str(item) for item in parsed_reasons]
+        except Exception:
+            reasons = []
+        try:
+            parsed_features = json.loads(row[10] or "{}")
+            if isinstance(parsed_features, dict):
+                features = parsed_features
+        except Exception:
+            features = {}
+
+        trade_ok = features.get("trade_validation_approved")
+        if trade_ok is True:
+            trade_validation["approved"] += 1
+        elif trade_ok is False:
+            trade_validation["rejected"] += 1
+        else:
+            trade_validation["unknown"] += 1
+
+        ev_ok = features.get("candidate_ev_approved")
+        if ev_ok is True:
+            ev_gate["approved"] += 1
+        elif ev_ok is False:
+            ev_gate["rejected"] += 1
+        else:
+            ev_gate["unknown"] += 1
+
+        wallet_verdict = str(features.get("wallet_cluster_verdict") or "unknown")
+        counts_by_wallet_verdict[wallet_verdict] = counts_by_wallet_verdict.get(wallet_verdict, 0) + 1
+        session_key = str(row[16] or "unknown")
+        policy_key = f"{row[7] or 'unknown'}@{row[8] or 'unknown'}"
+        counts_by_session[session_key] = counts_by_session.get(session_key, 0) + 1
+        counts_by_policy_version[policy_key] = counts_by_policy_version.get(policy_key, 0) + 1
+        if row[18] is None:
+            snapshot_coverage["without_snapshot"] += 1
+        else:
+            snapshot_coverage["with_snapshot"] += 1
+
+        wallet_metrics = features.get("wallet_cluster_metrics")
+        if not isinstance(wallet_metrics, dict):
+            wallet_metrics = {}
+        audits.append(
+            {
+                "decision_id": row[0],
+                "signal_id": row[1],
+                "token": row[2],
+                "event_type": row[3],
+                "stage": row[4],
+                "decision": row[5],
+                "action_taken": row[6],
+                "policy_name": row[7],
+                "policy_version": row[8],
+                "reasons": reasons,
+                "attention_score": row[11],
+                "risk_score": row[12],
+                "confidence_score": row[13],
+                "creator_score": row[14],
+                "lifecycle": row[15],
+                "session_bucket": row[16],
+                "created_ts": row[17],
+                "market_cap_usd": features.get("market_cap_usd"),
+                "liquidity_usd": features.get("liquidity_usd"),
+                "price_change_m5": features.get("price_change_m5"),
+                "volume_m5_usd": features.get("volume_m5_usd"),
+                "txns_m5_buys": features.get("txns_m5_buys"),
+                "txns_m5_sells": features.get("txns_m5_sells"),
+                "unique_buyers_5m": features.get("unique_buyers_5m"),
+                "trade_validation": {
+                    "approved": trade_ok,
+                    "reasons": features.get("trade_validation_reasons") or [],
+                    "warnings": features.get("trade_validation_warnings") or [],
+                    "dex_id": features.get("trade_validation_dex_id"),
+                    "pair_address": features.get("trade_validation_pair_address"),
+                },
+                "candidate_ev": {
+                    "approved": ev_ok,
+                    "net_edge_bps": features.get("candidate_ev_net_edge_bps"),
+                    "gross_upside_bps": features.get("candidate_ev_gross_upside_bps"),
+                    "cost_bps": features.get("candidate_ev_cost_bps"),
+                    "risk_penalty_bps": features.get("candidate_ev_risk_penalty_bps"),
+                    "reasons": features.get("candidate_ev_reasons") or [],
+                },
+                "wallet_cluster": {
+                    "verdict": wallet_verdict,
+                    "score": features.get("wallet_cluster_score"),
+                    "blockers": features.get("wallet_cluster_blockers") or [],
+                    "guard_category": features.get("wallet_guard_category"),
+                    "top_holder_pct": wallet_metrics.get("top_holder_pct"),
+                    "top10_pct": wallet_metrics.get("top10_pct"),
+                    "wallet_risk": wallet_metrics.get("wallet_risk"),
+                },
+                "latest_snapshot": {
+                    "horizon_minutes": row[18],
+                    "outcome_label": row[19],
+                    "market_cap_change_pct": row[20],
+                    "liquidity_change_pct": row[21],
+                    "market_cap_usd": row[22],
+                    "liquidity_usd": row[23],
+                    "captured_ts": row[24],
+                }
+                if row[18] is not None
+                else None,
+            }
+        )
+
+    return {
+        "lookback_hours": max(1, hours),
+        "limit": row_limit,
+        "emit_count": len(audits),
+        "counts_by_session": counts_by_session,
+        "counts_by_policy_version": counts_by_policy_version,
+        "counts_by_wallet_verdict": counts_by_wallet_verdict,
+        "trade_validation": trade_validation,
+        "candidate_ev": ev_gate,
+        "snapshot_coverage": snapshot_coverage,
+        "emits": audits,
+    }
+
+
 def get_policy_regime_summary(*, hours: int = 24, limit: int = 20) -> dict[str, Any]:
     _ensure_schema()
     cutoff = int(time.time()) - max(1, hours) * 3600
@@ -4751,7 +4932,7 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
             """
             SELECT signal_id, decision, reasons_json, session_bucket, local_daypart,
                    attention_score, risk_score, confidence_score, created_ts, token, stage,
-                   action_taken
+                   action_taken, policy_name, policy_version, features_json
             FROM signal_decisions
             WHERE created_ts >= ?
             ORDER BY created_ts DESC
@@ -4803,6 +4984,44 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
     conversion_by_token: dict[str, set[str]] = {}
     reason_scorecards: dict[str, dict[str, Any]] = {}
     reason_daily: dict[tuple[str, str], dict[str, Any]] = {}
+    feature_coverage_groups: dict[str, dict[str, dict[str, int]]] = {
+        "by_stage": {},
+        "by_decision": {},
+        "by_policy_version": {},
+    }
+
+    def _track_feature_coverage(group_name: str, group_key: str, features: dict[str, Any]) -> None:
+        coverage_fields = {
+            "market_cap": ("market_cap_usd", "market_cap"),
+            "liquidity": ("liquidity_usd",),
+            "volume_m5": ("volume_m5_usd", "volume_m5"),
+            "attention": ("attention_score",),
+            "risk": ("risk_score",),
+            "trade_validation": ("trade_validation_approved",),
+            "candidate_ev": ("candidate_ev_approved",),
+            "wallet_cluster": ("wallet_cluster_verdict", "wallet_cluster_score", "wallet_cluster_metrics"),
+        }
+        bucket = feature_coverage_groups[group_name].setdefault(
+            group_key,
+            {"sample_size": 0, **{field: 0 for field in coverage_fields}},
+        )
+        bucket["sample_size"] += 1
+        for field, keys in coverage_fields.items():
+            if any(features.get(key) is not None for key in keys):
+                bucket[field] += 1
+
+    def _format_feature_coverage(grouped: dict[str, dict[str, int]]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for group_key, counts in grouped.items():
+            sample_size = int(counts.get("sample_size") or 0)
+            row: dict[str, Any] = {"key": group_key, "sample_size": sample_size}
+            for field, count in counts.items():
+                if field == "sample_size":
+                    continue
+                row[f"{field}_pct"] = round((int(count or 0) / sample_size) * 100.0, 1) if sample_size else 0.0
+            rows.append(row)
+        rows.sort(key=lambda item: (-int(item.get("sample_size") or 0), str(item.get("key") or "")))
+        return rows
 
     for row in outcome_rows:
         (
@@ -4916,7 +5135,21 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
             token,
             stage,
             action_taken,
+            policy_name,
+            policy_version,
+            features_json,
         ) = row
+        features: dict[str, Any] = {}
+        try:
+            parsed_features = json.loads(features_json or "{}")
+            if isinstance(parsed_features, dict):
+                features = parsed_features
+        except Exception:
+            features = {}
+        policy_key = f"{policy_name or 'unknown'}@{policy_version or 'unknown'}"
+        _track_feature_coverage("by_stage", stage or "unknown", features)
+        _track_feature_coverage("by_decision", decision or "unknown", features)
+        _track_feature_coverage("by_policy_version", policy_key, features)
         counts_by_decision[decision] = counts_by_decision.get(decision, 0) + 1
         action_key = _decision_action_bucket(action_taken, decision)
         counts_by_action[action_key] = counts_by_action.get(action_key, 0) + 1
@@ -4978,6 +5211,9 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
             token,
             stage,
             action_taken,
+            policy_name,
+            policy_version,
+            features_json,
         ) = row
         sent_to_discord = action_taken == "emit" or str(decision or "").endswith("sent")
         reasons: list[str] = []
@@ -5230,6 +5466,11 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
         "counts_by_decision": counts_by_decision,
         "counts_by_action": counts_by_action,
         "counts_by_stage": stage_counts,
+        "feature_coverage_by_group": {
+            "by_stage": _format_feature_coverage(feature_coverage_groups["by_stage"]),
+            "by_decision": _format_feature_coverage(feature_coverage_groups["by_decision"]),
+            "by_policy_version": _format_feature_coverage(feature_coverage_groups["by_policy_version"]),
+        },
         "top_skip_reasons": top_skip_reasons,
         "sessions": sessions,
         "recent_examples": recent_examples,

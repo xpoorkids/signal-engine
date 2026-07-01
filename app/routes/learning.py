@@ -15,6 +15,7 @@ from app.services.signal_learning_service import (
     execute_regime_policy_action,
     generate_policy_candidates,
     get_engine_health_digest,
+    get_emit_audit_summary,
     get_historical_corpus_summary,
     apply_observe_review_action,
     get_policy_automation_status,
@@ -183,8 +184,13 @@ def learning_report_digest_dashboard(report_date: str):
 
 
 @router.get("/learning/diagnostics/summary")
-def learning_diagnostics_summary(hours: int = 24):
-    return get_diagnostics_summary(hours=max(1, hours))
+def learning_diagnostics_summary(hours: int = 24, sample_limit: int | None = None):
+    return get_diagnostics_summary(hours=max(1, hours), limit=sample_limit)
+
+
+@router.get("/learning/emits/summary")
+def learning_emits_summary(hours: int = 24, limit: int = 50):
+    return get_emit_audit_summary(hours=max(1, hours), limit=max(1, limit))
 
 
 @router.get("/learning/policy/traces")

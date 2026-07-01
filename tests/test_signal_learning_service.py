@@ -435,6 +435,114 @@ def test_diagnostics_summary_aggregates_decisions(tmp_path, monkeypatch):
     assert reasons["buyers_low"] == 1
 
 
+def test_emit_audit_summary_and_feature_coverage(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    signal_id = sls.record_signal_decision(
+        token="token-emit-audit",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_ready",
+        action_taken="emit",
+        reasons=[],
+        attention_score=0.82,
+        risk_score=0.12,
+        confidence_score=0.48,
+        creator_score=0.0,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="audit-v1",
+        features={
+            "market_cap_usd": 250_000,
+            "liquidity_usd": 42_000,
+            "volume_m5_usd": 75_000,
+            "price_change_m5": 18.4,
+            "txns_m5_buys": 220,
+            "txns_m5_sells": 41,
+            "unique_buyers_5m": 8,
+            "trade_validation_approved": True,
+            "trade_validation_dex_id": "pumpswap",
+            "trade_validation_reasons": [],
+            "candidate_ev_approved": True,
+            "candidate_ev_net_edge_bps": 980.5,
+            "candidate_ev_reasons": ["ev_gate_passed"],
+            "wallet_cluster_verdict": "coordinated_accumulation",
+            "wallet_cluster_score": 76,
+            "wallet_cluster_metrics": {
+                "top_holder_pct": 0.08,
+                "top10_pct": 0.24,
+                "wallet_risk": "ok",
+            },
+        },
+        ts_value=1_773_500_000,
+    )
+    sls.record_signal_decision(
+        token="token-skip-audit",
+        event_type="candidate",
+        stage="routing",
+        decision="hard_fail",
+        action_taken="skip",
+        reasons=["wallet_top_holder_concentration"],
+        attention_score=0.14,
+        risk_score=0.70,
+        confidence_score=0.35,
+        lifecycle="dex",
+        policy_name="deterministic_engine",
+        policy_version="audit-v1",
+        features={"attention_score": 0.14, "risk_score": 0.70},
+        ts_value=1_773_500_030,
+    )
+    with sls._connect() as c:
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                60,
+                1_773_503_600,
+                "dex",
+                310_000,
+                45_000,
+                90_000,
+                60.0,
+                22.0,
+                55.0,
+                260,
+                62,
+                24.0,
+                7.0,
+                20.0,
+                "worked",
+                '{"outcome_label":"worked"}',
+            ),
+        )
+
+    audit = sls.get_emit_audit_summary(hours=10_000)
+    assert audit["emit_count"] == 1
+    assert audit["trade_validation"]["approved"] == 1
+    assert audit["candidate_ev"]["approved"] == 1
+    assert audit["snapshot_coverage"]["with_snapshot"] == 1
+    assert audit["emits"][0]["token"] == "token-emit-audit"
+    assert audit["emits"][0]["candidate_ev"]["net_edge_bps"] == 980.5
+    assert audit["emits"][0]["latest_snapshot"]["outcome_label"] == "worked"
+
+    diagnostics = sls.get_diagnostics_summary(hours=10_000)
+    by_stage = {item["key"]: item for item in diagnostics["feature_coverage_by_group"]["by_stage"]}
+    by_policy = {item["key"]: item for item in diagnostics["feature_coverage_by_group"]["by_policy_version"]}
+    assert by_stage["candidate"]["market_cap_pct"] == 100.0
+    assert by_stage["candidate"]["trade_validation_pct"] == 100.0
+    assert by_stage["routing"]["market_cap_pct"] == 0.0
+    assert by_policy["deterministic_engine@audit-v1"]["sample_size"] == 2
+
+
 def test_diagnostics_and_health_bootstrap_schema_on_fresh_db(tmp_path, monkeypatch):
     db_path = tmp_path / "fresh-engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

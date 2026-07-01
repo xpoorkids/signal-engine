@@ -471,6 +471,45 @@ def test_learning_policy_routes_return_traces_and_shadow_eval(tmp_path, monkeypa
     assert traces_payload["traces"][0]["policy_version"] == "policy-live-1"
 
 
+def test_learning_emits_summary_route_returns_emit_audit(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    sls.record_signal_decision(
+        token="token-route-emit",
+        event_type="candidate",
+        stage="candidate",
+        decision="candidate_ready",
+        action_taken="emit",
+        reasons=[],
+        attention_score=0.72,
+        risk_score=0.10,
+        confidence_score=0.46,
+        lifecycle="dex",
+        policy_name="route-policy",
+        policy_version="route-v2",
+        features={
+            "market_cap_usd": 180_000,
+            "liquidity_usd": 31_000,
+            "trade_validation_approved": True,
+            "candidate_ev_approved": True,
+            "candidate_ev_net_edge_bps": 720.0,
+            "wallet_cluster_verdict": "coordinated_accumulation",
+        },
+        ts_value=1_773_500_000,
+    )
+
+    response = TestClient(main.app).get("/learning/emits/summary?hours=10000&limit=5")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["emit_count"] == 1
+    assert payload["counts_by_policy_version"]["route-policy@route-v2"] == 1
+    assert payload["emits"][0]["token"] == "token-route-emit"
+    assert payload["emits"][0]["trade_validation"]["approved"] is True
+
+
 def test_learning_validation_routes_return_summary_and_dashboard(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
