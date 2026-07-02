@@ -2,7 +2,7 @@ import json
 
 from app.services import signal_learning_service as sls
 from worker.events import Event
-from worker.promote import _record_decision
+from worker.promote import _record_decision, _wallet_cluster_review, _wallet_guard_observe_decision
 
 
 def test_record_decision_persists_tradeability_and_ev_features(tmp_path, monkeypatch):
@@ -99,3 +99,80 @@ def test_record_decision_persists_tradeability_and_ev_features(tmp_path, monkeyp
     assert features["wallet_cluster_metrics"]["top_holder_pct"] == 0.36
     assert features["candidate_ev_approved"] is True
     assert features["candidate_ev_net_edge_bps"] == 640.0
+
+
+def test_wallet_cluster_constructive_single_holder_can_enter_observe_review():
+    attention_metrics = {
+        "unique_buyers_5m": 7,
+        "burst_count_60s": 9,
+        "tracked_wallet_hits": 0,
+        "kol_wallet_hits": 0,
+    }
+    dex_summary = {
+        "liquidity_usd": 25_000.0,
+        "txns_m5_buys": 14,
+        "txns_m5_sells": 6,
+        "volume_m5": 45_000.0,
+        "price_change_m5": 12.0,
+    }
+    cluster = _wallet_cluster_review(
+        {"risk": "high", "top_holder_pct": 0.48, "top10_pct": 0.58},
+        total_buys_30s=5,
+        unique_wallets_30s=4,
+        top_wallet_share=0.52,
+        attention_metrics=attention_metrics,
+        dex_summary=dex_summary,
+        risk_score=0.32,
+    )
+
+    observe_ok, blockers = _wallet_guard_observe_decision(
+        ["wallet_distribution_high_risk", "wallet_top_holder_concentration"],
+        attention_score=0.48,
+        risk_score=0.32,
+        attention_metrics=attention_metrics,
+        dex_summary=dex_summary,
+        wallet_cluster_review=cluster,
+    )
+
+    assert cluster["verdict"] == "coordinated_accumulation"
+    assert "wallet_cluster_single_holder_dominant" in cluster["blockers"]
+    assert observe_ok is True
+    assert blockers == []
+
+
+def test_wallet_cluster_single_holder_stays_toxic_with_sell_pressure():
+    cluster = _wallet_cluster_review(
+        {"risk": "high", "top_holder_pct": 0.48, "top10_pct": 0.58},
+        total_buys_30s=5,
+        unique_wallets_30s=4,
+        top_wallet_share=0.52,
+        attention_metrics={"unique_buyers_5m": 7, "burst_count_60s": 9},
+        dex_summary={
+            "liquidity_usd": 25_000.0,
+            "txns_m5_buys": 10,
+            "txns_m5_sells": 16,
+            "volume_m5": 45_000.0,
+            "price_change_m5": 12.0,
+        },
+        risk_score=0.32,
+    )
+
+    observe_ok, blockers = _wallet_guard_observe_decision(
+        ["wallet_distribution_high_risk", "wallet_top_holder_concentration"],
+        attention_score=0.48,
+        risk_score=0.32,
+        attention_metrics={"unique_buyers_5m": 7, "burst_count_60s": 9},
+        dex_summary={
+            "liquidity_usd": 25_000.0,
+            "txns_m5_buys": 10,
+            "txns_m5_sells": 16,
+            "volume_m5": 45_000.0,
+            "price_change_m5": 12.0,
+        },
+        wallet_cluster_review=cluster,
+    )
+
+    assert cluster["verdict"] == "toxic_cluster"
+    assert "wallet_cluster_sell_pressure_high" in cluster["blockers"]
+    assert observe_ok is False
+    assert "wallet_cluster_toxic" in blockers

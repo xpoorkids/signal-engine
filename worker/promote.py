@@ -445,7 +445,8 @@ def _wallet_cluster_review(
         "wallet_cluster_dumping",
         "wallet_cluster_risk_score_high",
     }
-    toxic = bool(toxic_markers & set(blockers))
+    severe_toxic_markers = toxic_markers - {"wallet_cluster_single_holder_dominant"}
+    blocker_set = set(blockers)
     constructive = (
         liq >= policy.heating_min_liq_usd
         and buys5m >= policy.route_market_support_min_buys5m
@@ -454,6 +455,9 @@ def _wallet_cluster_review(
         and (vol_liq_ratio == 0.0 or vol_liq_ratio <= policy.adversarial_max_vol_liq_ratio_5m)
         and price_change_m5 >= -18.0
         and (risk is None or risk <= 0.60)
+    )
+    toxic = bool(severe_toxic_markers & blocker_set) or (
+        "wallet_cluster_single_holder_dominant" in blocker_set and not constructive
     )
     if toxic:
         verdict = "toxic_cluster"
