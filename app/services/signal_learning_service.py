@@ -957,6 +957,74 @@ def _percent_change(current: float | None, baseline: float | None) -> float | No
     return round(((current - baseline) / baseline) * 100.0, 2)
 
 
+def _volume_window_features(features: dict[str, Any] | None) -> dict[str, Any]:
+    feature_map = features if isinstance(features, dict) else {}
+    volume_m5 = _to_float(feature_map.get("volume_m5_usd") or feature_map.get("volume_m5"))
+    volume_h1 = _to_float(feature_map.get("volume_h1_usd") or feature_map.get("volume_h1"))
+    liquidity = _to_float(feature_map.get("liquidity_usd"))
+    buys5m = _to_int(feature_map.get("txns_m5_buys")) or 0
+    sells5m = _to_int(feature_map.get("txns_m5_sells")) or 0
+
+    pace_ratio = None
+    if volume_m5 is not None and volume_h1 is not None and volume_h1 > 0:
+        pace_ratio = round((volume_m5 * 12.0) / volume_h1, 3)
+    vol_liq_ratio = None
+    if volume_m5 is not None and liquidity is not None and liquidity > 0:
+        vol_liq_ratio = round(volume_m5 / liquidity, 3)
+    buy_sell_ratio = None
+    if buys5m > 0:
+        buy_sell_ratio = round(float(sells5m) / float(buys5m), 3)
+
+    phase = "unknown"
+    reasons: list[str] = []
+    if volume_m5 is None:
+        reasons.append("volume_m5_missing")
+    elif volume_m5 < 1000:
+        phase = "absent"
+        reasons.append("volume_m5<1000")
+    elif pace_ratio is None:
+        phase = "active" if volume_m5 >= 5000 else "thin"
+        reasons.append("volume_h1_missing")
+    elif pace_ratio >= 1.5 and volume_m5 >= 5000:
+        phase = "entering"
+        reasons.append("volume_pace_expanding")
+    elif pace_ratio >= 0.75 and volume_m5 >= 5000:
+        phase = "active"
+        reasons.append("volume_pace_sustained")
+    elif volume_m5 >= 5000:
+        phase = "leaving"
+        reasons.append("volume_pace_fading")
+    else:
+        phase = "thin"
+        reasons.append("volume_m5<5000")
+
+    if vol_liq_ratio is not None and vol_liq_ratio >= 4.0:
+        reasons.append("volume_liquidity_hot")
+    if buy_sell_ratio is not None and buy_sell_ratio > 1.2:
+        reasons.append("sell_pressure_rising")
+
+    return {
+        "volume_window_phase": phase,
+        "volume_pace_ratio": pace_ratio,
+        "volume_liquidity_ratio": vol_liq_ratio,
+        "volume_sell_buy_ratio": buy_sell_ratio,
+        "volume_window_reasons": reasons,
+    }
+
+
+def _volume_exit_phase(volume_change_pct: Any) -> str:
+    change = _to_float(volume_change_pct)
+    if change is None:
+        return "unknown"
+    if change <= -35.0:
+        return "left"
+    if change <= -10.0:
+        return "fading"
+    if change >= 50.0:
+        return "followthrough"
+    return "held"
+
+
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
@@ -2273,6 +2341,8 @@ def _persist_signal_decision(
     feature_map = _normalize_feature_map(features)
     if "session_bucket" not in feature_map:
         feature_map["session_bucket"] = time_features["session_bucket"]
+    if "local_daypart" not in feature_map:
+        feature_map["local_daypart"] = time_features["local_daypart"]
     if attention_score is not None and "attention_score" not in feature_map:
         feature_map["attention_score"] = attention_score
     if risk_score is not None and "risk_score" not in feature_map:
@@ -2285,6 +2355,10 @@ def _persist_signal_decision(
         feature_map["lifecycle"] = lifecycle
     if token and "token" not in feature_map:
         feature_map["token"] = token
+    volume_features = _volume_window_features(feature_map)
+    for key, value in volume_features.items():
+        if key not in feature_map or feature_map.get(key) in (None, "", []):
+            feature_map[key] = value
     feature_map["stage"] = stage
     feature_map.update(classify_policy_regime(feature_map, stage=stage, ts_value=created_ts))
     resolved_policy = _normalize_policy_descriptor(
@@ -5031,7 +5105,8 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
                 ss.horizon_minutes,
                 ss.outcome_label,
                 ss.market_cap_change_pct,
-                ss.liquidity_change_pct
+                ss.liquidity_change_pct,
+                ss.volume_m5_change_pct
             FROM signals s
             LEFT JOIN signal_snapshots ss
               ON ss.signal_id = s.signal_id
@@ -5063,6 +5138,7 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
     conversion_by_token: dict[str, set[str]] = {}
     reason_scorecards: dict[str, dict[str, Any]] = {}
     reason_daily: dict[tuple[str, str], dict[str, Any]] = {}
+    volume_windows: dict[tuple[str, str, str], dict[str, Any]] = {}
     feature_coverage_groups: dict[str, dict[str, dict[str, int]]] = {
         "by_stage": {},
         "by_decision": {},
@@ -5114,6 +5190,7 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
             outcome_label,
             market_cap_change_pct,
             liquidity_change_pct,
+            volume_m5_change_pct,
         ) = row
         token_key = token or "unknown"
         session_key = session_bucket or "unknown"
@@ -5132,6 +5209,8 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
             "outcome_label": outcome_label,
             "market_cap_change_pct": market_cap_change_pct,
             "liquidity_change_pct": liquidity_change_pct,
+            "volume_m5_change_pct": volume_m5_change_pct,
+            "volume_exit_phase": _volume_exit_phase(volume_m5_change_pct),
         }
         outcome_by_token.setdefault(token_key, []).append(outcome_entry)
         outcome_by_signal_id[signal_id] = outcome_entry
@@ -5253,6 +5332,70 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
         if not sent_to_discord:
             for reason in reasons:
                 skip_reason_counts[reason] = skip_reason_counts.get(reason, 0) + 1
+        volume_phase = str(
+            features.get("volume_window_phase")
+            or _volume_window_features(features).get("volume_window_phase")
+            or "unknown"
+        )
+        volume_key = (session_bucket or "unknown", local_daypart or "unknown", volume_phase)
+        volume_bucket = volume_windows.setdefault(
+            volume_key,
+            {
+                "session_bucket": session_bucket or "unknown",
+                "local_daypart": local_daypart or "unknown",
+                "volume_window_phase": volume_phase,
+                "total": 0,
+                "sent": 0,
+                "skipped": 0,
+                "blocked": 0,
+                "positive": 0,
+                "negative": 0,
+                "pending": 0,
+                "volume_left": 0,
+                "volume_fading": 0,
+                "volume_held": 0,
+                "volume_followthrough": 0,
+                "avg_volume_pace_ratio": 0.0,
+                "avg_volume_liquidity_ratio": 0.0,
+                "pace_samples": 0,
+                "liq_ratio_samples": 0,
+            },
+        )
+        volume_bucket["total"] += 1
+        if sent_to_discord:
+            volume_bucket["sent"] += 1
+        elif "skip" in str(decision or ""):
+            volume_bucket["skipped"] += 1
+        elif "block" in str(decision or "") or str(decision or "") == "hard_fail":
+            volume_bucket["blocked"] += 1
+        matched_volume_outcome = outcome_by_signal_id.get(signal_id or "")
+        if matched_volume_outcome:
+            outcome_label = str(matched_volume_outcome.get("outcome_label") or "pending")
+            if outcome_label in {"worked", "strong_continuation"}:
+                volume_bucket["positive"] += 1
+            elif outcome_label in {"failed", "faded"}:
+                volume_bucket["negative"] += 1
+            else:
+                volume_bucket["pending"] += 1
+            exit_phase = str(matched_volume_outcome.get("volume_exit_phase") or "unknown")
+            if exit_phase == "left":
+                volume_bucket["volume_left"] += 1
+            elif exit_phase == "fading":
+                volume_bucket["volume_fading"] += 1
+            elif exit_phase == "held":
+                volume_bucket["volume_held"] += 1
+            elif exit_phase == "followthrough":
+                volume_bucket["volume_followthrough"] += 1
+        else:
+            volume_bucket["pending"] += 1
+        pace_ratio = _to_float(features.get("volume_pace_ratio"))
+        if pace_ratio is not None:
+            volume_bucket["avg_volume_pace_ratio"] += pace_ratio
+            volume_bucket["pace_samples"] += 1
+        liq_ratio = _to_float(features.get("volume_liquidity_ratio"))
+        if liq_ratio is not None:
+            volume_bucket["avg_volume_liquidity_ratio"] += liq_ratio
+            volume_bucket["liq_ratio_samples"] += 1
         if len(recent_examples) < 20:
             recent_examples.append(
                 {
@@ -5266,6 +5409,7 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
                     "confidence_score": confidence_score,
                     "session_bucket": session_bucket,
                     "local_daypart": local_daypart,
+                    "volume_window_phase": volume_phase,
                     "created_ts": created_ts,
                 }
             )
@@ -5486,6 +5630,40 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
     reason_trends = _build_daily_trends(reason_daily, key_fields=["reason"])
     session_signal_trends = _build_daily_trends(session_signal_daily, key_fields=["session_bucket", "signal_type"])
 
+    volume_window_summary: list[dict[str, Any]] = []
+    for item in volume_windows.values():
+        total = int(item.get("total") or 0)
+        positive = int(item.get("positive") or 0)
+        negative = int(item.get("negative") or 0)
+        resolved = positive + negative
+        pace_samples = int(item.pop("pace_samples", 0) or 0)
+        liq_ratio_samples = int(item.pop("liq_ratio_samples", 0) or 0)
+        item["avg_volume_pace_ratio"] = (
+            round(float(item.get("avg_volume_pace_ratio") or 0.0) / pace_samples, 3)
+            if pace_samples
+            else None
+        )
+        item["avg_volume_liquidity_ratio"] = (
+            round(float(item.get("avg_volume_liquidity_ratio") or 0.0) / liq_ratio_samples, 3)
+            if liq_ratio_samples
+            else None
+        )
+        item["resolved_total"] = resolved
+        item["positive_rate"] = round((positive / resolved) * 100.0, 1) if resolved else 0.0
+        item["negative_rate"] = round((negative / resolved) * 100.0, 1) if resolved else 0.0
+        item["volume_left_rate"] = round((int(item.get("volume_left") or 0) / total) * 100.0, 1) if total else 0.0
+        volume_window_summary.append(item)
+    volume_window_summary.sort(
+        key=lambda item: (
+            -int(item.get("sent") or 0),
+            -float(item.get("positive_rate") or 0.0),
+            -int(item.get("total") or 0),
+            str(item.get("session_bucket") or ""),
+            str(item.get("local_daypart") or ""),
+            str(item.get("volume_window_phase") or ""),
+        )
+    )
+
     threshold_guidance: list[dict[str, Any]] = []
     for item in reason_quality:
         total = int(item.get("total") or 0)
@@ -5567,6 +5745,7 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
         "session_quality": session_quality,
         "session_signal_quality": session_signal_quality[:20],
         "conversion": conversion,
+        "volume_windows": volume_window_summary[:20],
         "reason_quality": reason_quality[:25],
         "threshold_guidance": threshold_guidance[:12],
         "reason_trends": reason_trends[:12],

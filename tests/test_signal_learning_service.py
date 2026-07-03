@@ -3126,6 +3126,102 @@ def test_ingest_signal_event_and_decision_persist_rows(tmp_path, monkeypatch):
     assert decision_count == 1
 
 
+def test_diagnostics_tracks_volume_windows_and_exits(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    event = Event(
+        type="candidate",
+        source="test",
+        token="token-volume-window",
+        confidence=0.66,
+        ts=1_773_800_000,
+        extra={
+            "lifecycle": "dex",
+            "attention_score": 0.62,
+            "risk_score": 0.18,
+            "dex_summary": {
+                "liquidity_usd": 20_000,
+                "volume_m5": 12_000,
+                "volume_h1": 60_000,
+                "txns_m5_buys": 18,
+                "txns_m5_sells": 6,
+            },
+        },
+    )
+    signal_id = sls.record_signal_event(event, external_ref="msg-volume-window")
+    sls.record_signal_decision(
+        token=event.token,
+        event_type=event.type,
+        stage="candidate",
+        decision="candidate_ready",
+        action_taken="emit",
+        signal_id=signal_id,
+        attention_score=0.62,
+        risk_score=0.18,
+        confidence_score=0.66,
+        lifecycle="dex",
+        features={
+            "liquidity_usd": 20_000,
+            "volume_m5_usd": 12_000,
+            "volume_h1_usd": 60_000,
+            "txns_m5_buys": 18,
+            "txns_m5_sells": 6,
+        },
+        ts_value=1_773_800_000,
+    )
+    with sls._connect() as c:
+        row = c.execute(
+            "SELECT features_json FROM signal_decisions WHERE signal_id=?",
+            (signal_id,),
+        ).fetchone()
+        features = json.loads(row[0])
+        c.execute(
+            """
+            INSERT INTO signal_snapshots (
+                signal_id, horizon_minutes, captured_ts, lifecycle, market_cap_usd, liquidity_usd,
+                volume_m5_usd, age_minutes, price_change_m5, price_change_h1, txns_m5_buys,
+                txns_m5_sells, market_cap_change_pct, liquidity_change_pct, volume_m5_change_pct,
+                outcome_label, snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                60,
+                1_773_803_600,
+                "dex",
+                30_000,
+                19_000,
+                5_000,
+                70.0,
+                -12.0,
+                18.0,
+                60,
+                30,
+                -5.0,
+                -5.0,
+                -58.3,
+                "faded",
+                json.dumps({"outcome_label": "faded", "volume_m5_change_pct": -58.3}),
+            ),
+        )
+
+    summary = sls.get_diagnostics_summary(hours=10_000, limit=100)
+    volume_windows = {
+        (item["session_bucket"], item["local_daypart"], item["volume_window_phase"]): item
+        for item in summary["volume_windows"]
+    }
+    window = volume_windows[(features["session_bucket"], features["local_daypart"], "entering")]
+
+    assert features["volume_window_phase"] == "entering"
+    assert features["volume_pace_ratio"] == 2.4
+    assert window["sent"] == 1
+    assert window["negative"] == 1
+    assert window["volume_left"] == 1
+    assert window["volume_left_rate"] == 100.0
+
+
 def test_live_validation_summary_tracks_alert_outcomes_and_buckets(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)
