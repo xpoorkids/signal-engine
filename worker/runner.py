@@ -204,6 +204,7 @@ import os
 import time
 import traceback
 import logging
+from typing import Any
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -212,19 +213,28 @@ os.environ.setdefault("SIGNAL_ENGINE_PROCESS_ROLE", "worker")
 from worker.config import (
     ENABLE_WS,
     ENABLE_DEX,
+    ENABLE_DISCORD,
     EARLY_DEDUPE_TTL_SEC,
     ALERT_COOLDOWN_SEC,
     HEATING_UP_ALERT_COOLDOWN_SEC,
     CANDIDATE_ALERT_COOLDOWN_SEC,
+    DRY_RUN,
+    DISCORD_WEBHOOK_URL,
+    DISCORD_CANDIDATE_WEBHOOK,
+    HELIUS_API_KEY,
+    HELIUS_WS_URL,
+    HELIUS_RPC_URL,
 )
 from worker.state import EngineState, is_sig_new, can_alert
 from worker.events import Event
 from worker.promote import process_event
 from worker.discord import send_discord, send_candidate_discord
 from worker.helius_listener import start_helius_listeners
+import worker.helius_listener as helius_listener
 from worker.shadow_executor import maybe_open_shadow_position, shadow_monitor_worker
 from worker.signal_policy import heating_delivery_decision
 import worker.scanner as scanner
+from app.services.scan_service import process_scan
 from app.services.state_service import record_wallet_signal, init as state_init
 from app.services.db_service import resolve_engine_db_path
 from app.services.signal_learning_service import (
@@ -236,6 +246,64 @@ from app.services.signal_learning_service import (
 )
 from app.services.tuning_service import ops_digest_worker, rollout_verification_worker
 from app.services.structured_logging import log_event
+
+_TASKS: dict[str, asyncio.Task] = {}
+_QUEUE: asyncio.Queue | None = None
+_DEX_SCAN_LAST_EMIT: dict[str, float] = {}
+DEX_SCAN_EMIT_COOLDOWN_SEC = int(os.getenv("DEX_SCAN_EMIT_COOLDOWN_SEC", "300"))
+
+
+def _task_health() -> dict[str, dict[str, Any]]:
+    health: dict[str, dict[str, Any]] = {}
+    for name, task in list(_TASKS.items()):
+        item: dict[str, Any] = {
+            "done": task.done(),
+            "cancelled": task.cancelled(),
+        }
+        if task.done() and not task.cancelled():
+            try:
+                exc = task.exception()
+            except Exception as err:
+                exc = err
+            if exc is not None:
+                item["error_type"] = type(exc).__name__
+                item["error"] = str(exc)[:300]
+        health[name] = item
+    return health
+
+
+def _worker_health_metadata() -> dict[str, Any]:
+    now = time.time()
+    ws_last_activity = float(getattr(helius_listener, "LAST_WS_ACTIVITY", 0.0) or 0.0)
+    scan_last_ts = float(getattr(scanner, "LAST_SCAN_TS", 0.0) or 0.0)
+    metadata: dict[str, Any] = {
+        "deploy_sha": os.getenv("RENDER_GIT_COMMIT", "unknown"),
+        "dry_run": DRY_RUN,
+        "enable_ws": ENABLE_WS,
+        "enable_dex": ENABLE_DEX,
+        "enable_discord": ENABLE_DISCORD,
+        "discord_webhook_configured": bool(DISCORD_WEBHOOK_URL),
+        "discord_candidate_webhook_configured": bool(DISCORD_CANDIDATE_WEBHOOK),
+        "helius_api_key_configured": bool(HELIUS_API_KEY),
+        "helius_ws_configured": bool(HELIUS_WS_URL),
+        "helius_rpc_configured": bool(HELIUS_RPC_URL or os.getenv("HELIUS_HTTPS_RPC_URL")),
+        "queue_size": _QUEUE.qsize() if _QUEUE is not None else None,
+        "queue_max_size": _QUEUE.maxsize if _QUEUE is not None else None,
+        "tasks": _task_health(),
+        "producer_health": {
+            "ws_last_activity_age_seconds": round(now - ws_last_activity, 1) if ws_last_activity else None,
+            "scanner_last_scan_age_seconds": round(now - scan_last_ts, 1) if scan_last_ts else None,
+            "scanner_last_candidate_count": getattr(scanner, "LAST_SCAN_COUNT", None),
+            "scanner_last_error": getattr(scanner, "LAST_SCAN_ERROR", None),
+        },
+    }
+    return metadata
+
+
+def _create_worker_task(name: str, awaitable) -> asyncio.Task:
+    task = asyncio.create_task(awaitable, name=name)
+    _TASKS[name] = task
+    return task
 
 
 def _should_send_heating_up(de: Event) -> bool:
@@ -433,11 +501,49 @@ async def heartbeat_loop() -> None:
         if time.time() - last_heartbeat > 30:
             persisted = record_runtime_heartbeat(
                 service_role="worker",
-                metadata={"deploy_sha": os.getenv("RENDER_GIT_COMMIT", "unknown")},
+                metadata=_worker_health_metadata(),
             )
             logger.info("[heartbeat] worker alive persisted=%s", persisted)
             last_heartbeat = time.time()
         await asyncio.sleep(1)
+
+
+async def dex_scan_loop(q: asyncio.Queue) -> None:
+    while True:
+        try:
+            hits = await asyncio.to_thread(process_scan)
+            scanner.LAST_SCAN_TS = time.time()
+            scanner.LAST_SCAN_COUNT = len(hits)
+            scanner.LAST_SCAN_ERROR = None
+            log_event(logger, logging.INFO, "dex-scan", candidates=len(hits))
+            for candidate in hits:
+                token = str(candidate.get("token") or "").strip()
+                if not token:
+                    continue
+                now = time.time()
+                last_emit = _DEX_SCAN_LAST_EMIT.get(token, 0.0)
+                if now - last_emit < DEX_SCAN_EMIT_COOLDOWN_SEC:
+                    continue
+                _DEX_SCAN_LAST_EMIT[token] = now
+                metrics = candidate.get("metrics") if isinstance(candidate.get("metrics"), dict) else {}
+                await q.put(
+                    Event(
+                        type="token_resolved",
+                        source="dex_scan",
+                        token=token,
+                        confidence=0.55 if candidate.get("reason") == "dex_momentum_watch" else 0.65,
+                        reasons=[str(candidate.get("reason") or "dex_scan")],
+                        extra={
+                            "metrics": metrics,
+                            "symbol": candidate.get("symbol"),
+                            "dex_scan_candidate": candidate,
+                        },
+                    )
+                )
+        except Exception as exc:
+            scanner.LAST_SCAN_ERROR = f"{type(exc).__name__}: {exc}"
+            log_event(logger, logging.ERROR, "dex-scan-error", error_type=type(exc).__name__, error=str(exc))
+        await asyncio.sleep(max(5, int(getattr(scanner, "SCAN_INTERVAL", 30) or 30)))
 
 
 async def run_worker() -> None:
@@ -460,21 +566,23 @@ async def run_worker() -> None:
         logger.warning(
             "[startup] SIGNAL_ENGINE_DB_PATH is unset; worker may write to a local SQLite file that is not shared with engine."
         )
+    global _QUEUE
     tasks = []
     q: asyncio.Queue = asyncio.Queue(maxsize=2000)
+    _QUEUE = q
 
     learning_init()
-    tasks.append(asyncio.create_task(event_loop(q)))
-    tasks.append(asyncio.create_task(heartbeat_loop()))
-    tasks.append(asyncio.create_task(snapshot_worker()))
-    tasks.append(asyncio.create_task(daily_report_worker()))
-    tasks.append(asyncio.create_task(ops_digest_worker()))
-    tasks.append(asyncio.create_task(rollout_verification_worker()))
-    tasks.append(asyncio.create_task(shadow_monitor_worker()))
+    tasks.append(_create_worker_task("event_loop", event_loop(q)))
+    tasks.append(_create_worker_task("heartbeat_loop", heartbeat_loop()))
+    tasks.append(_create_worker_task("snapshot_worker", snapshot_worker()))
+    tasks.append(_create_worker_task("daily_report_worker", daily_report_worker()))
+    tasks.append(_create_worker_task("ops_digest_worker", ops_digest_worker()))
+    tasks.append(_create_worker_task("rollout_verification_worker", rollout_verification_worker()))
+    tasks.append(_create_worker_task("shadow_monitor_worker", shadow_monitor_worker()))
     if ENABLE_WS:
-        tasks.append(asyncio.create_task(start_helius_listeners(q)))
+        tasks.append(_create_worker_task("helius_listener", start_helius_listeners(q)))
     if ENABLE_DEX:
-        tasks.append(asyncio.to_thread(scanner.run))
+        tasks.append(_create_worker_task("dex_scanner", dex_scan_loop(q)))
 
     await asyncio.gather(*tasks, return_exceptions=True)
 

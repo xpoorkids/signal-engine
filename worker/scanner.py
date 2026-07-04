@@ -63,6 +63,9 @@ EARLY_COUNT = 0
 SEEN_SIGNATURES = set()
 PROMOTION_STATE = EngineState()
 logger = logging.getLogger(__name__)
+LAST_SCAN_TS = 0.0
+LAST_SCAN_COUNT = None
+LAST_SCAN_ERROR = None
 
 
 def log(m: str):
@@ -268,6 +271,7 @@ def process_candidate(candidate: dict) -> None:
 
 
 def run():
+    global LAST_SCAN_TS, LAST_SCAN_COUNT, LAST_SCAN_ERROR
     log("[worker] starting")
     init()
     cycle = 0
@@ -293,6 +297,9 @@ def run():
             hits = []
             if DEX_ENABLED:
                 hits = process_scan()
+                LAST_SCAN_TS = time.time()
+                LAST_SCAN_COUNT = len(hits)
+                LAST_SCAN_ERROR = None
                 print(
                     f"[worker] candidates={len(hits)} early={EARLY_COUNT}",
                     flush=True,
@@ -307,6 +314,7 @@ def run():
             time.sleep(SCAN_INTERVAL)
 
         except Exception as e:
+            LAST_SCAN_ERROR = f"{type(e).__name__}: {e}"
             log(f"[worker] error: {e}")
             time.sleep(5)
 

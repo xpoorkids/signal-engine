@@ -93,6 +93,46 @@ def test_score_pairs_skips_non_solana_pairs():
     assert score_pairs(pairs) == []
 
 
+def test_score_pairs_returns_bounded_momentum_watch_candidate():
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    token = "D6sA8hKpreRfWEqLRo2fyx5UpmcHeEmGsQ1UndLWpump"
+    pairs = [
+        {
+            "chainId": "solana",
+            "baseToken": {"address": token, "symbol": "COBRA"},
+            "quoteToken": {
+                "address": "So11111111111111111111111111111111111111112",
+                "symbol": "SOL",
+            },
+            "liquidity": {"usd": 90_000},
+            "volume": {"m5": 31_000},
+            "priceChange": {"m5": 12},
+            "txns": {"m5": {"buys": 180, "sells": 50}},
+            "marketCap": 1_250_000,
+            "pairCreatedAt": now_ms - 75 * 60_000,
+        }
+    ]
+
+    scored = score_pairs(pairs)
+
+    assert scored == [
+        {
+            "token": token,
+            "symbol": "COBRA",
+            "chain": "sol",
+            "reason": "dex_momentum_watch",
+            "metrics": {
+                "liquidity": 90000.0,
+                "volume_5m": 31000.0,
+                "price_change_5m": 12.0,
+                "age_minutes": 75.0,
+                "market_cap": 1250000.0,
+                "buys_5m": 180,
+            },
+        }
+    ]
+
+
 def test_score_route_persists_contract_before_symbol(monkeypatch):
     appended = {}
 

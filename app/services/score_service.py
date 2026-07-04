@@ -70,6 +70,7 @@ def _pick_symbol(pair: dict, token_address: str | None) -> str | None:
 def score_pairs(pairs: list[dict]) -> list[dict]:
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
     out = []
+    seen_tokens: set[str] = set()
 
     for p in pairs:
         try:
@@ -84,22 +85,37 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                 continue
 
             age = (now_ms - created) / 60000
+            txns_m5 = p.get("txns", {}).get("m5", {}) if isinstance(p.get("txns"), dict) else {}
+            buys5m = int(txns_m5.get("buys") or 0) if isinstance(txns_m5, dict) else 0
+            market_cap = float(p.get("marketCap") or p.get("fdv") or 0)
+            near_pass = age <= 0.5 and liq >= 800 and vol5m >= 20 and chg5m >= -10
+            momentum_watch = (
+                age <= 24 * 60
+                and liq >= 10_000
+                and vol5m >= 1_000
+                and buys5m >= 3
+                and chg5m >= -18
+                and 25_000 <= market_cap <= 5_000_000
+            )
 
-            if age <= 0.5 and liq >= 800 and vol5m >= 20 and chg5m >= -10:
+            if near_pass or momentum_watch:
                 token = _pick_contract_address(p)
-                if not token:
+                if not token or token in seen_tokens:
                     continue
+                seen_tokens.add(token)
                 out.append(
                     {
                         "token": token,
                         "symbol": _pick_symbol(p, token),
                         "chain": "sol",
-                        "reason": "aggressive_near_pass",
+                        "reason": "aggressive_near_pass" if near_pass else "dex_momentum_watch",
                         "metrics": {
                             "liquidity": round(liq, 2),
                             "volume_5m": round(vol5m, 2),
                             "price_change_5m": round(chg5m, 2),
                             "age_minutes": round(age, 1),
+                            "market_cap": round(market_cap, 2),
+                            "buys_5m": buys5m,
                         },
                     }
                 )
