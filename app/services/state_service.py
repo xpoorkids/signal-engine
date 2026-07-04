@@ -366,8 +366,8 @@ def update_promo_confirm(token: str, passed: bool) -> int:
 
 def allow_candidate_rate_limit(max_per_hour: int) -> bool:
     now = int(time.time())
-    window_key = "candidate_rate_window_start"
-    count_key = "candidate_rate_window_count"
+    window_key = "candidate_rate_v2_window_start"
+    count_key = "candidate_rate_v2_window_count"
     with _connect() as c:
         start_row = c.execute("SELECT v FROM kv WHERE k=?", (window_key,)).fetchone()
         count_row = c.execute("SELECT v FROM kv WHERE k=?", (count_key,)).fetchone()
@@ -377,14 +377,23 @@ def allow_candidate_rate_limit(max_per_hour: int) -> bool:
             start = now
             count = 0
         if count >= max_per_hour:
-            c.execute(
-                "INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-                (window_key, str(start)),
-            )
-            c.execute(
-                "INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-                (count_key, str(count)),
-            )
+            return False
+        return True
+
+
+def consume_candidate_rate_limit(max_per_hour: int) -> bool:
+    now = int(time.time())
+    window_key = "candidate_rate_v2_window_start"
+    count_key = "candidate_rate_v2_window_count"
+    with _connect() as c:
+        start_row = c.execute("SELECT v FROM kv WHERE k=?", (window_key,)).fetchone()
+        count_row = c.execute("SELECT v FROM kv WHERE k=?", (count_key,)).fetchone()
+        start = int(start_row[0]) if start_row and start_row[0] else 0
+        count = int(count_row[0]) if count_row and count_row[0] else 0
+        if start == 0 or now - start >= 3600:
+            start = now
+            count = 0
+        if count >= max_per_hour:
             return False
         count += 1
         c.execute(

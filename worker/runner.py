@@ -393,7 +393,12 @@ def _persist_candidate_delivery(de: Event, *, delivered: bool, message_id: str |
         delivered=delivered,
     )
     if message_id and not edited:
-        from app.services.state_service import update_candidate_message_id, mark_candidate_alert_sent
+        from app.services.state_service import (
+            consume_candidate_rate_limit,
+            update_candidate_message_id,
+            mark_candidate_alert_sent,
+        )
+        consume_candidate_rate_limit(int(os.getenv("EARLY_WATCH_RATE_LIMIT_PER_HOUR", "5")))
         update_candidate_message_id(de.token, message_id)
         mark_candidate_alert_sent(de.token)
 

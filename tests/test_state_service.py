@@ -29,3 +29,17 @@ def test_state_service_uses_hardened_sqlite_connection(tmp_path, monkeypatch):
 
     assert str(journal_mode).lower() == "wal"
     assert int(busy_timeout) >= 5000
+
+
+def test_candidate_rate_limit_only_consumes_when_recorded(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(state_service, "DB_PATH", db_path)
+    state_service.DB_PATH.parent.mkdir(exist_ok=True)
+    state_service.init()
+
+    assert state_service.allow_candidate_rate_limit(1) is True
+    assert state_service.allow_candidate_rate_limit(1) is True
+
+    assert state_service.consume_candidate_rate_limit(1) is True
+    assert state_service.allow_candidate_rate_limit(1) is False
+    assert state_service.consume_candidate_rate_limit(1) is False
