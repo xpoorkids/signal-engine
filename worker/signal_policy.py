@@ -631,6 +631,10 @@ def candidate_confirmation_signals(
 
     liq = 0.0
     buys5m = 0
+    sells5m = 0
+    vol5m = 0.0
+    price_change_m5 = 0.0
+    market_cap = 0.0
     if isinstance(dex_summary, dict):
         try:
             liq = float(dex_summary.get("liquidity_usd") or 0.0)
@@ -640,8 +644,40 @@ def candidate_confirmation_signals(
             buys5m = int(dex_summary.get("txns_m5_buys") or 0)
         except Exception:
             buys5m = 0
+        try:
+            sells5m = int(dex_summary.get("txns_m5_sells") or 0)
+        except Exception:
+            sells5m = 0
+        try:
+            vol5m = float(dex_summary.get("volume_m5") or 0.0)
+        except Exception:
+            vol5m = 0.0
+        try:
+            price_change_m5 = float(dex_summary.get("price_change_m5") or 0.0)
+        except Exception:
+            price_change_m5 = 0.0
+        try:
+            market_cap = float(dex_summary.get("market_cap") or dex_summary.get("fdv") or 0.0)
+        except Exception:
+            market_cap = 0.0
     if liq >= policy.min_market_support_liq_usd and buys5m >= policy.market_support_min_buys5m:
         confirmations.append("market_support")
+    buy_sell_ratio = buys5m / max(1, sells5m)
+    if (
+        liq >= max(policy.entry_chase_min_liq_usd, policy.min_market_support_liq_usd)
+        and vol5m >= 10_000
+        and buys5m >= max(policy.entry_confirm_buys5m_min, policy.market_support_min_buys5m)
+        and price_change_m5 >= 5.0
+        and 50_000 <= market_cap <= 5_000_000
+    ):
+        confirmations.append("dex_momentum")
+    if (
+        buys5m >= policy.entry_confirm_buys5m_min
+        and buy_sell_ratio >= 1.35
+        and price_change_m5 >= 0.0
+        and vol5m >= 5_000
+    ):
+        confirmations.append("entry_buy_pressure")
 
     if (
         top_wallet_share >= policy.anti_wash_top_wallet_share
@@ -930,6 +966,11 @@ def candidate_send_reasons(
     has_creator_support = creator_score >= policy.strong_creator_threshold and attn >= policy.creator_attention_floor
     has_attention_only = attn >= policy.strong_attention_threshold
     has_balanced_quality = creator_score >= policy.creator_attention_target and attn >= policy.creator_attention_target
+    has_dex_breakout = {
+        "market_support",
+        "dex_momentum",
+        "entry_buy_pressure",
+    }.issubset(confirmation_set)
 
     if (
         len(confirmations) < policy.min_send_confirmation_signals
@@ -960,8 +1001,8 @@ def candidate_send_reasons(
     if adversarial_flags and not route_fast_lane and (not hard_quality_confirmed or has_severe_adversarial_flag):
         reasons.extend(item for item in adversarial_flags if item not in reasons)
 
-    eligible = (has_attention_only or has_creator_support or has_balanced_quality) and not reasons
-    if not (has_attention_only or has_creator_support or has_balanced_quality):
+    eligible = (has_attention_only or has_creator_support or has_balanced_quality or has_dex_breakout) and not reasons
+    if not (has_attention_only or has_creator_support or has_balanced_quality or has_dex_breakout):
         reasons.append("attention_creator_alignment_missing")
     return eligible, reasons, confirmations
 

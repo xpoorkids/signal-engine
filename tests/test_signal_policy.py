@@ -98,6 +98,28 @@ def test_candidate_send_reasons_allow_fast_lane_heating_setup_with_flow_strength
     assert "burst_strength" in confirmations
 
 
+def test_candidate_send_reasons_allow_strong_dex_breakout_without_social_attention():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.20,
+        creator_score=0.0,
+        extra={"attention_metrics": {}},
+        dex_summary={
+            "liquidity_usd": 90_000.0,
+            "volume_m5": 31_000.0,
+            "txns_m5_buys": 180,
+            "txns_m5_sells": 50,
+            "price_change_m5": 12.0,
+            "market_cap": 1_250_000.0,
+        },
+    )
+
+    assert eligible is True
+    assert reasons == []
+    assert "market_support" in confirmations
+    assert "dex_momentum" in confirmations
+    assert "entry_buy_pressure" in confirmations
+
+
 def test_adversarial_signal_flags_detect_bursty_shallow_liquidity_pattern():
     flags = adversarial_signal_flags(
         metrics={
