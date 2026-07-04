@@ -224,6 +224,7 @@ from worker.config import (
     HELIUS_API_KEY,
     HELIUS_WS_URL,
     HELIUS_RPC_URL,
+    EARLY_WATCH_RATE_LIMIT_PER_HOUR,
 )
 from worker.state import EngineState, is_sig_new, can_alert
 from worker.events import Event
@@ -289,6 +290,8 @@ def _worker_health_metadata() -> dict[str, Any]:
         "helius_rpc_configured": bool(HELIUS_RPC_URL or os.getenv("HELIUS_HTTPS_RPC_URL")),
         "queue_size": _QUEUE.qsize() if _QUEUE is not None else None,
         "queue_max_size": _QUEUE.maxsize if _QUEUE is not None else None,
+        "candidate_rate_limit_per_hour": EARLY_WATCH_RATE_LIMIT_PER_HOUR,
+        "candidate_rate_limit_effective_per_hour": max(1, EARLY_WATCH_RATE_LIMIT_PER_HOUR),
         "tasks": _task_health(),
         "producer_health": {
             "ws_last_activity_age_seconds": round(now - ws_last_activity, 1) if ws_last_activity else None,
@@ -398,7 +401,7 @@ def _persist_candidate_delivery(de: Event, *, delivered: bool, message_id: str |
             update_candidate_message_id,
             mark_candidate_alert_sent,
         )
-        consume_candidate_rate_limit(int(os.getenv("EARLY_WATCH_RATE_LIMIT_PER_HOUR", "5")))
+        consume_candidate_rate_limit(max(1, EARLY_WATCH_RATE_LIMIT_PER_HOUR))
         update_candidate_message_id(de.token, message_id)
         mark_candidate_alert_sent(de.token)
 

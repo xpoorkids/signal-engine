@@ -1786,7 +1786,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                         candidate_ev.get("cost_bps"),
                         candidate_ev.get("reasons") or [],
                     )
-                allow_rate = allow_candidate_rate_limit(EARLY_WATCH_RATE_LIMIT_PER_HOUR) if send_eligible else False
+                allow_rate = allow_candidate_rate_limit(max(1, EARLY_WATCH_RATE_LIMIT_PER_HOUR)) if send_eligible else False
                 should_send = send_eligible and allow_rate
                 extra["candidate_rate_limit_allowed"] = allow_rate
                 extra["candidate_confirmation_signals"] = confirmation_signals
