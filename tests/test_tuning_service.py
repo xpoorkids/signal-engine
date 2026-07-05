@@ -44,6 +44,56 @@ from app.services.tuning_service import (
 )
 
 
+def test_ops_webhook_falls_back_to_main_discord_webhook(monkeypatch):
+    monkeypatch.delenv("SIGNAL_ENGINE_OPS_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("OPS_WEBHOOK_URL", raising=False)
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/test/token")
+
+    assert ts._ops_webhook_url() == "https://discord.com/api/webhooks/test/token"
+
+
+def test_rollout_notification_uses_discord_payload_for_discord_webhook(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.delenv("SIGNAL_ENGINE_OPS_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("OPS_WEBHOOK_URL", raising=False)
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/test/token")
+    sls.init()
+    posted: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    def fake_post(url, json, timeout):
+        posted["url"] = url
+        posted["json"] = json
+        posted["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(ts.requests, "post", fake_post)
+
+    notification = ts.emit_rollout_notification(
+        event_type="ops_digest",
+        level="warning",
+        message="Signal Engine Discord test",
+        target_name="command-center",
+        deployment_sha="sha-test",
+        payload={
+            "counts": {"sent": 0, "candidate_gate_skip": 2},
+            "highlights": ["Discord delivery check"],
+            "recommended_actions": ["No action required"],
+        },
+    )
+
+    assert notification["delivery_status"] == "delivered"
+    assert posted["url"] == "https://discord.com/api/webhooks/test/token"
+    assert "embeds" in posted["json"]
+    embed = posted["json"]["embeds"][0]
+    assert embed["title"] == "Signal Engine Ops: ops_digest"
+    assert embed["fields"][0]["value"] == "Signal Engine Discord test"
+
+
 def test_build_tuning_proposals_maps_guidance_to_config_changes(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

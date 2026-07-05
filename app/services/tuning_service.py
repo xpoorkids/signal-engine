@@ -136,7 +136,86 @@ def _ops_webhook_url() -> str:
     return (
         os.getenv("SIGNAL_ENGINE_OPS_WEBHOOK_URL", "").strip()
         or os.getenv("OPS_WEBHOOK_URL", "").strip()
+        or os.getenv("DISCORD_WEBHOOK_URL", "").strip()
     )
+
+
+def _is_discord_webhook_url(url: str) -> bool:
+    text = str(url or "").lower()
+    return "discord.com/api/webhooks/" in text or "discordapp.com/api/webhooks/" in text
+
+
+def _discord_notification_payload(notification: dict[str, Any]) -> dict[str, Any]:
+    payload = notification.get("payload") if isinstance(notification.get("payload"), dict) else {}
+    counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
+    highlights = payload.get("highlights") if isinstance(payload.get("highlights"), list) else []
+    actions = payload.get("recommended_actions") if isinstance(payload.get("recommended_actions"), list) else []
+    level = str(notification.get("level") or "info").lower()
+    colors = {
+        "critical": 0xC0392B,
+        "error": 0xC0392B,
+        "warning": 0xF1C40F,
+        "info": 0x3498DB,
+    }
+    fields = [
+        {
+            "name": "Status",
+            "value": str(notification.get("message") or "Signal Engine ops digest")[:1024],
+            "inline": False,
+        }
+    ]
+    if counts:
+        fields.append(
+            {
+                "name": "Counts",
+                "value": "\n".join(f"{key}: {value}" for key, value in counts.items())[:1024],
+                "inline": True,
+            }
+        )
+    if highlights:
+        fields.append(
+            {
+                "name": "Highlights",
+                "value": "\n".join(f"- {str(item)}" for item in highlights[:6])[:1024],
+                "inline": False,
+            }
+        )
+    if actions:
+        fields.append(
+            {
+                "name": "Actions",
+                "value": "\n".join(f"- {str(item)}" for item in actions[:4])[:1024],
+                "inline": False,
+            }
+        )
+    return {
+        "embeds": [
+            {
+                "title": f"Signal Engine Ops: {str(notification.get('event_type') or 'notification')}",
+                "description": f"Target: {notification.get('target_name') or 'command-center'}",
+                "color": colors.get(level, colors["info"]),
+                "fields": fields,
+                "footer": {
+                    "text": str(notification.get("deployment_sha") or notification.get("notification_id") or "signal-engine")[:2048]
+                },
+            }
+        ]
+    }
+
+
+def _rollout_notification_payload(webhook_url: str, notification: dict[str, Any]) -> dict[str, Any]:
+    if _is_discord_webhook_url(webhook_url):
+        return _discord_notification_payload(notification)
+    return {
+        "event_type": notification["event_type"],
+        "level": notification["level"],
+        "target_name": notification["target_name"],
+        "approval_id": notification["approval_id"],
+        "deployment_service": notification["deployment_service"],
+        "deployment_sha": notification["deployment_sha"],
+        "message": notification["message"],
+        "payload": notification["payload"],
+    }
 
 
 def _approval_matches(
@@ -501,16 +580,7 @@ def _deliver_rollout_notification(notification: dict[str, Any]) -> dict[str, Any
     try:
         response = requests.post(
             webhook_url,
-            json={
-                "event_type": notification["event_type"],
-                "level": notification["level"],
-                "target_name": notification["target_name"],
-                "approval_id": notification["approval_id"],
-                "deployment_service": notification["deployment_service"],
-                "deployment_sha": notification["deployment_sha"],
-                "message": notification["message"],
-                "payload": notification["payload"],
-            },
+            json=_rollout_notification_payload(webhook_url, notification),
             timeout=10,
         )
         response.raise_for_status()
