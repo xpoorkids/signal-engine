@@ -437,7 +437,7 @@ def test_format_discord_surfaces_discovery_thesis_and_paid_visibility():
                 "community_takeover": True,
                 "paid_visibility": True,
             },
-            "dex_scan_reason": "token_boost_latest",
+            "dex_scan_candidate": {"reason": "token_boost_latest"},
         },
     )
 

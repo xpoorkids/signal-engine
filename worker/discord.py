@@ -532,6 +532,7 @@ def _source_label(source: str) -> str:
 def _build_discovery_section(e: Event) -> str:
     extra = e.extra if isinstance(e.extra, dict) else {}
     attention_metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
+    dex_scan_candidate = extra.get("dex_scan_candidate") if isinstance(extra.get("dex_scan_candidate"), dict) else {}
     sources = []
     for source in _list_metric(extra, attention_metrics, "discovery_sources"):
         label = _source_label(source)
@@ -540,7 +541,7 @@ def _build_discovery_section(e: Event) -> str:
 
     community_takeover = _truthy_metric(extra, attention_metrics, "community_takeover")
     paid_visibility = _truthy_metric(extra, attention_metrics, "paid_visibility")
-    scan_reason = _clean_text(str(extra.get("dex_scan_reason") or attention_metrics.get("dex_scan_reason") or ""))
+    scan_reason = _clean_text(str(extra.get("dex_scan_reason") or attention_metrics.get("dex_scan_reason") or dex_scan_candidate.get("reason") or ""))
 
     lines: list[str] = []
     if sources:
