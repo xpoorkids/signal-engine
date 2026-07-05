@@ -1857,20 +1857,21 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 extra["candidate_improved"] = improved
                 extra["candidate_improved_keys"] = improved_keys
                 extra["candidate_message_id"] = message_id
-                _record_decision(
-                    e,
-                    stage="candidate",
-                    decision="candidate_ready" if should_send else "candidate_buffered",
-                    action_taken="emit" if should_send else "hold",
-                    reasons=improved_keys if improved_keys else [],
-                    attention_score=attention_score,
-                    risk_score=risk_score,
-                    confidence_score=e.confidence,
-                    creator_score=creator_score_value,
-                    lifecycle=lifecycle,
-                    policy_name=candidate_policy.get("policy_name"),
-                    policy_version=candidate_policy.get("policy_version"),
-                )
+                if send_eligible and allow_rate:
+                    _record_decision(
+                        e,
+                        stage="candidate",
+                        decision="candidate_ready" if should_send else "candidate_buffered",
+                        action_taken="emit" if should_send else "hold",
+                        reasons=improved_keys if improved_keys else [],
+                        attention_score=attention_score,
+                        risk_score=risk_score,
+                        confidence_score=e.confidence,
+                        creator_score=creator_score_value,
+                        lifecycle=lifecycle,
+                        policy_name=candidate_policy.get("policy_name"),
+                        policy_version=candidate_policy.get("policy_version"),
+                    )
                 logger.info(
                     "[candidate-progress] token=%s improved=%s keys=%s confirmations=%s send_reasons=%s route_tier=%s route_blockers=%s",
                     e.token,
