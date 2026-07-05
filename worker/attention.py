@@ -480,6 +480,9 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         "narrative_hits": [],
         "x_tweet_count": 0,
         "x_unique_authors": 0,
+        "x_heavy_author_count": 0,
+        "x_verified_author_count": 0,
+        "x_author_followers": 0,
         "x_likes": 0,
         "unique_wallets_30s": 0,
         "top_wallet_share_30s": 0.0,
@@ -629,6 +632,9 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         if x_data:
             metrics["x_tweet_count"] = int(x_data.get("tweet_count") or 0)
             metrics["x_unique_authors"] = int(x_data.get("unique_authors") or 0)
+            metrics["x_heavy_author_count"] = int(x_data.get("heavy_author_count") or 0)
+            metrics["x_verified_author_count"] = int(x_data.get("verified_author_count") or 0)
+            metrics["x_author_followers"] = int(x_data.get("author_followers") or 0)
             metrics["x_likes"] = int(x_data.get("likes") or 0)
             if metrics["x_tweet_count"] >= policy.x_mentions_threshold:
                 x_score += policy.x_mentions_score
@@ -636,10 +642,18 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
                 x_score += policy.x_authors_score
             if metrics["x_likes"] >= policy.x_likes_threshold:
                 x_score += policy.x_likes_score
+            if metrics["x_heavy_author_count"] > 0:
+                x_score += policy.x_authors_score
+            if metrics["x_verified_author_count"] >= 2 or metrics["x_author_followers"] >= 50_000:
+                x_score += policy.x_likes_score
             if x_score > 0:
                 _append_reason(
                     reasons,
-                    f"X momentum: {metrics['x_tweet_count']} mentions / {metrics['x_unique_authors']} authors",
+                    (
+                        f"X momentum: {metrics['x_tweet_count']} mentions / "
+                        f"{metrics['x_unique_authors']} authors / "
+                        f"{metrics['x_heavy_author_count']} heavy"
+                    ),
                 )
         else:
             _append_reason(reasons, "source_unavailable:x")

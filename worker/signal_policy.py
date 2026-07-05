@@ -607,6 +607,9 @@ def candidate_confirmation_signals(
     kol_hits = int(metrics.get("kol_wallet_hits") or 0)
     x_mentions = int(metrics.get("x_tweet_count") or 0)
     x_authors = int(metrics.get("x_unique_authors") or 0)
+    x_heavy_authors = int(metrics.get("x_heavy_author_count") or 0)
+    x_verified_authors = int(metrics.get("x_verified_author_count") or 0)
+    x_author_followers = int(metrics.get("x_author_followers") or 0)
     narrative_hits = metrics.get("narrative_hits") if isinstance(metrics.get("narrative_hits"), list) else []
     top_wallet_share = float(metrics.get("top_wallet_share_30s") or 0.0)
     unique_wallets_30s = int(metrics.get("unique_wallets_30s") or 0)
@@ -626,6 +629,10 @@ def candidate_confirmation_signals(
         and x_authors >= policy.social_support_min_authors
     ):
         confirmations.append("social_support")
+    if x_heavy_authors > 0:
+        confirmations.append("heavy_x_support")
+    if x_verified_authors >= 2 or x_author_followers >= 50_000:
+        confirmations.append("credible_x_reach")
     if narrative_hits:
         confirmations.append("narrative_alignment")
 
@@ -900,12 +907,17 @@ def adversarial_signal_flags(
 
     x_mentions = int(payload.get("x_tweet_count") or 0)
     x_authors = int(payload.get("x_unique_authors") or 0)
+    x_heavy_authors = int(payload.get("x_heavy_author_count") or 0)
+    x_verified_authors = int(payload.get("x_verified_author_count") or 0)
+    x_author_followers = int(payload.get("x_author_followers") or 0)
+    credible_social_support = x_heavy_authors > 0 or x_verified_authors >= 2 or x_author_followers >= 50_000
     min_social_mentions = int(social_min_mentions or 0)
     if (
         x_mentions >= min_social_mentions > 0
         and social_min_author_ratio is not None
         and (float(x_authors) / float(x_mentions)) < social_min_author_ratio
         and not trusted_wallet_support
+        and not credible_social_support
     ):
         flags.append("social_echo_chamber")
 
@@ -956,9 +968,9 @@ def candidate_send_reasons(
     confirmation_set = set(confirmations)
     if payload.get("wallet_guard_watch_only"):
         reasons.append("wallet_guard_watch_only")
-    hard_quality_confirmed = bool({"tracked_wallet_flow", "market_support"} & confirmation_set)
+    hard_quality_confirmed = bool({"tracked_wallet_flow", "market_support", "heavy_x_support"} & confirmation_set)
     soft_quality_confirmed = bool(
-        {"kol_wallet_flow", "social_support", "narrative_alignment"} & confirmation_set
+        {"kol_wallet_flow", "social_support", "credible_x_reach", "narrative_alignment"} & confirmation_set
     )
     flow_strength_confirmed = {"buyer_breadth", "burst_strength"}.issubset(confirmation_set)
     route_fast_lane = route_tier == "sniper" or (route_tier == "heating_up" and route_confidence >= 0.75)

@@ -20,6 +20,21 @@ def _search_queries() -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _external_seed_tokens() -> list[str]:
+    raw = os.getenv("SIGNAL_ENGINE_EXTERNAL_SEED_TOKENS", "").strip()
+    if not raw:
+        return []
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for item in raw.replace("\n", ",").split(","):
+        token = item.strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+    return tokens
+
+
 def _solana_token_addresses(items: Iterable[dict]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -91,6 +106,28 @@ def _fetch_profile_pairs() -> list[dict]:
     return pairs
 
 
+def _fetch_external_seed_pairs() -> list[dict]:
+    tokens = _external_seed_tokens()
+    pairs: list[dict] = []
+    seen_pairs: set[str] = set()
+    for start in range(0, len(tokens), 30):
+        batch = tokens[start : start + 30]
+        if not batch:
+            continue
+        data = _fetch_json(DEX_TOKEN_BATCH_URL.format(tokens=",".join(batch)))
+        for pair in data.get("pairs", []) if isinstance(data, dict) else []:
+            if not isinstance(pair, dict):
+                continue
+            pair_key = str(pair.get("pairAddress") or "")
+            if pair_key and pair_key in seen_pairs:
+                continue
+            if pair_key:
+                seen_pairs.add(pair_key)
+            pair["signal_engine_source"] = "external_seed"
+            pairs.append(pair)
+    return pairs
+
+
 def fetch_solana_pairs():
     pairs = []
     try:
@@ -101,5 +138,9 @@ def fetch_solana_pairs():
         pairs.extend(_fetch_profile_pairs())
     except Exception as exc:
         print(f"[dex] profile fetch failed: {type(exc).__name__}: {exc}", flush=True)
+    try:
+        pairs.extend(_fetch_external_seed_pairs())
+    except Exception as exc:
+        print(f"[dex] external seed fetch failed: {type(exc).__name__}: {exc}", flush=True)
     print(f"[dex] fetched {len(pairs)} pairs", flush=True)
     return pairs

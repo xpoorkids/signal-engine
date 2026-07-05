@@ -1,4 +1,5 @@
 from worker.dex import summarize_pair
+from app.services import dex_service
 
 
 def test_summarize_pair_preserves_h24_volume_and_transactions():
@@ -24,3 +25,29 @@ def test_summarize_pair_preserves_h24_volume_and_transactions():
     assert summary["volume_h6"] == 50000
     assert summary["txns_h1_buys"] == 80
     assert summary["txns_h24_sells"] == 500
+
+
+def test_external_seed_pairs_fetches_configured_tokens(monkeypatch):
+    monkeypatch.setenv(
+        "SIGNAL_ENGINE_EXTERNAL_SEED_TOKENS",
+        "token-a, token-b, token-a",
+    )
+    fetched_urls = []
+
+    def fake_fetch_json(url: str):
+        fetched_urls.append(url)
+        return {
+            "pairs": [
+                {"chainId": "solana", "pairAddress": "pair-a"},
+                {"chainId": "solana", "pairAddress": "pair-a"},
+                {"chainId": "solana", "pairAddress": "pair-b"},
+            ]
+        }
+
+    monkeypatch.setattr(dex_service, "_fetch_json", fake_fetch_json)
+
+    pairs = dex_service._fetch_external_seed_pairs()
+
+    assert "token-a,token-b" in fetched_urls[0]
+    assert [item["pairAddress"] for item in pairs] == ["pair-a", "pair-b"]
+    assert all(item["signal_engine_source"] == "external_seed" for item in pairs)

@@ -159,6 +159,8 @@ KOL_WALLETS = set(env_csv("KOL_WALLETS"))
 NARRATIVE_KEYWORDS = [item.lower() for item in env_csv("NARRATIVE_KEYWORDS")]
 X_QUERY_TEMPLATE = os.getenv("X_QUERY_TEMPLATE", '"{name}" OR "${symbol}" -is:retweet -is:reply lang:en').strip()
 X_SEARCH_MAX_RESULTS = int(os.getenv("X_SEARCH_MAX_RESULTS", "10"))
+X_HEAVY_HANDLES = {item.lower().lstrip("@") for item in env_csv("X_HEAVY_HANDLES")}
+X_HEAVY_AUTHOR_IDS = set(env_csv("X_HEAVY_AUTHOR_IDS"))
 
 # Dedupe / cooldown
 EARLY_DEDUPE_TTL_SEC = int(os.getenv("EARLY_DEDUPE_TTL_SEC", "600"))

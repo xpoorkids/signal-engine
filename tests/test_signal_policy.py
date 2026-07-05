@@ -283,6 +283,51 @@ def test_candidate_send_reasons_reject_social_echo_chamber_without_trusted_flow(
     assert "social_echo_chamber" in reasons
 
 
+def test_candidate_confirmation_signals_include_heavy_x_support():
+    reasons, confirmations = candidate_confirmation_signals(
+        attention_score=0.40,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 2,
+                "burst_count_60s": 3,
+                "x_tweet_count": 2,
+                "x_unique_authors": 2,
+                "x_heavy_author_count": 1,
+                "x_verified_author_count": 2,
+                "x_author_followers": 75000,
+            }
+        },
+        dex_summary={"liquidity_usd": 8000.0, "txns_m5_buys": 4},
+    )
+
+    assert "heavy_x_support" in confirmations
+    assert "credible_x_reach" in confirmations
+    assert "confirmation_signals<2" not in reasons
+
+
+def test_heavy_x_support_is_not_social_echo_chamber():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.62,
+        creator_score=0.60,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 4,
+                "burst_count_60s": 8,
+                "x_tweet_count": 12,
+                "x_unique_authors": 2,
+                "x_heavy_author_count": 1,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={"liquidity_usd": 18000.0, "txns_m5_buys": 10, "txns_m5_sells": 4},
+    )
+
+    assert eligible is True
+    assert "heavy_x_support" in confirmations
+    assert "social_echo_chamber" not in reasons
+
+
 def test_entry_quality_profile_marks_extended_chase_without_breadth():
     profile = entry_quality_profile(
         metrics={
