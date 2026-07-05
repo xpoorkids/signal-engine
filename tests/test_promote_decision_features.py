@@ -54,6 +54,11 @@ def test_record_decision_persists_tradeability_and_ev_features(tmp_path, monkeyp
                 "max_price_impact_pct": 0.9,
                 "reasons": ["ev_gate_passed"],
             },
+            "candidate_send_eligible": True,
+            "candidate_send": False,
+            "candidate_rate_limit_allowed": False,
+            "candidate_rate_limit_checked": True,
+            "candidate_progression_ok": True,
             "wallet_cluster_review": {
                 "verdict": "coordinated_accumulation",
                 "score": 43,
@@ -99,6 +104,11 @@ def test_record_decision_persists_tradeability_and_ev_features(tmp_path, monkeyp
     assert features["wallet_cluster_metrics"]["top_holder_pct"] == 0.36
     assert features["candidate_ev_approved"] is True
     assert features["candidate_ev_net_edge_bps"] == 640.0
+    assert features["candidate_send_eligible"] is True
+    assert features["candidate_send_final"] is False
+    assert features["candidate_rate_limit_allowed"] is False
+    assert features["candidate_rate_limit_checked"] is True
+    assert features["candidate_progression_ok"] is True
 
 
 def test_wallet_cluster_constructive_single_holder_can_enter_observe_review():

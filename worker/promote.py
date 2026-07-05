@@ -780,10 +780,12 @@ def _record_decision(
         "community_takeover": attention_metrics.get("community_takeover"),
         "paid_visibility": attention_metrics.get("paid_visibility"),
         "dex_scan_reason": (extra.get("dex_scan_candidate") or {}).get("reason") if isinstance(extra.get("dex_scan_candidate"), dict) else None,
-        "candidate_send_eligible": extra.get("candidate_send"),
+        "candidate_send_eligible": extra.get("candidate_send_eligible"),
+        "candidate_send_final": extra.get("candidate_send"),
         "candidate_edit": extra.get("candidate_edit"),
         "candidate_improved": extra.get("candidate_improved"),
         "candidate_rate_limit_allowed": extra.get("candidate_rate_limit_allowed"),
+        "candidate_rate_limit_checked": extra.get("candidate_rate_limit_checked"),
         "candidate_progression_ok": extra.get("candidate_progression_ok"),
         "wallet_guard_category": extra.get("wallet_guard_category"),
         "wallet_guard_watch_only": bool(extra.get("wallet_guard_watch_only")),
@@ -1790,33 +1792,14 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                         candidate_ev.get("cost_bps"),
                         candidate_ev.get("reasons") or [],
                     )
-                allow_rate = allow_candidate_rate_limit(max(1, EARLY_WATCH_RATE_LIMIT_PER_HOUR)) if send_eligible else False
+                extra["candidate_send_eligible"] = send_eligible
+                extra["candidate_rate_limit_checked"] = bool(send_eligible)
+                allow_rate = allow_candidate_rate_limit(max(1, EARLY_WATCH_RATE_LIMIT_PER_HOUR)) if send_eligible else True
                 should_send = send_eligible and allow_rate
                 extra["candidate_rate_limit_allowed"] = allow_rate
                 extra["candidate_confirmation_signals"] = confirmation_signals
                 extra["candidate_send_reasons"] = send_reasons
-                if not allow_rate:
-                    if send_eligible:
-                        logger.info(
-                            "[pre-candidate-skip] token=%s sniper_conditions_met=%s",
-                            e.token,
-                            sniper_conditions_met,
-                        )
-                        logger.info("[candidate-skip] reason=rate_limited token=%s", e.token)
-                        _record_decision(
-                            e,
-                            stage="candidate",
-                            decision="candidate_rate_limited",
-                            reasons=["rate_limited"],
-                            attention_score=attention_score,
-                            risk_score=risk_score,
-                            confidence_score=e.confidence,
-                            creator_score=creator_score_value,
-                            lifecycle=lifecycle,
-                            policy_name=candidate_policy.get("policy_name"),
-                            policy_version=candidate_policy.get("policy_version"),
-                        )
-                elif not send_eligible:
+                if not send_eligible:
                     logger.info(
                         "[pre-candidate-skip] token=%s sniper_conditions_met=%s",
                         e.token,
@@ -1833,6 +1816,26 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                         stage="candidate",
                         decision="candidate_not_eligible",
                         reasons=send_reasons or ["no_creator_or_attention"],
+                        attention_score=attention_score,
+                        risk_score=risk_score,
+                        confidence_score=e.confidence,
+                        creator_score=creator_score_value,
+                        lifecycle=lifecycle,
+                        policy_name=candidate_policy.get("policy_name"),
+                        policy_version=candidate_policy.get("policy_version"),
+                    )
+                elif not allow_rate:
+                    logger.info(
+                        "[pre-candidate-skip] token=%s sniper_conditions_met=%s",
+                        e.token,
+                        sniper_conditions_met,
+                    )
+                    logger.info("[candidate-skip] reason=rate_limited token=%s", e.token)
+                    _record_decision(
+                        e,
+                        stage="candidate",
+                        decision="candidate_rate_limited",
+                        reasons=["rate_limited"],
                         attention_score=attention_score,
                         risk_score=risk_score,
                         confidence_score=e.confidence,
