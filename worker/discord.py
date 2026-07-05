@@ -471,12 +471,89 @@ def _build_social_section(e: Event) -> str:
     x_mentions = attention_metrics.get("x_tweet_count")
     x_authors = attention_metrics.get("x_unique_authors")
     x_likes = attention_metrics.get("x_likes")
+    heavy_authors = _int_metric(attention_metrics.get("x_heavy_author_count"))
+    verified_authors = _int_metric(attention_metrics.get("x_verified_author_count"))
     lines = []
     if x_mentions is not None and x_authors is not None and (x_mentions or x_authors):
         lines.append(f"- X Momentum: `{x_mentions} mentions / {x_authors} authors`")
+    if heavy_authors or verified_authors:
+        lines.append(f"- X Authority: `{heavy_authors} heavy / {verified_authors} verified`")
     if x_likes:
         lines.append(f"- X Engagement: `{x_likes} likes`")
     return "\n".join(lines[:3])
+
+
+def _int_metric(value: object) -> int:
+    try:
+        return int(float(value or 0))
+    except Exception:
+        return 0
+
+
+def _bool_value(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def _truthy_metric(extra: dict, attention_metrics: dict, key: str) -> bool:
+    if key in extra:
+        return _bool_value(extra.get(key))
+    return _bool_value(attention_metrics.get(key))
+
+
+def _list_metric(extra: dict, attention_metrics: dict, key: str) -> list[str]:
+    raw = extra.get(key)
+    if raw is None:
+        raw = attention_metrics.get(key)
+    if isinstance(raw, list):
+        return [_clean_text(str(item)) for item in raw if _clean_text(str(item))]
+    if isinstance(raw, str) and raw.strip():
+        return [_clean_text(part) for part in raw.split(",") if _clean_text(part)]
+    return []
+
+
+def _source_label(source: str) -> str:
+    mapping = {
+        "community_takeover": "community takeover",
+        "dex_boost_active": "active DEX boost",
+        "external_seed": "external seed",
+        "paid_ad": "paid ad",
+        "token_boost_latest": "fresh token boost",
+        "token_boost_top": "top token boost",
+        "token_profile": "token profile",
+    }
+    key = _clean_text(source).lower()
+    return mapping.get(key, key.replace("_", " ") if key else "")
+
+
+def _build_discovery_section(e: Event) -> str:
+    extra = e.extra if isinstance(e.extra, dict) else {}
+    attention_metrics = extra.get("attention_metrics") if isinstance(extra.get("attention_metrics"), dict) else {}
+    sources = []
+    for source in _list_metric(extra, attention_metrics, "discovery_sources"):
+        label = _source_label(source)
+        if label and label not in sources:
+            sources.append(label)
+
+    community_takeover = _truthy_metric(extra, attention_metrics, "community_takeover")
+    paid_visibility = _truthy_metric(extra, attention_metrics, "paid_visibility")
+    scan_reason = _clean_text(str(extra.get("dex_scan_reason") or attention_metrics.get("dex_scan_reason") or ""))
+
+    lines: list[str] = []
+    if sources:
+        lines.append(f"- Source Stack: `{', '.join(sources[:4])}`")
+    if community_takeover:
+        lines.append("- Thesis: `community takeover signal`")
+    if scan_reason:
+        lines.append(f"- Scanner Trigger: `{scan_reason.replace('_', ' ')}`")
+    if paid_visibility:
+        lines.append("- Visibility: `paid/boosted - require real flow confirmation`")
+    elif sources or community_takeover:
+        lines.append("- Visibility: `organic or unpromoted`")
+    return "\n".join(lines[:4])
 
 
 def _build_intelligence_section(e: Event) -> str:
@@ -493,6 +570,9 @@ def _build_intelligence_section(e: Event) -> str:
     boosts = int(attention_metrics.get("dexscreener_boosts_count") or 0)
     x_mentions = int(attention_metrics.get("x_tweet_count") or 0)
     x_authors = int(attention_metrics.get("x_unique_authors") or 0)
+    heavy_authors = _int_metric(attention_metrics.get("x_heavy_author_count"))
+    verified_authors = _int_metric(attention_metrics.get("x_verified_author_count"))
+    author_followers = _int_metric(attention_metrics.get("x_author_followers"))
     narrative_hits = attention_metrics.get("narrative_hits") if isinstance(attention_metrics.get("narrative_hits"), list) else []
 
     metric_reason_prefixes: list[str] = []
@@ -529,6 +609,11 @@ def _build_intelligence_section(e: Event) -> str:
         lines.append(f"- DexScreener boost activity: `{boosts}`")
     if x_mentions or x_authors:
         lines.append(f"- X momentum: `{x_mentions} mentions / {x_authors} authors`")
+    if heavy_authors or verified_authors:
+        authority = f"{heavy_authors} heavy / {verified_authors} verified"
+        if author_followers:
+            authority = f"{authority} / {_fmt_num(author_followers)} followers"
+        lines.append(f"- X authority: `{authority}`")
     if narrative_hits:
         narrative = ", ".join(_clean_text(str(item)) for item in narrative_hits[:2] if str(item).strip())
         if narrative:
@@ -726,6 +811,13 @@ def _trigger_field(e: Event) -> dict | None:
     if not value or value == "- flow + structure":
         return None
     return {"name": "Signal Intelligence", "value": _section_lines([value]), "inline": False}
+
+
+def _discovery_field(e: Event) -> dict | None:
+    value = _build_discovery_section(e)
+    if not value:
+        return None
+    return {"name": "Discovery Thesis", "value": _section_lines([value]), "inline": False}
 
 
 def _social_field(e: Event) -> dict | None:
@@ -1165,6 +1257,7 @@ def _format_candidate_like(e: Event, description: str) -> dict:
                 "value": _section_lines([_build_quality_section(e, metrics, vm.risk_score, vm.confidence_score)]),
                 "inline": True,
             },
+            _discovery_field(e),
             _trigger_field(e),
             _links_field(token, metrics),
             _operator_brief_field(
@@ -1238,6 +1331,7 @@ def format_discord(e: Event) -> dict:
                     "value": _section_lines([_build_quality_section(e, metrics, vm.risk_score, vm.confidence_score)]),
                     "inline": True,
                 },
+                _discovery_field(e),
                 _trigger_field(e),
                 {"name": "Why Promoted", "value": _section_lines([f"- {_pretty_reason(r)}" for r in reasons]), "inline": False} if reasons else None,
                 _links_field(token, metrics),

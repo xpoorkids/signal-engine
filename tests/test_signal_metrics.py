@@ -415,6 +415,76 @@ def test_signal_intelligence_deduplicates_metric_reasons():
     assert sum("DexScreener boost activity:" in line for line in lines) == 1
 
 
+def test_format_discord_surfaces_discovery_thesis_and_paid_visibility():
+    event = Event(
+        type="candidate",
+        source="test",
+        token="So11111111111111111111111111111111111111112",
+        confidence=0.67,
+        reasons=["curated_discovery_watch"],
+        extra={
+            "symbol": "SOURCE",
+            "name": "Source Token",
+            "lifecycle": "dex",
+            "risk_score": 0.33,
+            "attention_score": 0.71,
+            "metric_states": {
+                "risk_score": metric_state(0.33, status="computed"),
+                "attention_score": metric_state(0.71, status="computed"),
+            },
+            "attention_metrics": {
+                "discovery_sources": ["external_seed", "community_takeover", "paid_ad"],
+                "community_takeover": True,
+                "paid_visibility": True,
+            },
+            "dex_scan_reason": "token_boost_latest",
+        },
+    )
+
+    embed = format_discord(event)["embeds"][0]
+    discovery = _candidate_field(embed, "Discovery Thesis")
+
+    assert "external seed" in discovery
+    assert "community takeover" in discovery
+    assert "paid ad" in discovery
+    assert "community takeover signal" in discovery
+    assert "token boost latest" in discovery
+    assert "paid/boosted - require real flow confirmation" in discovery
+
+
+def test_format_discord_surfaces_heavy_x_authority():
+    event = Event(
+        type="candidate",
+        source="test",
+        token="So11111111111111111111111111111111111111112",
+        confidence=0.69,
+        extra={
+            "symbol": "XAUTH",
+            "name": "X Authority",
+            "lifecycle": "dex",
+            "risk_score": 0.29,
+            "attention_score": 0.76,
+            "metric_states": {
+                "risk_score": metric_state(0.29, status="computed"),
+                "attention_score": metric_state(0.76, status="computed"),
+            },
+            "attention_metrics": {
+                "x_tweet_count": 18,
+                "x_unique_authors": 10,
+                "x_heavy_author_count": 3,
+                "x_verified_author_count": 2,
+                "x_author_followers": 125000,
+            },
+        },
+    )
+
+    intelligence = _candidate_field(format_discord(event)["embeds"][0], "Signal Intelligence")
+
+    assert "X momentum:" in intelligence
+    assert "X authority:" in intelligence
+    assert "3 heavy / 2 verified / 125,000 followers" in intelligence
+
+
 def test_embed_field_count_stays_within_limits():
     event = Event(
         type="promoted",
