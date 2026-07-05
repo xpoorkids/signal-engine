@@ -224,18 +224,28 @@ from worker.config import (
     HELIUS_API_KEY,
     HELIUS_WS_URL,
     HELIUS_RPC_URL,
+    ENABLE_BIRDEYE,
+    ENABLE_PUMPORTAL,
+    ENABLE_X_SIGNAL,
+    BIRDEYE_API_KEY,
+    X_BEARER_TOKEN,
+    X_HEAVY_HANDLES,
+    X_HEAVY_AUTHOR_IDS,
+    JUPITER_API_KEY,
+    TRADE_VALIDATION_ENABLED,
     EARLY_WATCH_RATE_LIMIT_PER_HOUR,
 )
 from worker.state import EngineState, is_sig_new, can_alert
 from worker.events import Event
 from worker.promote import process_event
-from worker.discord import send_discord, send_candidate_discord
+from worker.discord import send_discord, send_candidate_discord, get_discord_delivery_health
 from worker.helius_listener import start_helius_listeners
 import worker.helius_listener as helius_listener
 from worker.shadow_executor import maybe_open_shadow_position, shadow_monitor_worker
 from worker.signal_policy import heating_delivery_decision
 import worker.scanner as scanner
 from app.services.scan_service import process_scan
+from app.services.dex_service import get_dex_source_health
 from app.services.state_service import get_candidate_rate_limit_state, record_wallet_signal, init as state_init
 from app.services.db_service import resolve_engine_db_path
 from app.services.signal_learning_service import (
@@ -247,6 +257,7 @@ from app.services.signal_learning_service import (
 )
 from app.services.tuning_service import ops_digest_worker, rollout_verification_worker
 from app.services.structured_logging import log_event
+from worker.x_signal import get_x_signal_health
 
 _TASKS: dict[str, asyncio.Task] = {}
 _QUEUE: asyncio.Queue | None = None
@@ -289,6 +300,15 @@ def _worker_health_metadata() -> dict[str, Any]:
         "helius_api_key_configured": bool(HELIUS_API_KEY),
         "helius_ws_configured": bool(HELIUS_WS_URL),
         "helius_rpc_configured": bool(HELIUS_RPC_URL or os.getenv("HELIUS_HTTPS_RPC_URL")),
+        "birdeye_enabled": ENABLE_BIRDEYE,
+        "birdeye_api_key_configured": bool(BIRDEYE_API_KEY),
+        "pumpportal_enabled": ENABLE_PUMPORTAL,
+        "x_signal_enabled": ENABLE_X_SIGNAL,
+        "x_bearer_configured": bool(X_BEARER_TOKEN),
+        "x_heavy_handles_count": len(X_HEAVY_HANDLES),
+        "x_heavy_author_ids_count": len(X_HEAVY_AUTHOR_IDS),
+        "jupiter_api_key_configured": bool(JUPITER_API_KEY),
+        "trade_validation_enabled": TRADE_VALIDATION_ENABLED,
         "queue_size": _QUEUE.qsize() if _QUEUE is not None else None,
         "queue_max_size": _QUEUE.maxsize if _QUEUE is not None else None,
         "candidate_rate_limit_per_hour": EARLY_WATCH_RATE_LIMIT_PER_HOUR,
@@ -300,6 +320,9 @@ def _worker_health_metadata() -> dict[str, Any]:
             "scanner_last_scan_age_seconds": round(now - scan_last_ts, 1) if scan_last_ts else None,
             "scanner_last_candidate_count": getattr(scanner, "LAST_SCAN_COUNT", None),
             "scanner_last_error": getattr(scanner, "LAST_SCAN_ERROR", None),
+            "dex_source_health": get_dex_source_health(),
+            "x_signal_health": get_x_signal_health(),
+            "discord_delivery_health": get_discord_delivery_health(),
         },
     }
     return metadata
@@ -526,6 +549,7 @@ async def dex_scan_loop(q: asyncio.Queue) -> None:
             scanner.LAST_SCAN_COUNT = len(hits)
             scanner.LAST_SCAN_ERROR = None
             log_event(logger, logging.INFO, "dex-scan", candidates=len(hits))
+            dex_health = get_dex_source_health()
             for candidate in hits:
                 token = str(candidate.get("token") or "").strip()
                 if not token:
@@ -536,6 +560,7 @@ async def dex_scan_loop(q: asyncio.Queue) -> None:
                     continue
                 _DEX_SCAN_LAST_EMIT[token] = now
                 metrics = candidate.get("metrics") if isinstance(candidate.get("metrics"), dict) else {}
+                metrics = {**metrics, "dex_source_health": dex_health}
                 await q.put(
                     Event(
                         type="token_resolved",

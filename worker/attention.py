@@ -489,6 +489,16 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         "discovery_sources": [],
         "community_takeover": False,
         "paid_visibility": False,
+        "paid_visibility_class": "unknown",
+        "source_stability": "unknown",
+        "independent_flow_confirmed": False,
+        "dex_scan_repeat_count": 0,
+        "dex_scan_momentum_slope": 0.0,
+        "dex_scan_persistent": False,
+        "x_query_attempted": False,
+        "x_query_reason": "",
+        "x_signal_available": False,
+        "dex_source_health": {},
     }
 
     token = getattr(e, "token", None)
@@ -499,6 +509,24 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
             metrics["discovery_sources"] = [str(item) for item in seed_metrics.get("discovery_sources") if str(item or "")]
         metrics["community_takeover"] = bool(seed_metrics.get("community_takeover"))
         metrics["paid_visibility"] = bool(seed_metrics.get("paid_visibility"))
+        metrics["paid_visibility_class"] = str(seed_metrics.get("paid_visibility_class") or "unknown")
+        metrics["source_stability"] = str(seed_metrics.get("source_stability") or "unknown")
+        metrics["independent_flow_confirmed"] = bool(seed_metrics.get("independent_flow_confirmed"))
+        if isinstance(seed_metrics.get("dex_source_health"), dict):
+            metrics["dex_source_health"] = seed_metrics.get("dex_source_health") or {}
+        for key in (
+            "dex_scan_repeat_count",
+            "dex_scan_momentum_slope",
+            "dex_scan_first_seen_age_seconds",
+            "dex_scan_minutes_since_previous",
+            "dex_scan_volume_delta_5m",
+            "dex_scan_liquidity_delta_pct",
+            "sells_5m",
+            "sell_ratio_5m",
+        ):
+            if key in seed_metrics:
+                metrics[key] = seed_metrics.get(key)
+        metrics["dex_scan_persistent"] = bool(seed_metrics.get("dex_scan_persistent"))
 
     # Local burst metrics (stub; state may implement)
     try:
@@ -551,6 +579,10 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         _append_reason(reasons, f"1m burst strength: {burst_60s}")
     if buyers_15m >= policy.buyer_breadth_15m_reason_min:
         _append_reason(reasons, f"15m buyer breadth: {buyers_15m}")
+    if metrics.get("independent_flow_confirmed"):
+        _append_reason(reasons, "DEX independent flow confirmed")
+    if metrics.get("dex_scan_persistent"):
+        _append_reason(reasons, f"DEX repeat seen: {metrics.get('dex_scan_repeat_count')}")
 
     # DexScreener boosts/orders
     dex_boost = 0.0
@@ -614,24 +646,32 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         _append_reason(reasons, f"Narrative alignment: {', '.join(hits[:2])}")
 
     x_score = 0.0
-    should_query_x = (
-        ENABLE_X_SIGNAL
-        and token
+    x_query_reason = ""
+    if tracked_score > 0.0:
+        x_query_reason = "tracked_wallet"
+    elif dex_boost > 0.0 and local >= policy.x_local_gate_with_boost:
+        x_query_reason = "dex_boost_with_local_flow"
+    elif metrics.get("community_takeover") or metrics.get("paid_visibility"):
+        x_query_reason = "curated_or_paid_discovery"
+    elif metrics.get("independent_flow_confirmed") or metrics.get("dex_scan_persistent"):
+        x_query_reason = "dex_flow_or_repeat_seen"
+    elif narrative_score > 0.0 and local >= policy.x_local_gate_with_boost:
+        x_query_reason = "narrative_with_local_flow"
+    elif birdeye_score > 0.0 and local >= policy.x_local_gate_with_birdeye:
+        x_query_reason = "birdeye_with_local_flow"
+    elif pumpportal_score > 0.0:
+        x_query_reason = "pumpportal_flow"
+    elif (
+        local >= policy.x_local_gate_strong
         and (
-            tracked_score > 0.0
-            or (dex_boost > 0.0 and local >= policy.x_local_gate_with_boost)
-            or (narrative_score > 0.0 and local >= policy.x_local_gate_with_boost)
-            or (birdeye_score > 0.0 and local >= policy.x_local_gate_with_birdeye)
-            or pumpportal_score > 0.0
-            or (
-                local >= policy.x_local_gate_strong
-                and (
-                    buyers_5m >= policy.x_query_min_buyers_5m
-                    or burst_60s >= policy.x_query_min_burst_60s
-                )
-            )
+            buyers_5m >= policy.x_query_min_buyers_5m
+            or burst_60s >= policy.x_query_min_burst_60s
         )
-    )
+    ):
+        x_query_reason = "strong_local_flow"
+    should_query_x = bool(ENABLE_X_SIGNAL and token and x_query_reason)
+    metrics["x_query_attempted"] = should_query_x
+    metrics["x_query_reason"] = x_query_reason if should_query_x else ("disabled_or_no_trigger" if not ENABLE_X_SIGNAL else "no_trigger")
     if should_query_x:
         extra = getattr(e, "extra", {}) if hasattr(e, "extra") else {}
         x_data = fetch_x_signal(
@@ -640,6 +680,7 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
             str((extra or {}).get("name") or ""),
         )
         if x_data:
+            metrics["x_signal_available"] = True
             metrics["x_tweet_count"] = int(x_data.get("tweet_count") or 0)
             metrics["x_unique_authors"] = int(x_data.get("unique_authors") or 0)
             metrics["x_heavy_author_count"] = int(x_data.get("heavy_author_count") or 0)

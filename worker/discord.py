@@ -1,6 +1,7 @@
 ﻿import json
 import requests
 import os
+import time
 from dataclasses import dataclass
 
 import logging
@@ -30,6 +31,20 @@ AMBER = 0xF4C430
 DARK_RED = 0xC0392B
 SLATE = 0x203040
 logger = logging.getLogger(__name__)
+_LAST_DELIVERY_HEALTH: dict[str, dict] = {
+    "main": {},
+    "candidate": {},
+}
+
+
+def get_discord_delivery_health() -> dict[str, dict]:
+    return {key: dict(value) for key, value in _LAST_DELIVERY_HEALTH.items()}
+
+
+def _record_delivery_health(channel: str, **values) -> None:
+    item = _LAST_DELIVERY_HEALTH.setdefault(channel, {})
+    item.update(values)
+    item["last_updated_ts"] = time.time()
 
 
 @dataclass
@@ -1364,8 +1379,10 @@ def format_discord(e: Event) -> dict:
 
 def send_discord(e: Event) -> bool:
     if not ENABLE_DISCORD:
+        _record_delivery_health("main", success=False, reason="disabled", token=e.token, event_type=e.type)
         return False
     if not DISCORD_WEBHOOK_URL:
+        _record_delivery_health("main", success=False, reason="missing_webhook_url", token=e.token, event_type=e.type)
         log_event(logger, logging.WARNING, "discord-send", type=e.type, token=e.token, success=False, reason="missing_webhook_url")
         return False
 
@@ -1373,6 +1390,7 @@ def send_discord(e: Event) -> bool:
     log_event(logger, logging.INFO, "discord-send-attempt", type=e.type, token=e.token, dry_run=DRY_RUN, webhook_configured=bool(DISCORD_WEBHOOK_URL))
 
     if DRY_RUN:
+        _record_delivery_health("main", success=False, reason="dry_run", token=e.token, event_type=e.type)
         log_event(logger, logging.INFO, "discord-send-skip", type=e.type, token=e.token, reason="dry_run", payload_preview=json.dumps(payload)[:400])
         return False
 
@@ -1380,6 +1398,7 @@ def send_discord(e: Event) -> bool:
         r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=8)
         log_event(logger, logging.INFO, "discord-http", type=e.type, token=e.token, status_code=r.status_code)
         if r.status_code >= 300:
+            _record_delivery_health("main", success=False, status_code=r.status_code, token=e.token, event_type=e.type, error=r.text[:200])
             log_event(
                 logger,
                 logging.WARNING,
@@ -1392,20 +1411,25 @@ def send_discord(e: Event) -> bool:
             )
             return False
         else:
+            _record_delivery_health("main", success=True, status_code=r.status_code, token=e.token, event_type=e.type, error=None)
             log_event(logger, logging.INFO, "discord-send", type=e.type, token=e.token, success=True, status_code=r.status_code)
             return True
     except Exception as ex:
+        _record_delivery_health("main", success=False, token=e.token, event_type=e.type, error_type=type(ex).__name__, error=str(ex)[:240])
         log_event(logger, logging.ERROR, "discord-send", type=e.type, token=e.token, success=False, error_type=type(ex).__name__, error=str(ex))
         return False
 
 
 def send_candidate_discord(e: Event, message_id: str | None = None) -> DeliveryResult:
     if not ENABLE_DISCORD:
+        _record_delivery_health("candidate", success=False, reason="disabled", token=e.token, edited=bool(message_id))
         return DeliveryResult(success=False)
     if not DISCORD_CANDIDATE_WEBHOOK:
+        _record_delivery_health("candidate", success=False, reason="missing_candidate_webhook", token=e.token, edited=bool(message_id))
         log_event(logger, logging.WARNING, "discord-candidate-send", token=e.token, success=False, reason="missing_candidate_webhook")
         return DeliveryResult(success=False)
     if e.type != "candidate":
+        _record_delivery_health("candidate", success=False, reason="not_candidate_event", token=e.token, event_type=e.type)
         return DeliveryResult(success=False)
 
     payload = format_discord(e)
@@ -1420,6 +1444,7 @@ def send_candidate_discord(e: Event, message_id: str | None = None) -> DeliveryR
     )
 
     if DRY_RUN:
+        _record_delivery_health("candidate", success=False, reason="dry_run", token=e.token, edited=bool(message_id))
         log_event(logger, logging.INFO, "discord-candidate-send", token=e.token, success=False, reason="dry_run", payload_preview=json.dumps(payload)[:400])
         return DeliveryResult(success=False)
 
@@ -1431,6 +1456,7 @@ def send_candidate_discord(e: Event, message_id: str | None = None) -> DeliveryR
             url = f"{DISCORD_CANDIDATE_WEBHOOK}?wait=true"
             r = requests.post(url, json=payload, timeout=8)
         if r.status_code >= 300:
+            _record_delivery_health("candidate", success=False, status_code=r.status_code, token=e.token, edited=bool(message_id), error=r.text[:200])
             log_event(
                 logger,
                 logging.WARNING,
@@ -1443,6 +1469,7 @@ def send_candidate_discord(e: Event, message_id: str | None = None) -> DeliveryR
             )
             return DeliveryResult(success=False)
         else:
+            _record_delivery_health("candidate", success=True, status_code=r.status_code, token=e.token, edited=bool(message_id), error=None)
             log_event(
                 logger,
                 logging.INFO,
@@ -1461,6 +1488,7 @@ def send_candidate_discord(e: Event, message_id: str | None = None) -> DeliveryR
                 except Exception:
                     return DeliveryResult(success=True)
     except Exception as ex:
+        _record_delivery_health("candidate", success=False, token=e.token, edited=bool(message_id), error_type=type(ex).__name__, error=str(ex)[:240])
         log_event(
             logger,
             logging.ERROR,

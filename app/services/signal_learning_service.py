@@ -5139,6 +5139,7 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
     reason_scorecards: dict[str, dict[str, Any]] = {}
     reason_daily: dict[tuple[str, str], dict[str, Any]] = {}
     volume_windows: dict[tuple[str, str, str], dict[str, Any]] = {}
+    discovery_source_quality: dict[str, dict[str, Any]] = {}
     feature_coverage_groups: dict[str, dict[str, dict[str, int]]] = {
         "by_stage": {},
         "by_decision": {},
@@ -5308,6 +5309,50 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
         _track_feature_coverage("by_stage", stage or "unknown", features)
         _track_feature_coverage("by_decision", decision or "unknown", features)
         _track_feature_coverage("by_policy_version", policy_key, features)
+        source_key = str(features.get("paid_visibility_class") or "unknown")
+        source_item = discovery_source_quality.setdefault(
+            source_key,
+            {
+                "paid_visibility_class": source_key,
+                "count": 0,
+                "paid_visibility": 0,
+                "community_takeover": 0,
+                "independent_flow_confirmed": 0,
+                "dex_repeat_seen": 0,
+                "x_query_attempted": 0,
+                "x_signal_available": 0,
+                "x_heavy_author_hits": 0,
+                "sent": 0,
+                "skipped": 0,
+                "held": 0,
+                "sample_tokens": [],
+            },
+        )
+        source_item["count"] += 1
+        if bool(features.get("paid_visibility")):
+            source_item["paid_visibility"] += 1
+        if bool(features.get("community_takeover")):
+            source_item["community_takeover"] += 1
+        if bool(features.get("independent_flow_confirmed")):
+            source_item["independent_flow_confirmed"] += 1
+        if bool(features.get("dex_scan_persistent")) or int(features.get("dex_scan_repeat_count") or 0) >= 2:
+            source_item["dex_repeat_seen"] += 1
+        if bool(features.get("x_query_attempted")):
+            source_item["x_query_attempted"] += 1
+        if bool(features.get("x_signal_available")):
+            source_item["x_signal_available"] += 1
+        if int(features.get("x_heavy_author_count") or 0) > 0:
+            source_item["x_heavy_author_hits"] += 1
+        if action_taken == "emit":
+            source_item["sent"] += 1
+        elif action_taken == "hold":
+            source_item["held"] += 1
+        else:
+            source_item["skipped"] += 1
+        samples = source_item["sample_tokens"] if isinstance(source_item.get("sample_tokens"), list) else []
+        if token and token not in samples and len(samples) < 5:
+            samples.append(token)
+        source_item["sample_tokens"] = samples
         counts_by_decision[decision] = counts_by_decision.get(decision, 0) + 1
         action_key = _decision_action_bucket(action_taken, decision)
         counts_by_action[action_key] = counts_by_action.get(action_key, 0) + 1
@@ -5709,6 +5754,10 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
             str(item["reason"]),
         )
     )
+    source_quality_rows = sorted(
+        discovery_source_quality.values(),
+        key=lambda item: (-int(item.get("count") or 0), str(item.get("paid_visibility_class") or "")),
+    )
 
     overall_positive = sum(int(outcome_counts.get(label) or 0) for label in _POSITIVE_OUTCOME_LABELS)
     overall_negative = sum(int(outcome_counts.get(label) or 0) for label in _NEGATIVE_OUTCOME_LABELS)
@@ -5746,6 +5795,7 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
         "session_signal_quality": session_signal_quality[:20],
         "conversion": conversion,
         "volume_windows": volume_window_summary[:20],
+        "discovery_source_quality": source_quality_rows[:20],
         "reason_quality": reason_quality[:25],
         "threshold_guidance": threshold_guidance[:12],
         "reason_trends": reason_trends[:12],
@@ -8177,6 +8227,101 @@ def get_token_review_drilldown(token: str, *, hours: int = 168, limit: int = 25)
         "latest": records[0] if records else None,
         "records": records,
         "shadow_summary": shadow_summary,
+    }
+
+
+def analyze_known_runners(tokens: list[str], *, hours: int = 168, limit_per_token: int = 25) -> dict[str, Any]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        value = str(token or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        cleaned.append(value)
+    items: list[dict[str, Any]] = []
+    summary = {
+        "requested": len(cleaned),
+        "seen": 0,
+        "sent": 0,
+        "blocked_or_skipped": 0,
+        "held": 0,
+        "missing": 0,
+    }
+    blocker_counts: dict[str, int] = {}
+    for token in cleaned:
+        drilldown = get_token_review_drilldown(token, hours=hours, limit=limit_per_token)
+        records = drilldown.get("records") if isinstance(drilldown.get("records"), list) else []
+        latest = drilldown.get("latest") if isinstance(drilldown.get("latest"), dict) else None
+        if not records:
+            summary["missing"] += 1
+            items.append(
+                {
+                    "token": token,
+                    "seen": False,
+                    "status": "missing_from_window",
+                    "recommendation": "seed_or_backfill_for_replay",
+                    "records": [],
+                }
+            )
+            continue
+        summary["seen"] += 1
+        sent = any(bool(record.get("sent_to_discord")) for record in records if isinstance(record, dict))
+        held = any(str(record.get("action_taken") or "").lower() == "hold" for record in records if isinstance(record, dict))
+        reasons: list[str] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            for reason in record.get("decision_reasons") or []:
+                text = str(reason or "")
+                if text:
+                    blocker_counts[text] = blocker_counts.get(text, 0) + 1
+                    if text not in reasons and len(reasons) < 10:
+                        reasons.append(text)
+        if sent:
+            summary["sent"] += 1
+            status = "sent"
+            recommendation = "compare_alert_timing_to_runner_move"
+        elif held:
+            summary["held"] += 1
+            status = "held_or_buffered"
+            recommendation = "inspect_progression_and_recheck_evidence"
+        else:
+            summary["blocked_or_skipped"] += 1
+            status = "blocked_or_skipped"
+            recommendation = "inspect_binding_gate_before_any_threshold_change"
+        features = {}
+        if latest and isinstance(latest.get("key_metrics"), dict):
+            features.update(latest.get("key_metrics") or {})
+        if latest and isinstance(latest.get("entry_quality"), dict):
+            features["entry_quality"] = latest.get("entry_quality")
+        items.append(
+            {
+                "token": token,
+                "seen": True,
+                "status": status,
+                "recommendation": recommendation,
+                "latest_decision": latest.get("decision_name") if latest else None,
+                "latest_stage": latest.get("decision_stage") if latest else None,
+                "sent_to_discord": sent,
+                "binding_reasons": reasons,
+                "features": features,
+                "record_count": len(records),
+                "latest": latest,
+            }
+        )
+    return {
+        "lookback_hours": max(1, hours),
+        "summary": summary,
+        "top_blockers": [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(blocker_counts.items(), key=lambda pair: (-pair[1], pair[0]))[:15]
+        ],
+        "tokens": items,
+        "notes": [
+            "Known-runner replay is for missed-winner analysis, not a gate bypass.",
+            "Use missing_from_window tokens as explicit backfill or seed targets.",
+        ],
     }
 
 

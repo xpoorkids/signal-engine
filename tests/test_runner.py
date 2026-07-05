@@ -199,6 +199,19 @@ def test_non_candidate_cooldown_key_separates_sniper_from_heating():
     assert promoted_key == "promoted:token-8"
 
 
+def test_worker_health_metadata_exposes_discovery_source_health(monkeypatch):
+    monkeypatch.setattr(runner, "_QUEUE", None)
+    metadata = runner._worker_health_metadata()
+
+    assert "x_signal_enabled" in metadata
+    assert "x_bearer_configured" in metadata
+    assert "jupiter_api_key_configured" in metadata
+    producer = metadata["producer_health"]
+    assert "dex_source_health" in producer
+    assert "x_signal_health" in producer
+    assert "discord_delivery_health" in producer
+
+
 def test_apply_route_precedence_drops_candidate_when_sniper_exists():
     candidate = Event(type="candidate", source="engine", token="token-prec-1")
     sniper = Event(

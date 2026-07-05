@@ -115,25 +115,22 @@ def test_score_pairs_returns_bounded_momentum_watch_candidate():
 
     scored = score_pairs(pairs)
 
-    assert scored == [
-        {
-            "token": token,
-            "symbol": "COBRA",
-            "chain": "sol",
-            "reason": "dex_momentum_watch",
-            "metrics": {
-                "liquidity": 90000.0,
-                "volume_5m": 31000.0,
-                "price_change_5m": 12.0,
-                "age_minutes": 75.0,
-                "market_cap": 1250000.0,
-                "buys_5m": 180,
-                "discovery_sources": [],
-                "community_takeover": False,
-                "paid_visibility": False,
-            },
-        }
-    ]
+    assert scored[0]["token"] == token
+    assert scored[0]["symbol"] == "COBRA"
+    assert scored[0]["chain"] == "sol"
+    assert scored[0]["reason"] == "dex_momentum_watch"
+    metrics = scored[0]["metrics"]
+    assert metrics["liquidity"] == 90000.0
+    assert metrics["volume_5m"] == 31000.0
+    assert metrics["price_change_5m"] == 12.0
+    assert metrics["age_minutes"] == 75.0
+    assert metrics["market_cap"] == 1250000.0
+    assert metrics["buys_5m"] == 180
+    assert metrics["sells_5m"] == 50
+    assert metrics["sell_ratio_5m"] == 0.2778
+    assert metrics["paid_visibility_class"] == "organic"
+    assert metrics["independent_flow_confirmed"] is True
+    assert metrics["dex_scan_repeat_count"] >= 1
 
 
 def test_score_pairs_returns_curated_discovery_watch_for_community_takeover():

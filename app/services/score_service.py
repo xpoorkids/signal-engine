@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import time
 
 
 WSOL_MINT = "So11111111111111111111111111111111111111112"
@@ -6,6 +7,7 @@ USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 EXCLUDED_QUOTES = {WSOL_MINT, USDC_MINT, USDT_MINT}
 SOLANA_CHAIN_VALUES = {"sol", "solana"}
+_DEX_TOKEN_STATE: dict[str, dict[str, float]] = {}
 
 
 def _clean_address(value: object) -> str:
@@ -84,8 +86,66 @@ def _discovery_sources(pair: dict) -> list[str]:
     return list(dict.fromkeys(sources))
 
 
+def _txn_metrics(pair: dict) -> tuple[int, int, float]:
+    txns_m5 = pair.get("txns", {}).get("m5", {}) if isinstance(pair.get("txns"), dict) else {}
+    buys5m = int(txns_m5.get("buys") or 0) if isinstance(txns_m5, dict) else 0
+    sells5m = int(txns_m5.get("sells") or 0) if isinstance(txns_m5, dict) else 0
+    sell_ratio = round(sells5m / max(1, buys5m), 4)
+    return buys5m, sells5m, sell_ratio
+
+
+def _paid_visibility_class(sources: list[str], buys5m: int, sells5m: int, vol5m: float) -> str:
+    source_set = set(sources)
+    paid = bool({"paid_ad", "token_boost_latest", "token_boost_top", "dex_boost_active"} & source_set)
+    has_cto = "community_takeover" in source_set
+    has_profile = "token_profile" in source_set
+    has_flow = buys5m >= 8 and vol5m >= 5_000 and sells5m <= buys5m * 2
+    if not paid:
+        return "organic"
+    if has_flow and has_cto:
+        return "paid_plus_cto_flow"
+    if has_flow:
+        return "paid_plus_flow"
+    if has_cto:
+        return "paid_plus_cto"
+    if has_profile:
+        return "paid_plus_profile"
+    return "paid_only"
+
+
+def _scan_evidence(token: str, *, volume_5m: float, price_change_5m: float, liquidity: float, observed_ts: float) -> dict:
+    prior = _DEX_TOKEN_STATE.get(token) or {}
+    first_seen = float(prior.get("first_seen_ts") or observed_ts)
+    previous_seen = float(prior.get("last_seen_ts") or observed_ts)
+    previous_volume = float(prior.get("volume_5m") or 0.0)
+    previous_liquidity = float(prior.get("liquidity") or 0.0)
+    repeat_count = int(prior.get("repeat_count") or 0) + 1
+    minutes_since_prev = max((observed_ts - previous_seen) / 60.0, 0.0)
+    volume_delta = volume_5m - previous_volume if previous_volume else 0.0
+    liquidity_delta_pct = ((liquidity - previous_liquidity) / previous_liquidity * 100.0) if previous_liquidity else 0.0
+    _DEX_TOKEN_STATE[token] = {
+        "first_seen_ts": first_seen,
+        "last_seen_ts": observed_ts,
+        "volume_5m": volume_5m,
+        "liquidity": liquidity,
+        "price_change_5m": price_change_5m,
+        "repeat_count": float(repeat_count),
+    }
+    return {
+        "dex_scan_first_seen_age_seconds": round(observed_ts - first_seen, 1),
+        "dex_scan_repeat_count": repeat_count,
+        "dex_scan_minutes_since_previous": round(minutes_since_prev, 2) if repeat_count > 1 else None,
+        "dex_scan_volume_delta_5m": round(volume_delta, 2),
+        "dex_scan_liquidity_delta_pct": round(liquidity_delta_pct, 4),
+        "dex_scan_price_change_5m": round(price_change_5m, 2),
+        "dex_scan_momentum_slope": round(volume_delta / max(minutes_since_prev, 1.0), 4) if repeat_count > 1 else 0.0,
+        "dex_scan_persistent": repeat_count >= 2,
+    }
+
+
 def score_pairs(pairs: list[dict]) -> list[dict]:
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    now_ts = time.time()
     out = []
     seen_tokens: set[str] = set()
 
@@ -102,8 +162,7 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                 continue
 
             age = (now_ms - created) / 60000
-            txns_m5 = p.get("txns", {}).get("m5", {}) if isinstance(p.get("txns"), dict) else {}
-            buys5m = int(txns_m5.get("buys") or 0) if isinstance(txns_m5, dict) else 0
+            buys5m, sells5m, sell_ratio = _txn_metrics(p)
             market_cap = float(p.get("marketCap") or p.get("fdv") or 0)
             sources = _discovery_sources(p)
             has_curated_source = bool(
@@ -141,6 +200,14 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                 reason = "aggressive_near_pass" if near_pass else "dex_momentum_watch"
                 if discovery_watch and not near_pass and not momentum_watch:
                     reason = "curated_discovery_watch"
+                scan_evidence = _scan_evidence(
+                    token,
+                    volume_5m=vol5m,
+                    price_change_5m=chg5m,
+                    liquidity=liq,
+                    observed_ts=now_ts,
+                )
+                paid_class = _paid_visibility_class(sources, buys5m, sells5m, vol5m)
                 out.append(
                     {
                         "token": token,
@@ -154,8 +221,13 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                             "age_minutes": round(age, 1),
                             "market_cap": round(market_cap, 2),
                             "buys_5m": buys5m,
+                            "sells_5m": sells5m,
+                            "sell_ratio_5m": sell_ratio,
                             "discovery_sources": sources,
                             "community_takeover": "community_takeover" in sources,
+                            "source_stability": "repeat_seen" if scan_evidence["dex_scan_persistent"] else "first_seen",
+                            "paid_visibility_class": paid_class,
+                            "independent_flow_confirmed": bool(buys5m >= 8 and vol5m >= 5_000 and sells5m <= buys5m * 2),
                             "paid_visibility": bool(
                                 {
                                     "paid_ad",
@@ -165,6 +237,7 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                                 }
                                 & set(sources)
                             ),
+                            **scan_evidence,
                         },
                     }
                 )

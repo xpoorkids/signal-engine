@@ -216,6 +216,24 @@ def test_learning_engine_health_reports_idle_for_healthy_quiet_worker(tmp_path, 
     assert health["status"] == "idle"
 
 
+def test_known_runners_route_accepts_token_list(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/learning/ops/known-runners",
+        json={"tokens": ["runner-token-1", "runner-token-1", "runner-token-2"], "hours": 24},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["requested"] == 2
+    assert payload["summary"]["missing"] == 2
+    assert payload["tokens"][0]["status"] == "missing_from_window"
+
+
 def test_learning_internal_ingest_routes_persist_rows(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

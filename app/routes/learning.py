@@ -40,6 +40,7 @@ from app.services.signal_learning_service import (
     get_latest_policy_automation_run,
     get_latest_policy_replay,
     get_learning_report,
+    analyze_known_runners,
     get_policy_approval,
     list_policy_automation_runs,
     list_policy_profiles,
@@ -455,6 +456,22 @@ def learning_history_summary(hours: int | None = None, sample_limit: int = 10_00
     return get_historical_corpus_summary(
         hours=max(1, hours) if hours is not None else None,
         sample_limit=sample_limit,
+    )
+
+
+@router.post("/learning/ops/known-runners")
+def learning_known_runners(payload: dict[str, object] = Body(default={})):
+    raw_tokens = payload.get("tokens")
+    if isinstance(raw_tokens, str):
+        tokens = [item.strip() for item in raw_tokens.replace("\n", ",").split(",") if item.strip()]
+    elif isinstance(raw_tokens, list):
+        tokens = [str(item or "").strip() for item in raw_tokens if str(item or "").strip()]
+    else:
+        tokens = []
+    return analyze_known_runners(
+        tokens,
+        hours=max(1, int(payload.get("hours") or 168)),
+        limit_per_token=max(1, int(payload.get("limit_per_token") or 25)),
     )
 
 

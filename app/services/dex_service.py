@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Iterable
 
 import requests
@@ -13,6 +14,13 @@ DEX_DISCOVERY_URLS = (
     ("https://api.dexscreener.com/token-boosts/top/v1", "token_boost_top"),
 )
 DEFAULT_SEARCH_QUERIES = ["solana", "pump", "raydium", "moonshot", "bonk", "trenches"]
+LAST_SOURCE_HEALTH: dict[str, object] = {
+    "last_started_ts": None,
+    "last_finished_ts": None,
+    "total_pairs": 0,
+    "sources": {},
+    "errors": {},
+}
 
 
 def _search_queries() -> list[str]:
@@ -85,11 +93,42 @@ def _response_pairs(data) -> list[dict]:
     return [pair for pair in pairs if isinstance(pair, dict)] if isinstance(pairs, list) else []
 
 
-def _fetch_search_pairs() -> list[dict]:
+def _source_item(source: str, *, ok: bool, pair_count: int = 0, token_count: int | None = None, error: Exception | None = None) -> dict:
+    item: dict[str, object] = {
+        "ok": ok,
+        "pair_count": int(pair_count or 0),
+        "last_finished_ts": time.time(),
+    }
+    if token_count is not None:
+        item["token_count"] = int(token_count or 0)
+    if error is not None:
+        item["error_type"] = type(error).__name__
+        item["error"] = str(error)[:240]
+    return item
+
+
+def get_dex_source_health() -> dict[str, object]:
+    return {
+        "last_started_ts": LAST_SOURCE_HEALTH.get("last_started_ts"),
+        "last_finished_ts": LAST_SOURCE_HEALTH.get("last_finished_ts"),
+        "total_pairs": LAST_SOURCE_HEALTH.get("total_pairs", 0),
+        "sources": dict(LAST_SOURCE_HEALTH.get("sources") or {}),
+        "errors": dict(LAST_SOURCE_HEALTH.get("errors") or {}),
+    }
+
+
+def _fetch_search_pairs() -> tuple[list[dict], dict[str, dict]]:
     pairs: list[dict] = []
     seen_pairs: set[str] = set()
+    health: dict[str, dict] = {}
     for query in _search_queries():
-        data = _fetch_json(f"https://api.dexscreener.com/latest/dex/search?q={query}")
+        source_key = f"search:{query}"
+        try:
+            data = _fetch_json(f"https://api.dexscreener.com/latest/dex/search?q={query}")
+        except Exception as exc:
+            health[source_key] = _source_item(source_key, ok=False, error=exc)
+            continue
+        count = 0
         for pair in _response_pairs(data):
             if not isinstance(pair, dict):
                 continue
@@ -103,22 +142,35 @@ def _fetch_search_pairs() -> list[dict]:
             if pair_key in seen_pairs:
                 continue
             seen_pairs.add(pair_key)
+            pair["signal_engine_sources"] = list(
+                dict.fromkeys([*pair.get("signal_engine_sources", []), source_key])
+            ) if isinstance(pair.get("signal_engine_sources"), list) else [source_key]
             pairs.append(pair)
-    return pairs
+            count += 1
+        health[source_key] = _source_item(source_key, ok=True, pair_count=count)
+    return pairs, health
 
 
-def _fetch_profile_pairs() -> list[dict]:
+def _fetch_profile_pairs() -> tuple[list[dict], dict[str, dict]]:
     tokens: list[str] = []
     seen_tokens: set[str] = set()
     sources_by_token: dict[str, set[str]] = {}
+    health: dict[str, dict] = {}
     for url, source in DEX_DISCOVERY_URLS:
-        data = _fetch_json(url)
+        try:
+            data = _fetch_json(url)
+        except Exception as exc:
+            health[source] = _source_item(source, ok=False, error=exc)
+            continue
         items = data if isinstance(data, list) else []
+        source_tokens = 0
         for token in _solana_token_addresses(items):
             sources_by_token.setdefault(token, set()).add(source)
             if token not in seen_tokens:
                 seen_tokens.add(token)
                 tokens.append(token)
+            source_tokens += 1
+        health[source] = _source_item(source, ok=True, token_count=source_tokens)
 
     pairs: list[dict] = []
     seen_pairs: set[str] = set()
@@ -139,10 +191,15 @@ def _fetch_profile_pairs() -> list[dict]:
             if token and token in sources_by_token:
                 pair["signal_engine_sources"] = sorted(sources_by_token[token])
             pairs.append(pair)
-    return pairs
+    for source in list(health):
+        token_count = int(health[source].get("token_count") or 0)
+        pair_count = sum(1 for pair in pairs if source in (pair.get("signal_engine_sources") or []))
+        health[source]["pair_count"] = pair_count
+        health[source]["token_count"] = token_count
+    return pairs, health
 
 
-def _fetch_external_seed_pairs() -> list[dict]:
+def _fetch_external_seed_pairs() -> tuple[list[dict], dict[str, dict]]:
     tokens = _external_seed_tokens()
     pairs: list[dict] = []
     seen_pairs: set[str] = set()
@@ -159,24 +216,39 @@ def _fetch_external_seed_pairs() -> list[dict]:
                 continue
             if pair_key:
                 seen_pairs.add(pair_key)
-            pair["signal_engine_source"] = "external_seed"
+            pair["signal_engine_sources"] = list(
+                dict.fromkeys([*pair.get("signal_engine_sources", []), "external_seed"])
+            ) if isinstance(pair.get("signal_engine_sources"), list) else ["external_seed"]
             pairs.append(pair)
-    return pairs
+    return pairs, {"external_seed": _source_item("external_seed", ok=True, pair_count=len(pairs), token_count=len(tokens))}
 
 
 def fetch_solana_pairs():
     pairs = []
-    try:
-        pairs.extend(_fetch_search_pairs())
-    except Exception as exc:
-        print(f"[dex] search fetch failed: {type(exc).__name__}: {exc}", flush=True)
-    try:
-        pairs.extend(_fetch_profile_pairs())
-    except Exception as exc:
-        print(f"[dex] profile fetch failed: {type(exc).__name__}: {exc}", flush=True)
-    try:
-        pairs.extend(_fetch_external_seed_pairs())
-    except Exception as exc:
-        print(f"[dex] external seed fetch failed: {type(exc).__name__}: {exc}", flush=True)
+    started = time.time()
+    source_health: dict[str, dict] = {}
+    errors: dict[str, str] = {}
+    for label, fetcher in (
+        ("search", _fetch_search_pairs),
+        ("profile", _fetch_profile_pairs),
+        ("external_seed", _fetch_external_seed_pairs),
+    ):
+        try:
+            fetched, health = fetcher()
+            pairs.extend(fetched)
+            source_health.update(health)
+        except Exception as exc:
+            errors[label] = f"{type(exc).__name__}: {exc}"[:240]
+            source_health[label] = _source_item(label, ok=False, error=exc)
+            print(f"[dex] {label} fetch failed: {type(exc).__name__}: {exc}", flush=True)
+    LAST_SOURCE_HEALTH.update(
+        {
+            "last_started_ts": started,
+            "last_finished_ts": time.time(),
+            "total_pairs": len(pairs),
+            "sources": source_health,
+            "errors": errors,
+        }
+    )
     print(f"[dex] fetched {len(pairs)} pairs", flush=True)
     return pairs

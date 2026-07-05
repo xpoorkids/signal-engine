@@ -48,11 +48,13 @@ def test_external_seed_pairs_fetches_configured_tokens(monkeypatch):
 
     monkeypatch.setattr(dex_service, "_fetch_json", fake_fetch_json)
 
-    pairs = dex_service._fetch_external_seed_pairs()
+    pairs, health = dex_service._fetch_external_seed_pairs()
 
     assert f"{token_a},{token_b}" in fetched_urls[0]
     assert [item["pairAddress"] for item in pairs] == ["pair-a", "pair-b"]
-    assert all(item["signal_engine_source"] == "external_seed" for item in pairs)
+    assert all(item["signal_engine_sources"] == ["external_seed"] for item in pairs)
+    assert health["external_seed"]["ok"] is True
+    assert health["external_seed"]["pair_count"] == 2
 
 
 def test_profile_pairs_preserve_discovery_sources(monkeypatch):
@@ -85,6 +87,8 @@ def test_profile_pairs_preserve_discovery_sources(monkeypatch):
 
     monkeypatch.setattr(dex_service, "_fetch_json", fake_fetch_json)
 
-    pairs = dex_service._fetch_profile_pairs()
+    pairs, health = dex_service._fetch_profile_pairs()
 
     assert pairs[0]["signal_engine_sources"] == ["community_takeover", "token_profile"]
+    assert health["token_profile"]["ok"] is True
+    assert health["community_takeover"]["pair_count"] == 1

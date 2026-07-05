@@ -57,3 +57,8 @@ def test_fetch_x_signal_counts_heavy_and_verified_authors(monkeypatch):
     assert result["heavy_author_count"] == 1
     assert result["verified_author_count"] == 2
     assert result["author_followers"] == 61000
+    health = x_signal.get_x_signal_health()
+    assert health["configured"] is True
+    assert health["last_token"] == "TokenMint123"
+    assert health["last_status_code"] == 200
+    assert health["last_result_count"] == 2
