@@ -486,9 +486,19 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         "x_likes": 0,
         "unique_wallets_30s": 0,
         "top_wallet_share_30s": 0.0,
+        "discovery_sources": [],
+        "community_takeover": False,
+        "paid_visibility": False,
     }
 
     token = getattr(e, "token", None)
+    extra = getattr(e, "extra", {}) if hasattr(e, "extra") else {}
+    seed_metrics = extra.get("metrics") if isinstance(extra, dict) and isinstance(extra.get("metrics"), dict) else {}
+    if seed_metrics:
+        if isinstance(seed_metrics.get("discovery_sources"), list):
+            metrics["discovery_sources"] = [str(item) for item in seed_metrics.get("discovery_sources") if str(item or "")]
+        metrics["community_takeover"] = bool(seed_metrics.get("community_takeover"))
+        metrics["paid_visibility"] = bool(seed_metrics.get("paid_visibility"))
 
     # Local burst metrics (stub; state may implement)
     try:

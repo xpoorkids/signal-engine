@@ -128,9 +128,40 @@ def test_score_pairs_returns_bounded_momentum_watch_candidate():
                 "age_minutes": 75.0,
                 "market_cap": 1250000.0,
                 "buys_5m": 180,
+                "discovery_sources": [],
+                "community_takeover": False,
+                "paid_visibility": False,
             },
         }
     ]
+
+
+def test_score_pairs_returns_curated_discovery_watch_for_community_takeover():
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    token = "DdPrHYqM8Ueovnk9kAnAgoGhswkuaTqmxcoZzU3Zpump"
+    pairs = [
+        {
+            "chainId": "solana",
+            "signal_engine_sources": ["community_takeover"],
+            "baseToken": {"address": token, "symbol": "MANLET"},
+            "quoteToken": {
+                "address": "So11111111111111111111111111111111111111112",
+                "symbol": "SOL",
+            },
+            "liquidity": {"usd": 340_000},
+            "volume": {"m5": 900},
+            "priceChange": {"m5": -1.0},
+            "txns": {"m5": {"buys": 5, "sells": 4}},
+            "marketCap": 10_000_000,
+            "pairCreatedAt": now_ms - 3 * 24 * 60 * 60_000,
+        }
+    ]
+
+    scored = score_pairs(pairs)
+
+    assert scored[0]["reason"] == "curated_discovery_watch"
+    assert scored[0]["metrics"]["community_takeover"] is True
+    assert scored[0]["metrics"]["paid_visibility"] is False
 
 
 def test_score_route_persists_contract_before_symbol(monkeypatch):

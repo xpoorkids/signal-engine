@@ -328,6 +328,48 @@ def test_heavy_x_support_is_not_social_echo_chamber():
     assert "social_echo_chamber" not in reasons
 
 
+def test_community_takeover_counts_as_quality_support():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.58,
+        creator_score=0.55,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 4,
+                "burst_count_60s": 8,
+                "community_takeover": True,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={"liquidity_usd": 26000.0, "txns_m5_buys": 12, "txns_m5_sells": 4},
+    )
+
+    assert eligible is True
+    assert "community_takeover" in confirmations
+    assert reasons == []
+
+
+def test_paid_visibility_without_flow_is_blocked():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.62,
+        creator_score=0.70,
+        extra={
+            "attention_metrics": {
+                "paid_visibility": True,
+                "unique_buyers_5m": 1,
+                "burst_count_60s": 2,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={"liquidity_usd": 22000.0, "txns_m5_buys": 10, "txns_m5_sells": 4},
+    )
+
+    assert eligible is False
+    assert "market_support" in confirmations
+    assert "paid_visibility_without_flow" in reasons
+
+
 def test_entry_quality_profile_marks_extended_chase_without_breadth():
     profile = entry_quality_profile(
         metrics={

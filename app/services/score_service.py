@@ -67,6 +67,23 @@ def _pick_symbol(pair: dict, token_address: str | None) -> str | None:
     return base.get("symbol") or quote.get("symbol")
 
 
+def _discovery_sources(pair: dict) -> list[str]:
+    raw = pair.get("signal_engine_sources")
+    sources: list[str] = []
+    if isinstance(raw, list):
+        sources.extend(str(item).strip() for item in raw if str(item or "").strip())
+    source = str(pair.get("signal_engine_source") or "").strip()
+    if source:
+        sources.append(source)
+    boosts = pair.get("boosts") if isinstance(pair.get("boosts"), dict) else {}
+    try:
+        if float(boosts.get("active") or boosts.get("amount") or 0) > 0:
+            sources.append("dex_boost_active")
+    except Exception:
+        pass
+    return list(dict.fromkeys(sources))
+
+
 def score_pairs(pairs: list[dict]) -> list[dict]:
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
     out = []
@@ -88,6 +105,16 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
             txns_m5 = p.get("txns", {}).get("m5", {}) if isinstance(p.get("txns"), dict) else {}
             buys5m = int(txns_m5.get("buys") or 0) if isinstance(txns_m5, dict) else 0
             market_cap = float(p.get("marketCap") or p.get("fdv") or 0)
+            sources = _discovery_sources(p)
+            has_curated_source = bool(
+                {
+                    "community_takeover",
+                    "external_seed",
+                    "token_profile",
+                    "token_boost_top",
+                }
+                & set(sources)
+            )
             near_pass = age <= 0.5 and liq >= 800 and vol5m >= 20 and chg5m >= -10
             momentum_watch = (
                 age <= 24 * 60
@@ -97,18 +124,29 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                 and chg5m >= -18
                 and 25_000 <= market_cap <= 5_000_000
             )
+            discovery_watch = (
+                has_curated_source
+                and age <= 7 * 24 * 60
+                and liq >= 25_000
+                and vol5m >= 500
+                and chg5m >= -20
+                and 50_000 <= market_cap <= 50_000_000
+            )
 
-            if near_pass or momentum_watch:
+            if near_pass or momentum_watch or discovery_watch:
                 token = _pick_contract_address(p)
                 if not token or token in seen_tokens:
                     continue
                 seen_tokens.add(token)
+                reason = "aggressive_near_pass" if near_pass else "dex_momentum_watch"
+                if discovery_watch and not near_pass and not momentum_watch:
+                    reason = "curated_discovery_watch"
                 out.append(
                     {
                         "token": token,
                         "symbol": _pick_symbol(p, token),
                         "chain": "sol",
-                        "reason": "aggressive_near_pass" if near_pass else "dex_momentum_watch",
+                        "reason": reason,
                         "metrics": {
                             "liquidity": round(liq, 2),
                             "volume_5m": round(vol5m, 2),
@@ -116,6 +154,17 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                             "age_minutes": round(age, 1),
                             "market_cap": round(market_cap, 2),
                             "buys_5m": buys5m,
+                            "discovery_sources": sources,
+                            "community_takeover": "community_takeover" in sources,
+                            "paid_visibility": bool(
+                                {
+                                    "paid_ad",
+                                    "token_boost_latest",
+                                    "token_boost_top",
+                                    "dex_boost_active",
+                                }
+                                & set(sources)
+                            ),
                         },
                     }
                 )

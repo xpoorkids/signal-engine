@@ -28,9 +28,11 @@ def test_summarize_pair_preserves_h24_volume_and_transactions():
 
 
 def test_external_seed_pairs_fetches_configured_tokens(monkeypatch):
+    token_a = "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump"
+    token_b = "DdPrHYqM8Ueovnk9kAnAgoGhswkuaTqmxcoZzU3Zpump"
     monkeypatch.setenv(
         "SIGNAL_ENGINE_EXTERNAL_SEED_TOKENS",
-        "token-a, token-b, token-a",
+        f"{token_a}, {token_b}, {token_a}",
     )
     fetched_urls = []
 
@@ -48,6 +50,41 @@ def test_external_seed_pairs_fetches_configured_tokens(monkeypatch):
 
     pairs = dex_service._fetch_external_seed_pairs()
 
-    assert "token-a,token-b" in fetched_urls[0]
+    assert f"{token_a},{token_b}" in fetched_urls[0]
     assert [item["pairAddress"] for item in pairs] == ["pair-a", "pair-b"]
     assert all(item["signal_engine_source"] == "external_seed" for item in pairs)
+
+
+def test_profile_pairs_preserve_discovery_sources(monkeypatch):
+    token = "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump"
+    responses = {
+        "https://api.dexscreener.com/token-profiles/latest/v1": [
+            {"chainId": "solana", "tokenAddress": token}
+        ],
+        "https://api.dexscreener.com/community-takeovers/latest/v1": [
+            {"chainId": "solana", "url": f"https://pump.fun/coin/{token}"}
+        ],
+        "https://api.dexscreener.com/ads/latest/v1": [],
+        "https://api.dexscreener.com/token-boosts/latest/v1": [],
+        "https://api.dexscreener.com/token-boosts/top/v1": [],
+    }
+
+    def fake_fetch_json(url: str):
+        if url in responses:
+            return responses[url]
+        return {
+            "pairs": [
+                {
+                    "chainId": "solana",
+                    "pairAddress": "pair-a",
+                    "baseToken": {"address": token},
+                    "quoteToken": {"address": "So11111111111111111111111111111111111111112"},
+                }
+            ]
+        }
+
+    monkeypatch.setattr(dex_service, "_fetch_json", fake_fetch_json)
+
+    pairs = dex_service._fetch_profile_pairs()
+
+    assert pairs[0]["signal_engine_sources"] == ["community_takeover", "token_profile"]

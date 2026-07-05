@@ -611,6 +611,7 @@ def candidate_confirmation_signals(
     x_verified_authors = int(metrics.get("x_verified_author_count") or 0)
     x_author_followers = int(metrics.get("x_author_followers") or 0)
     narrative_hits = metrics.get("narrative_hits") if isinstance(metrics.get("narrative_hits"), list) else []
+    community_takeover = bool(metrics.get("community_takeover"))
     top_wallet_share = float(metrics.get("top_wallet_share_30s") or 0.0)
     unique_wallets_30s = int(metrics.get("unique_wallets_30s") or 0)
 
@@ -635,6 +636,8 @@ def candidate_confirmation_signals(
         confirmations.append("credible_x_reach")
     if narrative_hits:
         confirmations.append("narrative_alignment")
+    if community_takeover:
+        confirmations.append("community_takeover")
 
     liq = 0.0
     buys5m = 0
@@ -897,8 +900,9 @@ def adversarial_signal_flags(
         flags.append("low_volume_market_cap_imbalance")
 
     boosts = int(payload.get("dexscreener_boosts_count") or payload.get("dex_boosts") or 0)
+    paid_visibility = bool(payload.get("paid_visibility"))
     if (
-        boosts > 0
+        (boosts > 0 or paid_visibility)
         and buyers_5m < min_unique_buyers_5m
         and burst_60s < min_burst_count_60s
         and not trusted_wallet_support
@@ -970,7 +974,7 @@ def candidate_send_reasons(
         reasons.append("wallet_guard_watch_only")
     hard_quality_confirmed = bool({"tracked_wallet_flow", "market_support", "heavy_x_support"} & confirmation_set)
     soft_quality_confirmed = bool(
-        {"kol_wallet_flow", "social_support", "credible_x_reach", "narrative_alignment"} & confirmation_set
+        {"kol_wallet_flow", "social_support", "credible_x_reach", "narrative_alignment", "community_takeover"} & confirmation_set
     )
     flow_strength_confirmed = {"buyer_breadth", "burst_strength"}.issubset(confirmation_set)
     route_fast_lane = route_tier == "sniper" or (route_tier == "heating_up" and route_confidence >= 0.75)

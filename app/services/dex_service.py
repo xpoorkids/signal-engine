@@ -4,11 +4,13 @@ from typing import Iterable
 import requests
 
 DEX_URL = "https://api.dexscreener.com/latest/dex/search?q=solana"
-DEX_TOKEN_BATCH_URL = "https://api.dexscreener.com/latest/dex/tokens/{tokens}"
-DEX_PROFILE_URLS = (
-    "https://api.dexscreener.com/token-profiles/latest/v1",
-    "https://api.dexscreener.com/token-boosts/latest/v1",
-    "https://api.dexscreener.com/token-boosts/top/v1",
+DEX_TOKEN_BATCH_URL = "https://api.dexscreener.com/tokens/v1/solana/{tokens}"
+DEX_DISCOVERY_URLS = (
+    ("https://api.dexscreener.com/token-profiles/latest/v1", "token_profile"),
+    ("https://api.dexscreener.com/community-takeovers/latest/v1", "community_takeover"),
+    ("https://api.dexscreener.com/ads/latest/v1", "paid_ad"),
+    ("https://api.dexscreener.com/token-boosts/latest/v1", "token_boost_latest"),
+    ("https://api.dexscreener.com/token-boosts/top/v1", "token_boost_top"),
 )
 DEFAULT_SEARCH_QUERIES = ["solana", "pump", "raydium", "moonshot", "bonk", "trenches"]
 
@@ -20,6 +22,20 @@ def _search_queries() -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _normalize_token_address(value: object) -> str:
+    token = str(value or "").strip()
+    if not token:
+        return ""
+    if "/coin/" in token:
+        token = token.rsplit("/coin/", 1)[-1]
+    token = token.split("?", 1)[0].split("#", 1)[0].strip().strip("/")
+    if not token or "/" in token:
+        return ""
+    if len(token) < 32 or len(token) > 64:
+        return ""
+    return token
+
+
 def _external_seed_tokens() -> list[str]:
     raw = os.getenv("SIGNAL_ENGINE_EXTERNAL_SEED_TOKENS", "").strip()
     if not raw:
@@ -27,7 +43,7 @@ def _external_seed_tokens() -> list[str]:
     tokens: list[str] = []
     seen: set[str] = set()
     for item in raw.replace("\n", ",").split(","):
-        token = item.strip()
+        token = _normalize_token_address(item)
         if not token or token in seen:
             continue
         seen.add(token)
@@ -41,11 +57,21 @@ def _solana_token_addresses(items: Iterable[dict]) -> list[str]:
     for item in items:
         if not isinstance(item, dict) or str(item.get("chainId") or "").lower() != "solana":
             continue
-        token = str(item.get("tokenAddress") or "").strip()
+        token = _normalize_token_address(item.get("tokenAddress") or item.get("url"))
         if token and token not in seen:
             seen.add(token)
             out.append(token)
     return out
+
+
+def _pick_pair_token(pair: dict) -> str | None:
+    base = pair.get("baseToken") if isinstance(pair.get("baseToken"), dict) else {}
+    quote = pair.get("quoteToken") if isinstance(pair.get("quoteToken"), dict) else {}
+    for value in (base.get("address"), quote.get("address")):
+        token = str(value or "").strip()
+        if token and token != "So11111111111111111111111111111111111111112":
+            return token
+    return None
 
 
 def _fetch_json(url: str):
@@ -54,12 +80,17 @@ def _fetch_json(url: str):
     return r.json()
 
 
+def _response_pairs(data) -> list[dict]:
+    pairs = data.get("pairs") if isinstance(data, dict) else data
+    return [pair for pair in pairs if isinstance(pair, dict)] if isinstance(pairs, list) else []
+
+
 def _fetch_search_pairs() -> list[dict]:
     pairs: list[dict] = []
     seen_pairs: set[str] = set()
     for query in _search_queries():
         data = _fetch_json(f"https://api.dexscreener.com/latest/dex/search?q={query}")
-        for pair in data.get("pairs", []) if isinstance(data, dict) else []:
+        for pair in _response_pairs(data):
             if not isinstance(pair, dict):
                 continue
             pair_key = str(pair.get("pairAddress") or "") or repr(
@@ -79,10 +110,12 @@ def _fetch_search_pairs() -> list[dict]:
 def _fetch_profile_pairs() -> list[dict]:
     tokens: list[str] = []
     seen_tokens: set[str] = set()
-    for url in DEX_PROFILE_URLS:
+    sources_by_token: dict[str, set[str]] = {}
+    for url, source in DEX_DISCOVERY_URLS:
         data = _fetch_json(url)
         items = data if isinstance(data, list) else []
         for token in _solana_token_addresses(items):
+            sources_by_token.setdefault(token, set()).add(source)
             if token not in seen_tokens:
                 seen_tokens.add(token)
                 tokens.append(token)
@@ -94,7 +127,7 @@ def _fetch_profile_pairs() -> list[dict]:
         if not batch:
             continue
         data = _fetch_json(DEX_TOKEN_BATCH_URL.format(tokens=",".join(batch)))
-        for pair in data.get("pairs", []) if isinstance(data, dict) else []:
+        for pair in _response_pairs(data):
             if not isinstance(pair, dict):
                 continue
             pair_key = str(pair.get("pairAddress") or "")
@@ -102,6 +135,9 @@ def _fetch_profile_pairs() -> list[dict]:
                 continue
             if pair_key:
                 seen_pairs.add(pair_key)
+            token = _pick_pair_token(pair)
+            if token and token in sources_by_token:
+                pair["signal_engine_sources"] = sorted(sources_by_token[token])
             pairs.append(pair)
     return pairs
 
