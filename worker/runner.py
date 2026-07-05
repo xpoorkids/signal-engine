@@ -236,7 +236,7 @@ from worker.shadow_executor import maybe_open_shadow_position, shadow_monitor_wo
 from worker.signal_policy import heating_delivery_decision
 import worker.scanner as scanner
 from app.services.scan_service import process_scan
-from app.services.state_service import record_wallet_signal, init as state_init
+from app.services.state_service import get_candidate_rate_limit_state, record_wallet_signal, init as state_init
 from app.services.db_service import resolve_engine_db_path
 from app.services.signal_learning_service import (
     init as learning_init,
@@ -277,6 +277,7 @@ def _worker_health_metadata() -> dict[str, Any]:
     now = time.time()
     ws_last_activity = float(getattr(helius_listener, "LAST_WS_ACTIVITY", 0.0) or 0.0)
     scan_last_ts = float(getattr(scanner, "LAST_SCAN_TS", 0.0) or 0.0)
+    rate_limit_state = get_candidate_rate_limit_state(max(1, EARLY_WATCH_RATE_LIMIT_PER_HOUR))
     metadata: dict[str, Any] = {
         "deploy_sha": os.getenv("RENDER_GIT_COMMIT", "unknown"),
         "dry_run": DRY_RUN,
@@ -292,6 +293,7 @@ def _worker_health_metadata() -> dict[str, Any]:
         "queue_max_size": _QUEUE.maxsize if _QUEUE is not None else None,
         "candidate_rate_limit_per_hour": EARLY_WATCH_RATE_LIMIT_PER_HOUR,
         "candidate_rate_limit_effective_per_hour": max(1, EARLY_WATCH_RATE_LIMIT_PER_HOUR),
+        "candidate_rate_limit_state": rate_limit_state,
         "tasks": _task_health(),
         "producer_health": {
             "ws_last_activity_age_seconds": round(now - ws_last_activity, 1) if ws_last_activity else None,

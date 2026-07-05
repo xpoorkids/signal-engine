@@ -43,3 +43,29 @@ def test_candidate_rate_limit_only_consumes_when_recorded(tmp_path, monkeypatch)
     assert state_service.consume_candidate_rate_limit(1) is True
     assert state_service.allow_candidate_rate_limit(1) is False
     assert state_service.consume_candidate_rate_limit(1) is False
+
+
+def test_candidate_rate_limit_recovers_future_window(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(state_service, "DB_PATH", db_path)
+    state_service.DB_PATH.parent.mkdir(exist_ok=True)
+    state_service.init()
+
+    now = 1_800_000_000
+    monkeypatch.setattr(state_service.time, "time", lambda: now)
+    state_service.kv_set("candidate_rate_v2_window_start", str(now + 7200))
+    state_service.kv_set("candidate_rate_v2_window_count", "5")
+
+    state = state_service.get_candidate_rate_limit_state(5)
+
+    assert state["allowed"] is True
+    assert state["normalized"] is True
+    assert state["window_count"] == 0
+    assert state["remaining"] == 5
+
+    assert state_service.consume_candidate_rate_limit(5) is True
+
+    persisted = state_service.get_candidate_rate_limit_state(5)
+    assert persisted["raw_window_start"] == now
+    assert persisted["raw_window_count"] == 1
+    assert persisted["remaining"] == 4

@@ -364,45 +364,63 @@ def update_promo_confirm(token: str, passed: bool) -> int:
     return count
 
 
-def allow_candidate_rate_limit(max_per_hour: int) -> bool:
+_CANDIDATE_RATE_WINDOW_KEY = "candidate_rate_v2_window_start"
+_CANDIDATE_RATE_COUNT_KEY = "candidate_rate_v2_window_count"
+_CANDIDATE_RATE_WINDOW_SECONDS = 3600
+
+
+def _candidate_rate_window(start: int, count: int, now: int) -> tuple[int, int]:
+    if start <= 0 or start > now or now - start >= _CANDIDATE_RATE_WINDOW_SECONDS:
+        return now, 0
+    return start, max(0, count)
+
+
+def get_candidate_rate_limit_state(max_per_hour: int) -> dict:
     now = int(time.time())
-    window_key = "candidate_rate_v2_window_start"
-    count_key = "candidate_rate_v2_window_count"
     with _connect() as c:
-        start_row = c.execute("SELECT v FROM kv WHERE k=?", (window_key,)).fetchone()
-        count_row = c.execute("SELECT v FROM kv WHERE k=?", (count_key,)).fetchone()
+        start_row = c.execute("SELECT v FROM kv WHERE k=?", (_CANDIDATE_RATE_WINDOW_KEY,)).fetchone()
+        count_row = c.execute("SELECT v FROM kv WHERE k=?", (_CANDIDATE_RATE_COUNT_KEY,)).fetchone()
         start = int(start_row[0]) if start_row and start_row[0] else 0
         count = int(count_row[0]) if count_row and count_row[0] else 0
-        if start == 0 or now - start >= 3600:
-            start = now
-            count = 0
-        if count >= max_per_hour:
-            return False
-        return True
+    normalized_start, normalized_count = _candidate_rate_window(start, count, now)
+    effective_limit = max(1, int(max_per_hour or 0))
+    return {
+        "window_start": normalized_start,
+        "raw_window_start": start,
+        "window_count": normalized_count,
+        "raw_window_count": count,
+        "window_age_seconds": max(0, now - normalized_start),
+        "window_remaining_seconds": max(0, _CANDIDATE_RATE_WINDOW_SECONDS - max(0, now - normalized_start)),
+        "limit_per_hour": effective_limit,
+        "remaining": max(0, effective_limit - normalized_count),
+        "allowed": normalized_count < effective_limit,
+        "normalized": normalized_start != start or normalized_count != count,
+    }
+
+
+def allow_candidate_rate_limit(max_per_hour: int) -> bool:
+    return bool(get_candidate_rate_limit_state(max_per_hour).get("allowed"))
 
 
 def consume_candidate_rate_limit(max_per_hour: int) -> bool:
     now = int(time.time())
-    window_key = "candidate_rate_v2_window_start"
-    count_key = "candidate_rate_v2_window_count"
+    effective_limit = max(1, int(max_per_hour or 0))
     with _connect() as c:
-        start_row = c.execute("SELECT v FROM kv WHERE k=?", (window_key,)).fetchone()
-        count_row = c.execute("SELECT v FROM kv WHERE k=?", (count_key,)).fetchone()
+        start_row = c.execute("SELECT v FROM kv WHERE k=?", (_CANDIDATE_RATE_WINDOW_KEY,)).fetchone()
+        count_row = c.execute("SELECT v FROM kv WHERE k=?", (_CANDIDATE_RATE_COUNT_KEY,)).fetchone()
         start = int(start_row[0]) if start_row and start_row[0] else 0
         count = int(count_row[0]) if count_row and count_row[0] else 0
-        if start == 0 or now - start >= 3600:
-            start = now
-            count = 0
-        if count >= max_per_hour:
+        start, count = _candidate_rate_window(start, count, now)
+        if count >= effective_limit:
             return False
         count += 1
         c.execute(
             "INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-            (window_key, str(start)),
+            (_CANDIDATE_RATE_WINDOW_KEY, str(start)),
         )
         c.execute(
             "INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-            (count_key, str(count)),
+            (_CANDIDATE_RATE_COUNT_KEY, str(count)),
         )
         return True
 
