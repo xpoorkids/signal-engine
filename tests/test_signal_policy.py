@@ -199,6 +199,37 @@ def test_candidate_send_reasons_accepts_live_market_cap_usd_for_dex_breakout():
     assert "entry_buy_pressure" in confirmations
 
 
+def test_candidate_send_reasons_allow_dex_buyer_pressure_breakout_without_social_attention():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.20,
+        creator_score=0.0,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 0,
+                "independent_flow_confirmed": True,
+                "paid_visibility": False,
+                "volume_window_phase": "entering",
+                "volume_pace_ratio": 1.5,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 18037.79,
+            "volume_m5": 7024.59,
+            "txns_m5_buys": 91,
+            "txns_m5_sells": 61,
+            "price_change_m5": 47.47,
+            "price_change_h1": 160.0,
+            "market_cap_usd": 47619.0,
+        },
+    )
+
+    assert eligible is True
+    assert reasons == []
+    assert "market_support" in confirmations
+    assert "dex_buyer_pressure" in confirmations
+    assert "entry_buy_pressure" in confirmations
+
+
 def test_paid_visibility_allows_confirmed_dex_flow_without_local_wallet_counters():
     eligible, reasons, confirmations = candidate_send_reasons(
         attention_score=0.20,
@@ -528,6 +559,28 @@ def test_entry_quality_profile_marks_extended_chase_without_breadth():
     assert profile["tier"] == "chase_risk"
     assert "entry_extended_without_breadth" in profile["reasons"]
     assert "entry_extended_thin_liquidity" in profile["reasons"]
+
+
+def test_entry_quality_uses_dex_breadth_proxy_when_unique_buyers_missing():
+    profile = entry_quality_profile(
+        metrics={
+            "unique_buyers_5m": 0,
+            "tracked_wallet_hits": 0,
+            "kol_wallet_hits": 0,
+        },
+        dex_summary={
+            "liquidity_usd": 18037.79,
+            "volume_m5": 7024.59,
+            "price_change_m5": 47.47,
+            "price_change_h1": 160.0,
+            "txns_m5_buys": 91,
+            "txns_m5_sells": 61,
+        },
+    )
+
+    assert "entry_dex_breadth_proxy" in profile["supports"]
+    assert "entry_extended_without_breadth" not in profile["reasons"]
+    assert profile["metrics"]["dex_breadth_proxy"] is True
 
 
 def test_candidate_send_reasons_reject_chase_entry_without_trusted_flow():

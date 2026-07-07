@@ -765,6 +765,17 @@ def entry_quality_profile(
     trusted_wallet_support = tracked_hits > 0
     any_wallet_support = trusted_wallet_support or kol_hits > 0
     buy_sell_ratio = (float(buys5m) / float(max(sells5m, 1))) if buys5m > 0 else 0.0
+    dex_breadth_proxy = (
+        buyers_5m <= 0
+        and buys5m >= max(policy.entry_confirm_buys5m_min * 3, 40)
+        and buy_sell_ratio >= policy.entry_chase_max_buy_sell_ratio
+        and price_change_m5 is not None
+        and price_change_m5 >= 0.0
+        and vol5m is not None
+        and vol5m >= 5_000
+        and liq is not None
+        and liq >= policy.entry_chase_min_liq_usd
+    )
     volume_liquidity_ratio = (
         float(vol5m) / float(liq)
         if vol5m is not None and liq is not None and liq > 0.0
@@ -781,6 +792,9 @@ def entry_quality_profile(
     if buyers_5m >= policy.entry_confirm_breadth_min:
         supports.append("entry_buyer_breadth")
         score += 12
+    elif dex_breadth_proxy:
+        supports.append("entry_dex_breadth_proxy")
+        score += 8
     if buys5m >= policy.entry_confirm_buys5m_min:
         supports.append("entry_buy_pressure")
         score += 10
@@ -800,7 +814,7 @@ def entry_quality_profile(
         if liq is None or liq < policy.entry_chase_min_liq_usd:
             reasons.append("entry_extended_thin_liquidity")
             score -= 14
-        if buyers_5m < policy.entry_confirm_breadth_min and not any_wallet_support:
+        if buyers_5m < policy.entry_confirm_breadth_min and not dex_breadth_proxy and not any_wallet_support:
             reasons.append("entry_extended_without_breadth")
             score -= 14
         if buy_sell_ratio < policy.entry_chase_max_buy_sell_ratio and not trusted_wallet_support:
@@ -835,6 +849,7 @@ def entry_quality_profile(
             "txns_m5_sells": sells5m,
             "buy_sell_ratio": round(buy_sell_ratio, 3),
             "unique_buyers_5m": buyers_5m,
+            "dex_breadth_proxy": dex_breadth_proxy,
             "tracked_wallet_hits": tracked_hits,
             "kol_wallet_hits": kol_hits,
         },
@@ -1028,11 +1043,17 @@ def candidate_send_reasons(
     has_creator_support = creator_score >= policy.strong_creator_threshold and attn >= policy.creator_attention_floor
     has_attention_only = attn >= policy.strong_attention_threshold
     has_balanced_quality = creator_score >= policy.creator_attention_target and attn >= policy.creator_attention_target
-    has_dex_breakout = {
+    has_dex_momentum_breakout = {
         "market_support",
         "dex_momentum",
         "entry_buy_pressure",
     }.issubset(confirmation_set)
+    has_dex_pressure_breakout = {
+        "market_support",
+        "dex_buyer_pressure",
+        "entry_buy_pressure",
+    }.issubset(confirmation_set)
+    has_dex_breakout = has_dex_momentum_breakout or has_dex_pressure_breakout
 
     if (
         len(confirmations) < policy.min_send_confirmation_signals
