@@ -120,6 +120,57 @@ def test_candidate_send_reasons_allow_strong_dex_breakout_without_social_attenti
     assert "entry_buy_pressure" in confirmations
 
 
+def test_candidate_send_reasons_accepts_live_market_cap_usd_for_dex_breakout():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.20,
+        creator_score=0.0,
+        extra={"attention_metrics": {}},
+        dex_summary={
+            "liquidity_usd": 36_000.0,
+            "volume_m5": 14_000.0,
+            "txns_m5_buys": 765,
+            "txns_m5_sells": 79,
+            "price_change_m5": 7.0,
+            "market_cap_usd": 185_000.0,
+        },
+    )
+
+    assert eligible is True
+    assert reasons == []
+    assert "market_support" in confirmations
+    assert "dex_momentum" in confirmations
+    assert "entry_buy_pressure" in confirmations
+
+
+def test_paid_visibility_allows_confirmed_dex_flow_without_local_wallet_counters():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.20,
+        creator_score=0.0,
+        extra={
+            "attention_metrics": {
+                "paid_visibility": True,
+                "unique_buyers_5m": 0,
+                "burst_count_60s": 0,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 36_000.0,
+            "volume_m5": 14_000.0,
+            "txns_m5_buys": 765,
+            "txns_m5_sells": 79,
+            "price_change_m5": 7.0,
+            "market_cap_usd": 185_000.0,
+        },
+    )
+
+    assert eligible is True
+    assert reasons == []
+    assert "paid_visibility_without_flow" not in reasons
+    assert "dex_momentum" in confirmations
+
+
 def test_adversarial_signal_flags_detect_bursty_shallow_liquidity_pattern():
     flags = adversarial_signal_flags(
         metrics={

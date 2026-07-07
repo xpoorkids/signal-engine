@@ -667,7 +667,12 @@ def candidate_confirmation_signals(
         except Exception:
             price_change_m5 = 0.0
         try:
-            market_cap = float(dex_summary.get("market_cap") or dex_summary.get("fdv") or 0.0)
+            market_cap = float(
+                dex_summary.get("market_cap_usd")
+                or dex_summary.get("market_cap")
+                or dex_summary.get("fdv")
+                or 0.0
+            )
         except Exception:
             market_cap = 0.0
     if liq >= policy.min_market_support_liq_usd and buys5m >= policy.market_support_min_buys5m:
@@ -854,6 +859,11 @@ def adversarial_signal_flags(
     vol5m = float(summary.get("volume_m5") or 0.0)
     buys5m = int(summary.get("txns_m5_buys") or 0)
     sells5m = int(summary.get("txns_m5_sells") or 0)
+    dex_flow_confirmed = (
+        liq >= shallow_liq_usd
+        and vol5m >= 5_000.0
+        and buys5m >= max(8, min_burst_count_60s)
+    )
 
     if liq > 0.0:
         if liq < shallow_liq_usd and vol5m >= liq and not any_wallet_support:
@@ -905,6 +915,7 @@ def adversarial_signal_flags(
         (boosts > 0 or paid_visibility)
         and buyers_5m < min_unique_buyers_5m
         and burst_60s < min_burst_count_60s
+        and not dex_flow_confirmed
         and not trusted_wallet_support
     ):
         flags.append("paid_visibility_without_flow")
