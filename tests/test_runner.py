@@ -253,6 +253,51 @@ def test_derived_event_priority_prefers_promoted_then_sniper_then_candidate():
     assert [event.type for event in ordered] == ["promoted", "heating_up", "candidate"]
 
 
+def test_observe_recheck_worker_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("SIGNAL_ENGINE_ENABLE_OBSERVE_RECHECK_WORKER", raising=False)
+
+    assert runner._observe_recheck_worker_enabled() is True
+
+
+def test_observe_recheck_worker_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("SIGNAL_ENGINE_ENABLE_OBSERVE_RECHECK_WORKER", "false")
+
+    assert runner._observe_recheck_worker_enabled() is False
+
+
+def test_run_worker_registers_observe_recheck_task(monkeypatch):
+    created: list[str] = []
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    def _create_worker_task(name, awaitable):
+        created.append(name)
+        task = asyncio.create_task(awaitable, name=name)
+        runner._TASKS[name] = task
+        return task
+
+    monkeypatch.delenv("SIGNAL_ENGINE_ENABLE_OBSERVE_RECHECK_WORKER", raising=False)
+    monkeypatch.setattr(runner, "_TASKS", {})
+    monkeypatch.setattr(runner, "ENABLE_WS", False)
+    monkeypatch.setattr(runner, "ENABLE_DEX", False)
+    monkeypatch.setattr(runner, "resolve_engine_db_path", lambda: "test.db")
+    monkeypatch.setattr(runner, "learning_init", lambda: None)
+    monkeypatch.setattr(runner, "event_loop", _noop)
+    monkeypatch.setattr(runner, "heartbeat_loop", _noop)
+    monkeypatch.setattr(runner, "snapshot_worker", _noop)
+    monkeypatch.setattr(runner, "daily_report_worker", _noop)
+    monkeypatch.setattr(runner, "observe_recheck_worker", _noop)
+    monkeypatch.setattr(runner, "ops_digest_worker", _noop)
+    monkeypatch.setattr(runner, "rollout_verification_worker", _noop)
+    monkeypatch.setattr(runner, "shadow_monitor_worker", _noop)
+    monkeypatch.setattr(runner, "_create_worker_task", _create_worker_task)
+
+    asyncio.run(runner.run_worker())
+
+    assert "observe_recheck_worker" in created
+
+
 def test_event_loop_only_records_wallet_signal_after_successful_delivery(monkeypatch):
     queue: asyncio.Queue = asyncio.Queue()
     recorded_wallets: list[tuple[str, str, str]] = []

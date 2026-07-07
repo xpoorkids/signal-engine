@@ -254,6 +254,7 @@ from app.services.signal_learning_service import (
     record_runtime_heartbeat,
     snapshot_worker,
     daily_report_worker,
+    observe_recheck_worker,
 )
 from app.services.tuning_service import ops_digest_worker, rollout_verification_worker
 from app.services.structured_logging import log_event
@@ -263,6 +264,15 @@ _TASKS: dict[str, asyncio.Task] = {}
 _QUEUE: asyncio.Queue | None = None
 _DEX_SCAN_LAST_EMIT: dict[str, float] = {}
 DEX_SCAN_EMIT_COOLDOWN_SEC = int(os.getenv("DEX_SCAN_EMIT_COOLDOWN_SEC", "300"))
+
+
+def _observe_recheck_worker_enabled() -> bool:
+    return os.getenv("SIGNAL_ENGINE_ENABLE_OBSERVE_RECHECK_WORKER", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
 
 def _task_health() -> dict[str, dict[str, Any]]:
@@ -611,6 +621,8 @@ async def run_worker() -> None:
     tasks.append(_create_worker_task("heartbeat_loop", heartbeat_loop()))
     tasks.append(_create_worker_task("snapshot_worker", snapshot_worker()))
     tasks.append(_create_worker_task("daily_report_worker", daily_report_worker()))
+    if _observe_recheck_worker_enabled():
+        tasks.append(_create_worker_task("observe_recheck_worker", observe_recheck_worker()))
     tasks.append(_create_worker_task("ops_digest_worker", ops_digest_worker()))
     tasks.append(_create_worker_task("rollout_verification_worker", rollout_verification_worker()))
     tasks.append(_create_worker_task("shadow_monitor_worker", shadow_monitor_worker()))
