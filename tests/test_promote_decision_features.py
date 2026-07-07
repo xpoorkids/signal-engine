@@ -59,6 +59,10 @@ def test_record_decision_persists_tradeability_and_ev_features(tmp_path, monkeyp
             "candidate_rate_limit_allowed": False,
             "candidate_rate_limit_checked": True,
             "candidate_progression_ok": True,
+            "candidate_admission_watch_bypass": [
+                "dex_gate:vol5m<5000.0",
+                "confirmation_signals<2",
+            ],
             "wallet_cluster_review": {
                 "verdict": "coordinated_accumulation",
                 "score": 43,
@@ -109,6 +113,10 @@ def test_record_decision_persists_tradeability_and_ev_features(tmp_path, monkeyp
     assert features["candidate_rate_limit_allowed"] is False
     assert features["candidate_rate_limit_checked"] is True
     assert features["candidate_progression_ok"] is True
+    assert features["candidate_admission_watch_bypass"] == [
+        "dex_gate:vol5m<5000.0",
+        "confirmation_signals<2",
+    ]
 
 
 def test_wallet_cluster_constructive_single_holder_can_enter_observe_review():
