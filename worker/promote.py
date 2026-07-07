@@ -807,6 +807,7 @@ def _record_decision(
         "candidate_rate_limit_allowed": extra.get("candidate_rate_limit_allowed"),
         "candidate_rate_limit_checked": extra.get("candidate_rate_limit_checked"),
         "candidate_progression_ok": extra.get("candidate_progression_ok"),
+        "candidate_confirmation_signals": extra.get("candidate_confirmation_signals") or [],
         "wallet_guard_category": extra.get("wallet_guard_category"),
         "wallet_guard_watch_only": bool(extra.get("wallet_guard_watch_only")),
         "wallet_guard_original_reasons": extra.get("wallet_guard_original_reasons") or [],

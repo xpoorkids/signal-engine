@@ -27,6 +27,63 @@ def test_candidate_confirmation_signals_require_multi_factor_support():
     assert confirmations == []
 
 
+def test_candidate_confirmation_signals_accept_dex_native_flow_without_social():
+    reasons, confirmations = candidate_confirmation_signals(
+        attention_score=0.20,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 0,
+                "burst_count_60s": 0,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+                "independent_flow_confirmed": True,
+                "paid_visibility": False,
+                "volume_window_phase": "entering",
+                "volume_pace_ratio": 1.5,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 16620.02,
+            "volume_m5": 8251.46,
+            "txns_m5_buys": 114,
+            "txns_m5_sells": 104,
+            "price_change_m5": 18.02,
+            "market_cap_usd": 47619,
+        },
+    )
+
+    assert "market_support" in confirmations
+    assert "dex_flow_confirmed" in confirmations
+    assert "dex_buyer_pressure" in confirmations
+    assert "confirmation_signals<2" not in reasons
+
+
+def test_paid_visibility_still_needs_real_flow_for_dex_confirmation():
+    reasons, confirmations = candidate_confirmation_signals(
+        attention_score=0.20,
+        extra={
+            "attention_metrics": {
+                "independent_flow_confirmed": False,
+                "paid_visibility": True,
+                "volume_window_phase": "entering",
+                "volume_pace_ratio": 1.5,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 20000.0,
+            "volume_m5": 8000.0,
+            "txns_m5_buys": 40,
+            "txns_m5_sells": 35,
+            "price_change_m5": 2.0,
+            "market_cap_usd": 100000,
+        },
+    )
+
+    assert "dex_flow_confirmed" not in confirmations
+    assert "market_support" in confirmations
+    assert "confirmation_signals<2" not in reasons
+
+
 def test_candidate_send_reasons_reject_concentrated_wallet_flow_without_support():
     eligible, reasons, confirmations = candidate_send_reasons(
         attention_score=0.62,

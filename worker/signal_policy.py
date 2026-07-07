@@ -612,6 +612,13 @@ def candidate_confirmation_signals(
     x_author_followers = int(metrics.get("x_author_followers") or 0)
     narrative_hits = metrics.get("narrative_hits") if isinstance(metrics.get("narrative_hits"), list) else []
     community_takeover = bool(metrics.get("community_takeover"))
+    independent_flow_confirmed = bool(metrics.get("independent_flow_confirmed"))
+    paid_visibility = bool(metrics.get("paid_visibility"))
+    volume_window_phase = str(metrics.get("volume_window_phase") or "").strip().lower()
+    try:
+        volume_pace_ratio = float(metrics.get("volume_pace_ratio") or 0.0)
+    except Exception:
+        volume_pace_ratio = 0.0
     top_wallet_share = float(metrics.get("top_wallet_share_30s") or 0.0)
     unique_wallets_30s = int(metrics.get("unique_wallets_30s") or 0)
 
@@ -687,6 +694,25 @@ def candidate_confirmation_signals(
     if liq >= policy.min_market_support_liq_usd and buys5m >= policy.market_support_min_buys5m:
         confirmations.append("market_support")
     buy_sell_ratio = buys5m / max(1, sells5m)
+    sell_buy_ratio = sells5m / max(1, buys5m)
+    if (
+        independent_flow_confirmed
+        and (not paid_visibility or vol5m >= 10_000)
+        and liq >= policy.min_market_support_liq_usd
+        and vol5m >= 5_000
+        and buys5m >= policy.market_support_min_buys5m
+        and sell_buy_ratio <= 1.2
+        and (volume_pace_ratio >= 1.0 or volume_window_phase in {"entering", "active", "surging"})
+    ):
+        confirmations.append("dex_flow_confirmed")
+    if (
+        buys5m >= max(policy.entry_confirm_buys5m_min * 2, 30)
+        and sell_buy_ratio <= 1.2
+        and price_change_m5 >= -5.0
+        and vol5m >= 7_000
+        and liq >= policy.min_market_support_liq_usd
+    ):
+        confirmations.append("dex_buyer_pressure")
     if (
         liq >= max(policy.entry_chase_min_liq_usd, policy.min_market_support_liq_usd)
         and vol5m >= 10_000
