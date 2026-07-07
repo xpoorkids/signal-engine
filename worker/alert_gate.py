@@ -137,10 +137,14 @@ def evaluate_alert_gate(
     reasons: List[str] = []
 
     liq = _float_or_zero(dex_summary.get("liquidity_usd"))
-    vol5m = _float_or_zero(dex_summary.get("volume_m5"))
-    buys5m = _int_or_zero(dex_summary.get("txns_m5_buys"))
-    sells5m = _int_or_zero(dex_summary.get("txns_m5_sells"))
-    chg5m = _float_or_zero(dex_summary.get("price_change_m5"))
+    vol5m = _float_or_zero(
+        dex_summary.get("volume_m5")
+        or dex_summary.get("volume_m5_usd")
+        or dex_summary.get("volume_5m")
+    )
+    buys5m = _int_or_zero(dex_summary.get("txns_m5_buys") or dex_summary.get("buys_5m"))
+    sells5m = _int_or_zero(dex_summary.get("txns_m5_sells") or dex_summary.get("sells_5m"))
+    chg5m = _float_or_zero(dex_summary.get("price_change_m5") or dex_summary.get("price_change_5m"))
 
     if liq < thresholds["min_liq"]:
         reasons.append(f"liq<{thresholds['min_liq']}")

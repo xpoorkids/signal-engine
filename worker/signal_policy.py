@@ -651,19 +651,28 @@ def candidate_confirmation_signals(
         except Exception:
             liq = 0.0
         try:
-            buys5m = int(dex_summary.get("txns_m5_buys") or 0)
+            buys5m = int(dex_summary.get("txns_m5_buys") or dex_summary.get("buys_5m") or 0)
         except Exception:
             buys5m = 0
         try:
-            sells5m = int(dex_summary.get("txns_m5_sells") or 0)
+            sells5m = int(dex_summary.get("txns_m5_sells") or dex_summary.get("sells_5m") or 0)
         except Exception:
             sells5m = 0
         try:
-            vol5m = float(dex_summary.get("volume_m5") or 0.0)
+            vol5m = float(
+                dex_summary.get("volume_m5")
+                or dex_summary.get("volume_m5_usd")
+                or dex_summary.get("volume_5m")
+                or 0.0
+            )
         except Exception:
             vol5m = 0.0
         try:
-            price_change_m5 = float(dex_summary.get("price_change_m5") or 0.0)
+            price_change_m5 = float(
+                dex_summary.get("price_change_m5")
+                or dex_summary.get("price_change_5m")
+                or 0.0
+            )
         except Exception:
             price_change_m5 = 0.0
         try:
@@ -722,8 +731,8 @@ def entry_quality_profile(
     price_change_h1 = _first_positive_float(summary, payload, keys=("price_change_h1", "price_change_1h"))
     liq = _first_positive_float(summary, payload, keys=("liquidity_usd", "liquidity"))
     vol5m = _first_positive_float(summary, payload, keys=("volume_m5", "volume_m5_usd", "volume_5m"))
-    buys5m = int(summary.get("txns_m5_buys") or payload.get("txns_m5_buys") or 0)
-    sells5m = int(summary.get("txns_m5_sells") or payload.get("txns_m5_sells") or 0)
+    buys5m = int(summary.get("txns_m5_buys") or summary.get("buys_5m") or payload.get("txns_m5_buys") or payload.get("buys_5m") or 0)
+    sells5m = int(summary.get("txns_m5_sells") or summary.get("sells_5m") or payload.get("txns_m5_sells") or payload.get("sells_5m") or 0)
     buyers_5m = int(payload.get("unique_buyers_5m") or 0)
     tracked_hits = int(payload.get("tracked_wallet_hits") or 0)
     kol_hits = int(payload.get("kol_wallet_hits") or 0)
@@ -856,9 +865,9 @@ def adversarial_signal_flags(
 
     summary = dex_summary if isinstance(dex_summary, dict) else {}
     liq = float(summary.get("liquidity_usd") or 0.0)
-    vol5m = float(summary.get("volume_m5") or 0.0)
-    buys5m = int(summary.get("txns_m5_buys") or 0)
-    sells5m = int(summary.get("txns_m5_sells") or 0)
+    vol5m = float(summary.get("volume_m5") or summary.get("volume_m5_usd") or summary.get("volume_5m") or 0.0)
+    buys5m = int(summary.get("txns_m5_buys") or summary.get("buys_5m") or 0)
+    sells5m = int(summary.get("txns_m5_sells") or summary.get("sells_5m") or 0)
     dex_flow_confirmed = (
         liq >= shallow_liq_usd
         and vol5m >= 5_000.0

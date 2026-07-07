@@ -30,6 +30,28 @@ def test_candidate_dex_gate_rejects_weak_market_structure():
     assert any(reason.startswith("dex_gate:") for reason in reasons)
 
 
+def test_candidate_dex_gate_accepts_scanner_metric_aliases():
+    ok, reasons, lifecycle = admission_check_candidate(
+        attention_score=0.62,
+        risk_score=0.30,
+        extra={"metrics": {"age_minutes": 3.0}},
+        dex_summary={
+            "age_minutes": 3.0,
+            "liquidity_usd": 36_000.0,
+            "volume_m5_usd": 21_000.0,
+            "buys_5m": 958,
+            "sells_5m": 174,
+            "price_change_5m": 7.0,
+            "market_cap_usd": 186_000.0,
+        },
+        attention_unavailable=False,
+    )
+
+    assert lifecycle == "dex"
+    assert ok is True
+    assert reasons == []
+
+
 def test_candidate_send_eligible_requires_real_attention_even_with_creator_quality():
     assert _candidate_send_eligible(0.20, 0.90) is False
     assert _candidate_send_eligible(0.36, 0.90) is True

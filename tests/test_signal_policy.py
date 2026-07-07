@@ -171,6 +171,37 @@ def test_paid_visibility_allows_confirmed_dex_flow_without_local_wallet_counters
     assert "dex_momentum" in confirmations
 
 
+def test_candidate_send_reasons_accepts_scanner_metric_aliases():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.20,
+        creator_score=0.0,
+        extra={
+            "attention_metrics": {
+                "dexscreener_boosts_count": 2,
+                "unique_buyers_5m": 0,
+                "burst_count_60s": 0,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 36_000.0,
+            "volume_m5_usd": 21_000.0,
+            "buys_5m": 958,
+            "sells_5m": 174,
+            "price_change_5m": 7.0,
+            "market_cap_usd": 186_000.0,
+        },
+    )
+
+    assert eligible is True
+    assert reasons == []
+    assert "paid_visibility_without_flow" not in reasons
+    assert "market_support" in confirmations
+    assert "dex_momentum" in confirmations
+    assert "entry_buy_pressure" in confirmations
+
+
 def test_adversarial_signal_flags_detect_bursty_shallow_liquidity_pattern():
     flags = adversarial_signal_flags(
         metrics={
