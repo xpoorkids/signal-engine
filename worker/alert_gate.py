@@ -139,6 +139,8 @@ def _dex_accumulation_watch(extra: Dict[str, Any], dex_summary: Dict[str, Any]) 
     volume_delta = _float_or_zero(metrics.get("dex_scan_volume_delta_5m"))
     persistent = bool(metrics.get("dex_scan_persistent")) or repeat_count >= 2
     independent_flow = bool(metrics.get("independent_flow_confirmed"))
+    sources = metrics.get("discovery_sources") if isinstance(metrics.get("discovery_sources"), list) else []
+    credible_source = bool(metrics.get("community_takeover")) or "community_takeover" in sources
     sell_ratio = sells5m / max(1, buys5m)
 
     return (
@@ -150,7 +152,7 @@ def _dex_accumulation_watch(extra: Dict[str, Any], dex_summary: Dict[str, Any]) 
         and sell_ratio <= 1.25
         and chg5m >= -18.0
         and 50_000.0 <= market_cap <= 5_000_000.0
-        and (independent_flow or volume_delta > 0.0)
+        and (independent_flow or volume_delta > 0.0 or credible_source)
     )
 
 

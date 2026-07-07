@@ -119,6 +119,43 @@ def test_candidate_dex_gate_keeps_weak_accumulation_rejected():
     assert "dex_gate:vol5m<5000.0" in reasons
 
 
+def test_candidate_dex_gate_allows_curated_accumulation_after_burst():
+    extra = {
+        "metrics": {
+            "age_minutes": 430.0,
+            "community_takeover": True,
+            "discovery_sources": ["community_takeover"],
+            "dex_scan_persistent": True,
+            "dex_scan_repeat_count": 11,
+            "dex_scan_volume_delta_5m": -180.0,
+            "independent_flow_confirmed": False,
+        }
+    }
+    ok, reasons, lifecycle = admission_check_candidate(
+        attention_score=0.20,
+        risk_score=0.0,
+        extra=extra,
+        dex_summary={
+            "age_minutes": 430.0,
+            "liquidity_usd": 31_000.0,
+            "volume_m5": 2_200.0,
+            "txns_m5_buys": 34,
+            "txns_m5_sells": 16,
+            "price_change_m5": -6.6,
+            "market_cap_usd": 142_000.0,
+        },
+        attention_unavailable=False,
+    )
+
+    assert lifecycle == "dex"
+    assert ok is True
+    assert reasons == []
+    assert extra["candidate_admission_watch_bypass"] == [
+        "dex_gate:vol5m<5000.0",
+        "confirmation_signals<2",
+    ]
+
+
 def test_candidate_send_eligible_requires_real_attention_even_with_creator_quality():
     assert _candidate_send_eligible(0.20, 0.90) is False
     assert _candidate_send_eligible(0.36, 0.90) is True
