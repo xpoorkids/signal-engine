@@ -4,6 +4,8 @@ from typing import Iterable
 
 import requests
 
+from app.services.j7tracker_service import fetch_j7tracker_tokens, get_j7tracker_health
+
 DEX_URL = "https://api.dexscreener.com/latest/dex/search?q=solana"
 DEX_TOKEN_BATCH_URL = "https://api.dexscreener.com/tokens/v1/solana/{tokens}"
 DEX_DISCOVERY_URLS = (
@@ -223,6 +225,38 @@ def _fetch_external_seed_pairs() -> tuple[list[dict], dict[str, dict]]:
     return pairs, {"external_seed": _source_item("external_seed", ok=True, pair_count=len(pairs), token_count=len(tokens))}
 
 
+def _fetch_j7tracker_pairs() -> tuple[list[dict], dict[str, dict]]:
+    tokens = fetch_j7tracker_tokens()
+    pairs: list[dict] = []
+    seen_pairs: set[str] = set()
+    for start in range(0, len(tokens), 30):
+        batch = tokens[start : start + 30]
+        if not batch:
+            continue
+        data = _fetch_json(DEX_TOKEN_BATCH_URL.format(tokens=",".join(batch)))
+        for pair in data.get("pairs", []) if isinstance(data, dict) else []:
+            if not isinstance(pair, dict):
+                continue
+            pair_key = str(pair.get("pairAddress") or "")
+            if pair_key and pair_key in seen_pairs:
+                continue
+            if pair_key:
+                seen_pairs.add(pair_key)
+            pair["signal_engine_sources"] = list(
+                dict.fromkeys([*pair.get("signal_engine_sources", []), "j7tracker"])
+            ) if isinstance(pair.get("signal_engine_sources"), list) else ["j7tracker"]
+            pairs.append(pair)
+    health = get_j7tracker_health()
+    return pairs, {
+        "j7tracker": {
+            **_source_item("j7tracker", ok=True, pair_count=len(pairs), token_count=len(tokens)),
+            "enabled": bool(health.get("enabled")),
+            "configured": bool(health.get("configured")),
+            "last_error": health.get("last_error"),
+        }
+    }
+
+
 def fetch_solana_pairs():
     pairs = []
     started = time.time()
@@ -232,6 +266,7 @@ def fetch_solana_pairs():
         ("search", _fetch_search_pairs),
         ("profile", _fetch_profile_pairs),
         ("external_seed", _fetch_external_seed_pairs),
+        ("j7tracker", _fetch_j7tracker_pairs),
     ):
         try:
             fetched, health = fetcher()

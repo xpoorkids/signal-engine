@@ -57,6 +57,55 @@ def test_external_seed_pairs_fetches_configured_tokens(monkeypatch):
     assert health["external_seed"]["pair_count"] == 2
 
 
+def test_j7tracker_pairs_fetches_configured_tokens(monkeypatch):
+    token_a = "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump"
+    token_b = "DdPrHYqM8Ueovnk9kAnAgoGhswkuaTqmxcoZzU3Zpump"
+    monkeypatch.setenv("SIGNAL_ENGINE_J7_ENABLED", "1")
+    monkeypatch.setenv(
+        "SIGNAL_ENGINE_J7_EXPORT_JSON",
+        f'{{"tokens":[{{"chain":"solana","address":"{token_a}"}},{{"mint":"{token_b}"}}]}}',
+    )
+    fetched_urls = []
+
+    def fake_fetch_json(url: str):
+        fetched_urls.append(url)
+        return {
+            "pairs": [
+                {"chainId": "solana", "pairAddress": "pair-a"},
+                {"chainId": "solana", "pairAddress": "pair-a"},
+                {"chainId": "solana", "pairAddress": "pair-b"},
+            ]
+        }
+
+    monkeypatch.setattr(dex_service, "_fetch_json", fake_fetch_json)
+
+    pairs, health = dex_service._fetch_j7tracker_pairs()
+
+    assert f"{token_a},{token_b}" in fetched_urls[0]
+    assert [item["pairAddress"] for item in pairs] == ["pair-a", "pair-b"]
+    assert all(item["signal_engine_sources"] == ["j7tracker"] for item in pairs)
+    assert health["j7tracker"]["ok"] is True
+    assert health["j7tracker"]["enabled"] is True
+    assert health["j7tracker"]["configured"] is True
+
+
+def test_j7tracker_json_parser_ignores_unrelated_strings():
+    from app.services.j7tracker_service import _extract_tokens_from_json
+
+    token = "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump"
+    ignored_secret = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    tokens = _extract_tokens_from_json(
+        {
+            "sessionId": ignored_secret,
+            "settings": {"label": ignored_secret},
+            "watchlist": [{"chain": "solana", "address": token}],
+        }
+    )
+
+    assert tokens == [token]
+
+
 def test_profile_pairs_preserve_discovery_sources(monkeypatch):
     token = "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump"
     responses = {

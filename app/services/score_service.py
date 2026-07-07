@@ -169,6 +169,7 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                 {
                     "community_takeover",
                     "external_seed",
+                    "j7tracker",
                     "token_profile",
                     "token_boost_top",
                 }
