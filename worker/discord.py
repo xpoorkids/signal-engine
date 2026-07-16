@@ -967,6 +967,7 @@ def _pretty_reason(reason: str) -> str:
         "low_volume_market_cap_imbalance": "Volume is weak versus market cap",
         "paid_visibility_without_flow": "Paid visibility without real flow",
         "social_echo_chamber": "Social momentum is author-concentrated",
+        "synthetic_churn_without_independent_flow": "DEX activity looks synthetic",
     }
     if reason in mapping:
         return mapping[reason]

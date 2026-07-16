@@ -634,7 +634,7 @@ def dex_accumulation_watch_signal(
         and chg5m >= -18.0
         and market_cap is not None
         and 50_000.0 <= market_cap <= 5_000_000.0
-        and (independent_flow or volume_delta > 0.0 or credible_source)
+        and (independent_flow or volume_delta >= 500.0 or credible_source)
     )
 
 
@@ -977,6 +977,47 @@ def adversarial_signal_flags(
         sell_ratio = float(sells5m) / float(buys5m)
         if sell_ratio > max_sell_ratio_5m and not any_wallet_support:
             flags.append("sell_pressure_elevated")
+    else:
+        sell_ratio = 0.0
+
+    price_change_m5 = _first_positive_float(
+        summary,
+        payload,
+        keys=("price_change_m5", "price_change_5m"),
+    )
+    if price_change_m5 is None:
+        try:
+            price_change_m5 = float(summary.get("price_change_m5") or summary.get("price_change_5m") or 0.0)
+        except Exception:
+            price_change_m5 = 0.0
+    repeat_count = int(payload.get("dex_scan_repeat_count") or 0)
+    try:
+        volume_delta = float(payload.get("dex_scan_volume_delta_5m") or 0.0)
+    except Exception:
+        volume_delta = 0.0
+    sources = payload.get("discovery_sources") if isinstance(payload.get("discovery_sources"), list) else []
+    credible_source = bool(payload.get("community_takeover")) or "community_takeover" in sources
+    x_mentions = int(payload.get("x_tweet_count") or 0)
+    x_authors = int(payload.get("x_unique_authors") or 0)
+    x_heavy_authors = int(payload.get("x_heavy_author_count") or 0)
+    x_verified_authors = int(payload.get("x_verified_author_count") or 0)
+    x_author_followers = int(payload.get("x_author_followers") or 0)
+    credible_social_support = x_heavy_authors > 0 or x_verified_authors >= 2 or x_author_followers >= 50_000
+    synthetic_churn_shape = (
+        buys5m >= 25
+        and sells5m >= 20
+        and 0.65 <= sell_ratio <= 1.35
+        and abs(float(price_change_m5 or 0.0)) <= 3.0
+        and buyers_5m < min_unique_buyers_5m
+        and burst_60s < min_burst_count_60s
+        and repeat_count >= 3
+        and volume_delta < 500.0
+        and not any_wallet_support
+        and not credible_source
+        and not credible_social_support
+    )
+    if synthetic_churn_shape:
+        flags.append("synthetic_churn_without_independent_flow")
 
     holder_ratio = _first_positive_float(
         payload,
@@ -1023,12 +1064,6 @@ def adversarial_signal_flags(
     ):
         flags.append("paid_visibility_without_flow")
 
-    x_mentions = int(payload.get("x_tweet_count") or 0)
-    x_authors = int(payload.get("x_unique_authors") or 0)
-    x_heavy_authors = int(payload.get("x_heavy_author_count") or 0)
-    x_verified_authors = int(payload.get("x_verified_author_count") or 0)
-    x_author_followers = int(payload.get("x_author_followers") or 0)
-    credible_social_support = x_heavy_authors > 0 or x_verified_authors >= 2 or x_author_followers >= 50_000
     min_social_mentions = int(social_min_mentions or 0)
     if (
         x_mentions >= min_social_mentions > 0
@@ -1133,6 +1168,7 @@ def candidate_send_reasons(
         "low_volume_market_cap_imbalance",
         "paid_visibility_without_flow",
         "social_echo_chamber",
+        "synthetic_churn_without_independent_flow",
         "entry_extended_thin_liquidity",
         "entry_extended_without_breadth",
         "entry_extended_buy_pressure_missing",
