@@ -99,7 +99,11 @@ from worker.config import (
     CAND_MIN_CURVE_LIQ_USD,
     EARLY_ATTENTION_MIN,
 )
-from worker.signal_policy import market_quality_thresholds_for_age, candidate_confirmation_signals
+from worker.signal_policy import (
+    candidate_confirmation_signals,
+    dex_accumulation_watch_signal,
+    market_quality_thresholds_for_age,
+)
 
 
 def _float_or_zero(value: Any) -> float:
@@ -119,41 +123,7 @@ def _int_or_zero(value: Any) -> int:
 def _dex_accumulation_watch(extra: Dict[str, Any], dex_summary: Dict[str, Any]) -> bool:
     metrics = extra.get("metrics") if isinstance(extra, dict) else {}
     metrics = metrics if isinstance(metrics, dict) else {}
-
-    age_min = _float_or_zero(dex_summary.get("age_minutes"))
-    liq = _float_or_zero(dex_summary.get("liquidity_usd"))
-    vol5m = _float_or_zero(
-        dex_summary.get("volume_m5")
-        or dex_summary.get("volume_m5_usd")
-        or dex_summary.get("volume_5m")
-    )
-    buys5m = _int_or_zero(dex_summary.get("txns_m5_buys") or dex_summary.get("buys_5m"))
-    sells5m = _int_or_zero(dex_summary.get("txns_m5_sells") or dex_summary.get("sells_5m"))
-    chg5m = _float_or_zero(dex_summary.get("price_change_m5") or dex_summary.get("price_change_5m"))
-    market_cap = _float_or_zero(
-        dex_summary.get("market_cap_usd")
-        or dex_summary.get("market_cap")
-        or dex_summary.get("fdv")
-    )
-    repeat_count = _int_or_zero(metrics.get("dex_scan_repeat_count"))
-    volume_delta = _float_or_zero(metrics.get("dex_scan_volume_delta_5m"))
-    persistent = bool(metrics.get("dex_scan_persistent")) or repeat_count >= 2
-    independent_flow = bool(metrics.get("independent_flow_confirmed"))
-    sources = metrics.get("discovery_sources") if isinstance(metrics.get("discovery_sources"), list) else []
-    credible_source = bool(metrics.get("community_takeover")) or "community_takeover" in sources
-    sell_ratio = sells5m / max(1, buys5m)
-
-    return (
-        age_min >= 10.0
-        and persistent
-        and liq >= 25_000.0
-        and vol5m >= 1_000.0
-        and buys5m >= 12
-        and sell_ratio <= 1.25
-        and chg5m >= -18.0
-        and 50_000.0 <= market_cap <= 5_000_000.0
-        and (independent_flow or volume_delta > 0.0 or credible_source)
-    )
+    return dex_accumulation_watch_signal(metrics, dex_summary)
 
 
 def evaluate_alert_gate(

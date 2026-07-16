@@ -259,6 +259,72 @@ def test_paid_visibility_allows_confirmed_dex_flow_without_local_wallet_counters
     assert "dex_momentum" in confirmations
 
 
+def test_candidate_send_reasons_allow_persistent_dex_accumulation_without_social():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.20,
+        creator_score=0.0,
+        extra={
+            "attention_metrics": {
+                "dex_scan_persistent": True,
+                "dex_scan_repeat_count": 6,
+                "dex_scan_volume_delta_5m": 750.0,
+                "independent_flow_confirmed": True,
+                "unique_buyers_5m": 0,
+                "burst_count_60s": 0,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={
+            "age_minutes": 180.0,
+            "liquidity_usd": 80_000.0,
+            "volume_m5": 2_800.0,
+            "txns_m5_buys": 42,
+            "txns_m5_sells": 31,
+            "price_change_m5": 3.0,
+            "market_cap_usd": 1_200_000.0,
+        },
+    )
+
+    assert eligible is True
+    assert reasons == []
+    assert "market_support" in confirmations
+    assert "dex_accumulation_watch" in confirmations
+
+
+def test_candidate_send_reasons_reject_sell_heavy_dex_accumulation():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.20,
+        creator_score=0.0,
+        extra={
+            "attention_metrics": {
+                "dex_scan_persistent": True,
+                "dex_scan_repeat_count": 6,
+                "dex_scan_volume_delta_5m": 750.0,
+                "independent_flow_confirmed": True,
+                "unique_buyers_5m": 0,
+                "burst_count_60s": 0,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={
+            "age_minutes": 180.0,
+            "liquidity_usd": 80_000.0,
+            "volume_m5": 2_800.0,
+            "txns_m5_buys": 42,
+            "txns_m5_sells": 60,
+            "price_change_m5": 3.0,
+            "market_cap_usd": 1_200_000.0,
+        },
+    )
+
+    assert eligible is False
+    assert "dex_accumulation_watch" not in confirmations
+    assert "send_confirmation_signals<3" in reasons
+    assert "attention_creator_alignment_missing" in reasons
+
+
 def test_candidate_send_reasons_accepts_scanner_metric_aliases():
     eligible, reasons, confirmations = candidate_send_reasons(
         attention_score=0.20,

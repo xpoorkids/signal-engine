@@ -587,6 +587,57 @@ def market_quality_thresholds_for_age(age_min: float) -> MarketQualityThresholds
     )
 
 
+def dex_accumulation_watch_signal(
+    metrics: dict[str, Any] | None,
+    dex_summary: dict[str, Any] | None,
+) -> bool:
+    payload = metrics if isinstance(metrics, dict) else {}
+    summary = dex_summary if isinstance(dex_summary, dict) else {}
+
+    age_min = _first_positive_float(summary, payload, keys=("age_minutes",))
+    liq = _first_positive_float(summary, payload, keys=("liquidity_usd", "liquidity"))
+    vol5m = _first_positive_float(summary, payload, keys=("volume_m5", "volume_m5_usd", "volume_5m"))
+    market_cap = _first_positive_float(summary, payload, keys=("market_cap_usd", "market_cap", "fdv"))
+    try:
+        buys5m = int(summary.get("txns_m5_buys") or summary.get("buys_5m") or payload.get("txns_m5_buys") or payload.get("buys_5m") or 0)
+    except Exception:
+        buys5m = 0
+    try:
+        sells5m = int(summary.get("txns_m5_sells") or summary.get("sells_5m") or payload.get("txns_m5_sells") or payload.get("sells_5m") or 0)
+    except Exception:
+        sells5m = 0
+    try:
+        chg5m = float(summary.get("price_change_m5") or summary.get("price_change_5m") or payload.get("price_change_m5") or payload.get("price_change_5m") or 0.0)
+    except Exception:
+        chg5m = 0.0
+    repeat_count = int(payload.get("dex_scan_repeat_count") or 0)
+    try:
+        volume_delta = float(payload.get("dex_scan_volume_delta_5m") or 0.0)
+    except Exception:
+        volume_delta = 0.0
+    persistent = bool(payload.get("dex_scan_persistent")) or repeat_count >= 2
+    independent_flow = bool(payload.get("independent_flow_confirmed"))
+    sources = payload.get("discovery_sources") if isinstance(payload.get("discovery_sources"), list) else []
+    credible_source = bool(payload.get("community_takeover")) or "community_takeover" in sources
+    sell_ratio = sells5m / max(1, buys5m)
+
+    return (
+        age_min is not None
+        and age_min >= 10.0
+        and persistent
+        and liq is not None
+        and liq >= 25_000.0
+        and vol5m is not None
+        and vol5m >= 1_000.0
+        and buys5m >= 12
+        and sell_ratio <= 1.25
+        and chg5m >= -18.0
+        and market_cap is not None
+        and 50_000.0 <= market_cap <= 5_000_000.0
+        and (independent_flow or volume_delta > 0.0 or credible_source)
+    )
+
+
 def candidate_confirmation_signals(
     *,
     attention_score: float,
@@ -728,6 +779,8 @@ def candidate_confirmation_signals(
         and vol5m >= 5_000
     ):
         confirmations.append("entry_buy_pressure")
+    if dex_accumulation_watch_signal(metrics, dex_summary):
+        confirmations.append("dex_accumulation_watch")
 
     if (
         top_wallet_share >= policy.anti_wash_top_wallet_share
@@ -1054,9 +1107,14 @@ def candidate_send_reasons(
         "entry_buy_pressure",
     }.issubset(confirmation_set)
     has_dex_breakout = has_dex_momentum_breakout or has_dex_pressure_breakout
+    has_dex_accumulation_breakout = {
+        "market_support",
+        "dex_accumulation_watch",
+    }.issubset(confirmation_set)
 
     if (
         len(confirmations) < policy.min_send_confirmation_signals
+        and not has_dex_accumulation_breakout
         and not (
             attn >= policy.exceptional_attention_threshold
             and flow_strength_confirmed
@@ -1084,8 +1142,20 @@ def candidate_send_reasons(
     if adversarial_flags and not route_fast_lane and (not hard_quality_confirmed or has_severe_adversarial_flag):
         reasons.extend(item for item in adversarial_flags if item not in reasons)
 
-    eligible = (has_attention_only or has_creator_support or has_balanced_quality or has_dex_breakout) and not reasons
-    if not (has_attention_only or has_creator_support or has_balanced_quality or has_dex_breakout):
+    eligible = (
+        has_attention_only
+        or has_creator_support
+        or has_balanced_quality
+        or has_dex_breakout
+        or has_dex_accumulation_breakout
+    ) and not reasons
+    if not (
+        has_attention_only
+        or has_creator_support
+        or has_balanced_quality
+        or has_dex_breakout
+        or has_dex_accumulation_breakout
+    ):
         reasons.append("attention_creator_alignment_missing")
     return eligible, reasons, confirmations
 
