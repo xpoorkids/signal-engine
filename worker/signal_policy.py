@@ -73,6 +73,9 @@ class CandidateSignalPolicy:
     adversarial_min_volume_market_cap_ratio: float
     adversarial_social_min_author_ratio: float
     adversarial_social_min_mentions: int
+    viral_social_min_mentions: int
+    viral_social_min_authors: int
+    viral_social_min_likes: int
     entry_chase_price_change_5m: float
     entry_chase_price_change_h1: float
     entry_chase_max_buy_sell_ratio: float
@@ -332,6 +335,9 @@ def candidate_signal_policy() -> CandidateSignalPolicy:
         adversarial_min_volume_market_cap_ratio=_env_float("SIGNAL_ENGINE_CANDIDATE_ADVERSARIAL_MIN_VOLUME_MARKET_CAP_RATIO", 0.80),
         adversarial_social_min_author_ratio=_env_float("SIGNAL_ENGINE_CANDIDATE_ADVERSARIAL_SOCIAL_MIN_AUTHOR_RATIO", 0.35),
         adversarial_social_min_mentions=_env_int("SIGNAL_ENGINE_CANDIDATE_ADVERSARIAL_SOCIAL_MIN_MENTIONS", 8),
+        viral_social_min_mentions=_env_int("SIGNAL_ENGINE_CANDIDATE_VIRAL_SOCIAL_MIN_MENTIONS", 8),
+        viral_social_min_authors=_env_int("SIGNAL_ENGINE_CANDIDATE_VIRAL_SOCIAL_MIN_AUTHORS", 4),
+        viral_social_min_likes=_env_int("SIGNAL_ENGINE_CANDIDATE_VIRAL_SOCIAL_MIN_LIKES", 30),
         entry_chase_price_change_5m=_env_float("SIGNAL_ENGINE_ENTRY_CHASE_PRICE_CHANGE_5M", 45.0),
         entry_chase_price_change_h1=_env_float("SIGNAL_ENGINE_ENTRY_CHASE_PRICE_CHANGE_H1", 140.0),
         entry_chase_max_buy_sell_ratio=_env_float("SIGNAL_ENGINE_ENTRY_CHASE_MAX_BUY_SELL_RATIO", 1.35),
@@ -661,7 +667,10 @@ def candidate_confirmation_signals(
     x_heavy_authors = int(metrics.get("x_heavy_author_count") or 0)
     x_verified_authors = int(metrics.get("x_verified_author_count") or 0)
     x_author_followers = int(metrics.get("x_author_followers") or 0)
+    x_likes = int(metrics.get("x_likes") or 0)
     narrative_hits = metrics.get("narrative_hits") if isinstance(metrics.get("narrative_hits"), list) else []
+    viral_theme_hits = metrics.get("viral_theme_hits") if isinstance(metrics.get("viral_theme_hits"), list) else []
+    viral_x_signal = bool(metrics.get("viral_x_signal"))
     community_takeover = bool(metrics.get("community_takeover"))
     independent_flow_confirmed = bool(metrics.get("independent_flow_confirmed"))
     paid_visibility = bool(metrics.get("paid_visibility"))
@@ -696,6 +705,20 @@ def candidate_confirmation_signals(
         confirmations.append("narrative_alignment")
     if community_takeover:
         confirmations.append("community_takeover")
+    if viral_theme_hits:
+        confirmations.append("viral_theme")
+    if (
+        viral_theme_hits
+        and x_mentions >= policy.viral_social_min_mentions
+        and x_authors >= policy.viral_social_min_authors
+        and (
+            x_likes >= policy.viral_social_min_likes
+            or x_heavy_authors > 0
+            or x_verified_authors > 0
+            or viral_x_signal
+        )
+    ):
+        confirmations.append("viral_x_momentum")
 
     liq = 0.0
     buys5m = 0
@@ -1003,6 +1026,13 @@ def adversarial_signal_flags(
     x_verified_authors = int(payload.get("x_verified_author_count") or 0)
     x_author_followers = int(payload.get("x_author_followers") or 0)
     credible_social_support = x_heavy_authors > 0 or x_verified_authors >= 2 or x_author_followers >= 50_000
+    viral_x_support = bool(payload.get("viral_x_signal")) or (
+        payload.get("viral_theme_hits")
+        and x_mentions >= 8
+        and x_authors >= 4
+        and (x_author_followers >= 25_000 or x_verified_authors > 0 or x_heavy_authors > 0)
+    )
+    credible_social_support = credible_social_support or viral_x_support
     synthetic_churn_shape = (
         buys5m >= 25
         and sells5m >= 20
@@ -1123,7 +1153,15 @@ def candidate_send_reasons(
         reasons.append("wallet_guard_watch_only")
     hard_quality_confirmed = bool({"tracked_wallet_flow", "market_support", "heavy_x_support"} & confirmation_set)
     soft_quality_confirmed = bool(
-        {"kol_wallet_flow", "social_support", "credible_x_reach", "narrative_alignment", "community_takeover"} & confirmation_set
+        {
+            "kol_wallet_flow",
+            "social_support",
+            "credible_x_reach",
+            "narrative_alignment",
+            "community_takeover",
+            "viral_x_momentum",
+        }
+        & confirmation_set
     )
     flow_strength_confirmed = {"buyer_breadth", "burst_strength"}.issubset(confirmation_set)
     route_fast_lane = route_tier == "sniper" or (route_tier == "heating_up" and route_confidence >= 0.75)
@@ -1146,10 +1184,15 @@ def candidate_send_reasons(
         "market_support",
         "dex_accumulation_watch",
     }.issubset(confirmation_set)
+    has_viral_breakout = (
+        {"market_support", "viral_x_momentum"}.issubset(confirmation_set)
+        and bool({"entry_buy_pressure", "dex_flow_confirmed", "dex_buyer_pressure"} & confirmation_set)
+    )
 
     if (
         len(confirmations) < policy.min_send_confirmation_signals
         and not has_dex_accumulation_breakout
+        and not has_viral_breakout
         and not (
             attn >= policy.exceptional_attention_threshold
             and flow_strength_confirmed
@@ -1184,6 +1227,7 @@ def candidate_send_reasons(
         or has_balanced_quality
         or has_dex_breakout
         or has_dex_accumulation_breakout
+        or has_viral_breakout
     ) and not reasons
     if not (
         has_attention_only
@@ -1191,6 +1235,7 @@ def candidate_send_reasons(
         or has_balanced_quality
         or has_dex_breakout
         or has_dex_accumulation_breakout
+        or has_viral_breakout
     ):
         reasons.append("attention_creator_alignment_missing")
     return eligible, reasons, confirmations

@@ -1,4 +1,4 @@
-from worker import x_signal
+from worker import attention, x_signal
 
 
 def test_build_query_always_includes_token_when_template_omits_it(monkeypatch):
@@ -62,3 +62,15 @@ def test_fetch_x_signal_counts_heavy_and_verified_authors(monkeypatch):
     assert health["last_token"] == "TokenMint123"
     assert health["last_status_code"] == 200
     assert health["last_result_count"] == 2
+
+
+def test_viral_theme_hits_detect_animals_and_events():
+    class Event:
+        extra = {"symbol": "DOG2026", "name": "Election Dog"}
+
+    hits, categories = attention._viral_theme_hits(Event())
+
+    assert "dog" in hits
+    assert "election" in hits
+    assert "animal" in categories
+    assert "event" in categories

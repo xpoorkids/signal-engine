@@ -157,6 +157,19 @@ RADAR_QUIET_RISK_MAX = float(os.getenv("RADAR_QUIET_RISK_MAX", "0.25"))
 TRACKED_SMART_WALLETS = set(env_csv("TRACKED_SMART_WALLETS"))
 KOL_WALLETS = set(env_csv("KOL_WALLETS"))
 NARRATIVE_KEYWORDS = [item.lower() for item in env_csv("NARRATIVE_KEYWORDS")]
+VIRAL_THEME_KEYWORDS = [
+    item.lower()
+    for item in env_csv(
+        "VIRAL_THEME_KEYWORDS",
+        (
+            "dog,doge,cat,frog,pepe,shark,whale,bull,bear,wolf,ape,monkey,goat,"
+            "duck,bird,chicken,penguin,hamster,capybara,fox,tiger,lion,"
+            "election,debate,olympics,worldcup,superbowl,finals,ufc,fight,"
+            "fed,fomc,cpi,ratecut,launch,eclipse,halloween,christmas,"
+            "tiktok,viral,trend,meta,meme"
+        ),
+    )
+]
 X_QUERY_TEMPLATE = os.getenv("X_QUERY_TEMPLATE", '"{name}" OR "${symbol}" -is:retweet -is:reply lang:en').strip()
 X_SEARCH_MAX_RESULTS = int(os.getenv("X_SEARCH_MAX_RESULTS", "10"))
 X_HEAVY_HANDLES = {item.lower().lstrip("@") for item in env_csv("X_HEAVY_HANDLES")}

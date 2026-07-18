@@ -122,6 +122,7 @@ Gotchas
 
 import asyncio
 import json
+import re
 import time
 from collections import deque
 from typing import Tuple, List, Dict, Any, Optional
@@ -137,6 +138,7 @@ from worker.config import (
     TRACKED_SMART_WALLETS,
     KOL_WALLETS,
     NARRATIVE_KEYWORDS,
+    VIRAL_THEME_KEYWORDS,
 )
 from worker.signal_policy import attention_scoring_policy, candidate_signal_policy
 from worker.token_state import _ts
@@ -152,6 +154,13 @@ _DEX_CACHE: Dict[str, tuple[float, Any]] = {}
 def _append_reason(reasons: list[str], text: str) -> None:
     if text and text not in reasons:
         reasons.append(text)
+
+
+def _metric_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
 
 
 def _recent_buyers(state: Any, token: str, window_sec: int = 300) -> set[str]:
@@ -177,6 +186,79 @@ def _narrative_hits(e: Any) -> list[str]:
     if not haystack:
         return []
     return [kw for kw in NARRATIVE_KEYWORDS if kw in haystack]
+
+
+def _viral_theme_hits(e: Any) -> tuple[list[str], list[str]]:
+    extra = getattr(e, "extra", {}) if hasattr(e, "extra") else {}
+    symbol = str((extra or {}).get("symbol") or "").lower()
+    name = str((extra or {}).get("name") or "").lower()
+    candidate = (extra or {}).get("dex_scan_candidate") if isinstance(extra, dict) else {}
+    if isinstance(candidate, dict):
+        symbol = symbol or str(candidate.get("symbol") or "").lower()
+        name = name or str(candidate.get("name") or "").lower()
+    haystack = f"{symbol} {name}".strip()
+    if not haystack:
+        return [], []
+    words = set(re.findall(r"[a-z0-9]+", haystack))
+    compact = re.sub(r"[^a-z0-9]+", "", haystack)
+    hits: list[str] = []
+    for keyword in VIRAL_THEME_KEYWORDS:
+        key = str(keyword or "").strip().lower()
+        key_compact = re.sub(r"[^a-z0-9]+", "", key)
+        if not key_compact:
+            continue
+        if key_compact in words or (len(key_compact) >= 4 and key_compact in compact):
+            hits.append(key_compact)
+    category_map = {
+        "animal": {
+            "dog",
+            "cat",
+            "frog",
+            "pepe",
+            "shark",
+            "whale",
+            "bull",
+            "bear",
+            "wolf",
+            "ape",
+            "monkey",
+            "goat",
+            "duck",
+            "bird",
+            "chicken",
+            "penguin",
+            "hamster",
+            "capybara",
+            "fox",
+            "tiger",
+            "lion",
+        },
+        "event": {
+            "election",
+            "debate",
+            "olympics",
+            "worldcup",
+            "superbowl",
+            "finals",
+            "ufc",
+            "fight",
+            "fed",
+            "fomc",
+            "cpi",
+            "ratecut",
+            "launch",
+            "eclipse",
+            "halloween",
+            "christmas",
+        },
+        "viral": {"tiktok", "viral", "trend", "meta", "meme"},
+    }
+    categories = [
+        category
+        for category, members in category_map.items()
+        if any(hit in members for hit in hits)
+    ]
+    return list(dict.fromkeys(hits)), categories
 
 
 
@@ -478,6 +560,9 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         "tracked_wallet_hits": 0,
         "kol_wallet_hits": 0,
         "narrative_hits": [],
+        "viral_theme_hits": [],
+        "viral_theme_categories": [],
+        "viral_x_signal": False,
         "x_tweet_count": 0,
         "x_unique_authors": 0,
         "x_heavy_author_count": 0,
@@ -645,6 +730,13 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         narrative_score = min(policy.narrative_max_score, len(hits) * policy.narrative_step)
         _append_reason(reasons, f"Narrative alignment: {', '.join(hits[:2])}")
 
+    viral_score = 0.0
+    viral_hits, viral_categories = _viral_theme_hits(e)
+    if viral_hits:
+        metrics["viral_theme_hits"] = viral_hits[:5]
+        metrics["viral_theme_categories"] = viral_categories[:3]
+        _append_reason(reasons, f"Viral theme watch: {', '.join(viral_hits[:2])}")
+
     x_score = 0.0
     x_query_reason = ""
     if tracked_score > 0.0:
@@ -655,6 +747,11 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         x_query_reason = "curated_or_paid_discovery"
     elif metrics.get("independent_flow_confirmed") or metrics.get("dex_scan_persistent"):
         x_query_reason = "dex_flow_or_repeat_seen"
+    elif viral_hits and seed_metrics and (
+        _metric_float(seed_metrics.get("volume_5m") or seed_metrics.get("volume_m5")) >= 1_000.0
+        or _metric_float(seed_metrics.get("price_change_5m") or seed_metrics.get("price_change_m5")) >= 0.0
+    ):
+        x_query_reason = "viral_theme_with_dex_interest"
     elif narrative_score > 0.0 and local >= policy.x_local_gate_with_boost:
         x_query_reason = "narrative_with_local_flow"
     elif birdeye_score > 0.0 and local >= policy.x_local_gate_with_birdeye:
@@ -697,6 +794,25 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
                 x_score += policy.x_authors_score
             if metrics["x_verified_author_count"] >= 2 or metrics["x_author_followers"] >= 50_000:
                 x_score += policy.x_likes_score
+            if (
+                viral_hits
+                and metrics["x_tweet_count"] >= 8
+                and metrics["x_unique_authors"] >= 4
+                and (
+                    metrics["x_likes"] >= 30
+                    or metrics["x_heavy_author_count"] > 0
+                    or metrics["x_verified_author_count"] > 0
+                )
+            ):
+                metrics["viral_x_signal"] = True
+                viral_score = min(policy.narrative_max_score, policy.narrative_step * 2)
+                _append_reason(
+                    reasons,
+                    (
+                        f"Viral X lift: {metrics['x_tweet_count']} mentions / "
+                        f"{metrics['x_unique_authors']} authors"
+                    ),
+                )
             if x_score > 0:
                 _append_reason(
                     reasons,
@@ -709,7 +825,7 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         else:
             _append_reason(reasons, "source_unavailable:x")
 
-    attention_score = local + dex_boost + birdeye_score + pumpportal_score + tracked_score + narrative_score + x_score
+    attention_score = local + dex_boost + birdeye_score + pumpportal_score + tracked_score + narrative_score + viral_score + x_score
     attention_score += _acceleration_boost(token or "")
     attention_score *= _anti_wash_multiplier(token or "")
     attention_score = max(0.0, min(attention_score, 1.0))
