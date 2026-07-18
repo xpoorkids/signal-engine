@@ -722,6 +722,74 @@ def test_viral_theme_without_social_confirmation_does_not_alert():
     assert "attention_creator_alignment_missing" in reasons
 
 
+def test_viral_theme_can_alert_without_x_when_dex_momentum_is_real():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.28,
+        creator_score=0.0,
+        extra={
+            "attention_metrics": {
+                "viral_theme_hits": ["frog"],
+                "viral_theme_categories": ["animal"],
+                "source_stability": "repeat_seen",
+                "dex_scan_persistent": True,
+                "dex_scan_repeat_count": 2,
+                "independent_flow_confirmed": True,
+                "volume_window_phase": "entering",
+                "volume_pace_ratio": 1.3,
+                "x_tweet_count": 0,
+                "x_unique_authors": 0,
+                "x_likes": 0,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 42_000.0,
+            "volume_m5": 16_000.0,
+            "txns_m5_buys": 34,
+            "txns_m5_sells": 14,
+            "price_change_m5": 6.5,
+            "market_cap_usd": 760_000.0,
+        },
+    )
+
+    assert eligible is True
+    assert reasons == []
+    assert "viral_theme" in confirmations
+    assert "viral_x_momentum" not in confirmations
+    assert "viral_dex_momentum" in confirmations
+    assert "entry_buy_pressure" in confirmations
+
+
+def test_viral_dex_momentum_rejects_sell_heavy_theme_without_x():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.28,
+        creator_score=0.0,
+        extra={
+            "attention_metrics": {
+                "viral_theme_hits": ["election"],
+                "viral_theme_categories": ["event"],
+                "dex_scan_persistent": True,
+                "dex_scan_repeat_count": 2,
+                "independent_flow_confirmed": True,
+                "volume_window_phase": "entering",
+                "volume_pace_ratio": 1.3,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 42_000.0,
+            "volume_m5": 16_000.0,
+            "txns_m5_buys": 34,
+            "txns_m5_sells": 34,
+            "price_change_m5": 6.5,
+            "market_cap_usd": 760_000.0,
+        },
+    )
+
+    assert eligible is False
+    assert "viral_theme" in confirmations
+    assert "viral_dex_momentum" not in confirmations
+    assert "attention_creator_alignment_missing" in reasons
+
+
 def test_paid_visibility_without_flow_is_blocked():
     eligible, reasons, confirmations = candidate_send_reasons(
         attention_score=0.62,

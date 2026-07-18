@@ -644,6 +644,62 @@ def dex_accumulation_watch_signal(
     )
 
 
+def viral_theme_dex_momentum_signal(
+    metrics: dict[str, Any] | None,
+    dex_summary: dict[str, Any] | None,
+) -> bool:
+    payload = metrics if isinstance(metrics, dict) else {}
+    summary = dex_summary if isinstance(dex_summary, dict) else {}
+    viral_hits = payload.get("viral_theme_hits") if isinstance(payload.get("viral_theme_hits"), list) else []
+    if not viral_hits:
+        return False
+
+    liq = _first_positive_float(summary, payload, keys=("liquidity_usd", "liquidity"))
+    vol5m = _first_positive_float(summary, payload, keys=("volume_m5", "volume_m5_usd", "volume_5m"))
+    market_cap = _first_positive_float(summary, payload, keys=("market_cap_usd", "market_cap", "fdv"))
+    try:
+        buys5m = int(summary.get("txns_m5_buys") or summary.get("buys_5m") or payload.get("txns_m5_buys") or payload.get("buys_5m") or 0)
+    except Exception:
+        buys5m = 0
+    try:
+        sells5m = int(summary.get("txns_m5_sells") or summary.get("sells_5m") or payload.get("txns_m5_sells") or payload.get("sells_5m") or 0)
+    except Exception:
+        sells5m = 0
+    try:
+        price_change_m5 = float(summary.get("price_change_m5") or summary.get("price_change_5m") or payload.get("price_change_m5") or payload.get("price_change_5m") or 0.0)
+    except Exception:
+        price_change_m5 = 0.0
+    try:
+        price_change_h1 = float(summary.get("price_change_h1") or summary.get("price_change_1h") or payload.get("price_change_h1") or payload.get("price_change_1h") or 0.0)
+    except Exception:
+        price_change_h1 = 0.0
+
+    buy_sell_ratio = float(buys5m) / float(max(sells5m, 1)) if buys5m > 0 else 0.0
+    sell_buy_ratio = float(sells5m) / float(max(buys5m, 1)) if buys5m > 0 else 0.0
+    repeat_count = int(payload.get("dex_scan_repeat_count") or 0)
+    sources = payload.get("discovery_sources") if isinstance(payload.get("discovery_sources"), list) else []
+    source_supported = bool(
+        payload.get("community_takeover")
+        or payload.get("dex_scan_persistent")
+        or repeat_count >= 2
+        or {"community_takeover", "token_profile", "token_boost_top", "token_boost_latest"} & set(sources)
+    )
+
+    return (
+        liq is not None
+        and liq >= 25_000.0
+        and vol5m is not None
+        and vol5m >= 8_000.0
+        and buys5m >= 20
+        and sell_buy_ratio <= 0.85
+        and buy_sell_ratio >= 1.5
+        and (price_change_m5 >= 4.0 or price_change_h1 >= 18.0)
+        and market_cap is not None
+        and 50_000.0 <= market_cap <= 8_000_000.0
+        and source_supported
+    )
+
+
 def candidate_confirmation_signals(
     *,
     attention_score: float,
@@ -804,6 +860,8 @@ def candidate_confirmation_signals(
         confirmations.append("entry_buy_pressure")
     if dex_accumulation_watch_signal(metrics, dex_summary):
         confirmations.append("dex_accumulation_watch")
+    if viral_theme_dex_momentum_signal(metrics, dex_summary):
+        confirmations.append("viral_dex_momentum")
 
     if (
         top_wallet_share >= policy.anti_wash_top_wallet_share
@@ -1185,7 +1243,10 @@ def candidate_send_reasons(
         "dex_accumulation_watch",
     }.issubset(confirmation_set)
     has_viral_breakout = (
-        {"market_support", "viral_x_momentum"}.issubset(confirmation_set)
+        (
+            {"market_support", "viral_x_momentum"}.issubset(confirmation_set)
+            or {"market_support", "viral_dex_momentum"}.issubset(confirmation_set)
+        )
         and bool({"entry_buy_pressure", "dex_flow_confirmed", "dex_buyer_pressure"} & confirmation_set)
     )
 
