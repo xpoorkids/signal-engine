@@ -32,6 +32,7 @@ SNAPSHOT_HORIZONS_MINUTES = (0, 5, 15, 60, 240)
 SNAPSHOT_POLL_SECONDS = 30
 REPORT_POLL_SECONDS = 600
 _SCHEMA_READY = False
+_SCHEMA_READY_PATH: str | None = None
 DEFAULT_POLICY_NAME = "deterministic_engine"
 DEFAULT_POLICY_VERSION = "deterministic-v1"
 _REMOTE_WRITE_TIMEOUT = 5.0
@@ -42,6 +43,7 @@ _POSITIVE_OUTCOME_LABELS = {"worked", "strong_continuation"}
 _NEGATIVE_OUTCOME_LABELS = {"failed", "faded"}
 _OBSERVE_RECHECK_DELAYS_SECONDS = (180, 420, 900, 1800)
 _OBSERVE_ACTIVE_STATUSES = {"observe", "review", "ready_for_watch", "shadow_only"}
+_LARGE_DB_SCHEMA_TRUST_BYTES = 2 * 1024 * 1024 * 1024
 
 
 def _snapshot_max_lag_seconds() -> int:
@@ -66,6 +68,62 @@ def _connect() -> sqlite3.Connection:
 
 def _current_db_path() -> Path:
     return resolve_engine_db_path(DB_PATH)
+
+
+def _large_db_schema_trust_threshold_bytes() -> int:
+    raw = os.getenv("SIGNAL_ENGINE_LARGE_DB_SCHEMA_TRUST_BYTES", str(_LARGE_DB_SCHEMA_TRUST_BYTES)).strip()
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError):
+        return _LARGE_DB_SCHEMA_TRUST_BYTES
+
+
+def _core_learning_schema_present(c: sqlite3.Connection) -> bool:
+    required_tables = {
+        "signals",
+        "signal_decisions",
+        "signal_snapshots",
+        "signal_snapshot_jobs",
+        "runtime_heartbeats",
+    }
+    rows = c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ({})".format(
+            ",".join("?" for _ in required_tables)
+        ),
+        tuple(required_tables),
+    ).fetchall()
+    if {str(row[0]) for row in rows} != required_tables:
+        return False
+
+    decision_cols = {str(row[1]) for row in c.execute("PRAGMA table_info(signal_decisions)").fetchall()}
+    signal_cols = {str(row[1]) for row in c.execute("PRAGMA table_info(signals)").fetchall()}
+    snapshot_cols = {str(row[1]) for row in c.execute("PRAGMA table_info(signal_snapshots)").fetchall()}
+    return (
+        {"decision_id", "created_ts", "decision", "action_taken", "features_json", "policy_version"} <= decision_cols
+        and {"signal_id", "token", "event_type", "alert_ts"} <= signal_cols
+        and {"signal_id", "horizon_minutes", "outcome_label", "snapshot_json"} <= snapshot_cols
+    )
+
+
+def _trust_existing_large_schema_if_ready() -> bool:
+    db_path = _current_db_path()
+    threshold = _large_db_schema_trust_threshold_bytes()
+    if threshold <= 0 or not db_path.exists():
+        return False
+    try:
+        if db_path.stat().st_size < threshold:
+            return False
+        with _connect() as c:
+            if not _core_learning_schema_present(c):
+                return False
+    except Exception:
+        return False
+    logger.warning(
+        "[signal-learning] trusted existing large sqlite schema without startup migrations db_path=%s size_bytes=%s",
+        db_path,
+        db_path.stat().st_size,
+    )
+    return True
 
 
 def _learning_process_role() -> str:
@@ -189,7 +247,14 @@ def _post_internal_learning_write(endpoint: str, payload: dict[str, Any]) -> dic
 
 
 def init() -> None:
-    global _SCHEMA_READY
+    global _SCHEMA_READY, _SCHEMA_READY_PATH
+    db_path = str(_current_db_path())
+    if _SCHEMA_READY and _SCHEMA_READY_PATH == db_path:
+        return
+    if _trust_existing_large_schema_if_ready():
+        _SCHEMA_READY = True
+        _SCHEMA_READY_PATH = db_path
+        return
     with _connect() as c:
         c.execute(
             """
@@ -598,6 +663,7 @@ def init() -> None:
             c.execute("ALTER TABLE policy_rollouts ADD COLUMN regime_scope TEXT")
         c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_signal_id ON signal_decisions(signal_id)")
     _SCHEMA_READY = True
+    _SCHEMA_READY_PATH = db_path
 
 
 def _ensure_schema() -> None:

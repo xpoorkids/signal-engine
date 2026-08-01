@@ -199,7 +199,7 @@ def test_candidate_send_reasons_accepts_live_market_cap_usd_for_dex_breakout():
     assert "entry_buy_pressure" in confirmations
 
 
-def test_candidate_send_reasons_allow_dex_buyer_pressure_breakout_without_social_attention():
+def test_candidate_send_reasons_reject_overextended_dex_pressure_without_breadth():
     eligible, reasons, confirmations = candidate_send_reasons(
         attention_score=0.20,
         creator_score=0.0,
@@ -223,8 +223,9 @@ def test_candidate_send_reasons_allow_dex_buyer_pressure_breakout_without_social
         },
     )
 
-    assert eligible is True
-    assert reasons == []
+    assert eligible is False
+    assert "winner_breadth_missing" in reasons
+    assert "winner_hype_churn" in reasons
     assert "market_support" in confirmations
     assert "dex_buyer_pressure" in confirmations
     assert "entry_buy_pressure" in confirmations
@@ -259,7 +260,7 @@ def test_paid_visibility_allows_confirmed_dex_flow_without_local_wallet_counters
     assert "dex_momentum" in confirmations
 
 
-def test_candidate_send_reasons_allow_persistent_dex_accumulation_without_social():
+def test_candidate_send_reasons_reject_persistent_dex_accumulation_without_breadth():
     eligible, reasons, confirmations = candidate_send_reasons(
         attention_score=0.20,
         creator_score=0.0,
@@ -286,8 +287,9 @@ def test_candidate_send_reasons_allow_persistent_dex_accumulation_without_social
         },
     )
 
-    assert eligible is True
-    assert reasons == []
+    assert eligible is False
+    assert "winner_breadth_missing" in reasons
+    assert "winner_hype_churn" in reasons
     assert "market_support" in confirmations
     assert "dex_accumulation_watch" in confirmations
 
@@ -358,7 +360,7 @@ def test_candidate_send_reasons_reject_synthetic_churn_without_independent_flow(
     assert "synthetic_churn_without_independent_flow" in reasons
 
 
-def test_candidate_send_reasons_keep_real_accumulation_with_strong_volume_delta():
+def test_candidate_send_reasons_reject_volume_delta_without_breadth():
     eligible, reasons, confirmations = candidate_send_reasons(
         attention_score=0.20,
         creator_score=0.0,
@@ -385,8 +387,9 @@ def test_candidate_send_reasons_keep_real_accumulation_with_strong_volume_delta(
         },
     )
 
-    assert eligible is True
-    assert reasons == []
+    assert eligible is False
+    assert "winner_breadth_missing" in reasons
+    assert "winner_hype_churn" in reasons
     assert "market_support" in confirmations
     assert "dex_accumulation_watch" in confirmations
 
@@ -734,6 +737,7 @@ def test_viral_theme_can_alert_without_x_when_dex_momentum_is_real():
                 "dex_scan_persistent": True,
                 "dex_scan_repeat_count": 2,
                 "independent_flow_confirmed": True,
+                "unique_buyers_5m": 1,
                 "volume_window_phase": "entering",
                 "volume_pace_ratio": 1.3,
                 "x_tweet_count": 0,

@@ -27,8 +27,14 @@ def connect_sqlite(db_path: Path | str, *, busy_timeout_ms: int = DEFAULT_BUSY_T
     timeout_ms = max(0, int(busy_timeout_ms))
     conn = sqlite3.connect(path, timeout=timeout_ms / 1000.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(f"PRAGMA busy_timeout={timeout_ms}")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    for pragma in (
+        "PRAGMA journal_mode=WAL",
+        f"PRAGMA busy_timeout={timeout_ms}",
+        "PRAGMA synchronous=NORMAL",
+        "PRAGMA foreign_keys=ON",
+    ):
+        try:
+            conn.execute(pragma)
+        except sqlite3.Error:
+            pass
     return conn

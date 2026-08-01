@@ -858,6 +858,17 @@ def candidate_confirmation_signals(
         and vol5m >= 5_000
     ):
         confirmations.append("entry_buy_pressure")
+    if (
+        buyers_5m <= 0
+        and buys5m >= max(policy.entry_confirm_buys5m_min * 6, 90)
+        and buy_sell_ratio >= 2.2
+        and sell_buy_ratio <= 0.50
+        and 5.0 <= price_change_m5 <= 35.0
+        and vol5m >= 10_000
+        and liq >= max(policy.entry_chase_min_liq_usd, 25_000.0)
+        and (vol5m / max(liq, 1.0)) <= 3.0
+    ):
+        confirmations.append("winner_breadth_proxy")
     if dex_accumulation_watch_signal(metrics, dex_summary):
         confirmations.append("dex_accumulation_watch")
     if viral_theme_dex_momentum_signal(metrics, dex_summary):
@@ -1173,6 +1184,75 @@ def adversarial_signal_flags(
     return deduped
 
 
+def winner_send_guard_reasons(
+    *,
+    metrics: dict[str, Any] | None,
+    dex_summary: dict[str, Any] | None,
+    confirmations: list[str],
+) -> list[str]:
+    policy = candidate_signal_policy()
+    payload = metrics if isinstance(metrics, dict) else {}
+    summary = dex_summary if isinstance(dex_summary, dict) else {}
+    confirmation_set = set(confirmations)
+    if "market_support" not in confirmation_set:
+        return []
+
+    buyers_5m = int(payload.get("unique_buyers_5m") or 0)
+    burst_60s = int(payload.get("burst_count_60s") or 0)
+    unique_wallets_30s = int(payload.get("unique_wallets_30s") or 0)
+    trusted_support = bool(
+        {
+            "tracked_wallet_flow",
+            "kol_wallet_flow",
+            "heavy_x_support",
+            "credible_x_reach",
+            "social_support",
+            "community_takeover",
+            "viral_x_momentum",
+        }
+        & confirmation_set
+    )
+    try:
+        buys5m = int(summary.get("txns_m5_buys") or summary.get("buys_5m") or 0)
+    except Exception:
+        buys5m = 0
+    try:
+        sells5m = int(summary.get("txns_m5_sells") or summary.get("sells_5m") or 0)
+    except Exception:
+        sells5m = 0
+    try:
+        price_change_m5 = float(summary.get("price_change_m5") or summary.get("price_change_5m") or 0.0)
+    except Exception:
+        price_change_m5 = 0.0
+    buy_sell_ratio = float(buys5m) / float(max(sells5m, 1)) if buys5m > 0 else 0.0
+    sell_buy_ratio = float(sells5m) / float(max(buys5m, 1)) if buys5m > 0 else 0.0
+
+    has_real_breadth = buyers_5m >= policy.min_unique_buyers_5m
+    has_developing_breadth = buyers_5m >= 1 and (
+        (
+            unique_wallets_30s >= 4
+            and burst_60s >= max(3, policy.min_burst_count_60s // 2)
+        )
+        or (
+            5.0 <= price_change_m5 <= 35.0
+            and buy_sell_ratio >= policy.entry_chase_max_buy_sell_ratio
+            and sell_buy_ratio <= 0.75
+        )
+    )
+    has_high_quality_proxy = "winner_breadth_proxy" in confirmation_set
+
+    reasons: list[str] = []
+    if not (trusted_support or has_real_breadth or has_developing_breadth or has_high_quality_proxy):
+        reasons.append("winner_breadth_missing")
+    if price_change_m5 < 0.0 and not trusted_support:
+        reasons.append("winner_entry_fading")
+    if sell_buy_ratio > 1.0 and not trusted_support:
+        reasons.append("winner_sell_pressure")
+    if buyers_5m <= 0 and buy_sell_ratio < 2.0 and not trusted_support:
+        reasons.append("winner_hype_churn")
+    return reasons
+
+
 def candidate_send_reasons(
     *,
     attention_score: float | None,
@@ -1249,6 +1329,11 @@ def candidate_send_reasons(
         )
         and bool({"entry_buy_pressure", "dex_flow_confirmed", "dex_buyer_pressure"} & confirmation_set)
     )
+    winner_guard_reasons = winner_send_guard_reasons(
+        metrics=(payload.get("attention_metrics") if isinstance(payload.get("attention_metrics"), dict) else {}),
+        dex_summary=dex_summary,
+        confirmations=confirmations,
+    )
 
     if (
         len(confirmations) < policy.min_send_confirmation_signals
@@ -1281,6 +1366,7 @@ def candidate_send_reasons(
     has_severe_adversarial_flag = bool(severe_adversarial_flags & set(adversarial_flags))
     if adversarial_flags and not route_fast_lane and (not hard_quality_confirmed or has_severe_adversarial_flag):
         reasons.extend(item for item in adversarial_flags if item not in reasons)
+    reasons.extend(item for item in winner_guard_reasons if item not in reasons)
 
     eligible = (
         has_attention_only
