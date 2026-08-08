@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
+
+from fastapi import APIRouter
 from fastapi.testclient import TestClient
 
 from app import main
@@ -196,6 +199,44 @@ def test_learning_engine_health_includes_write_config(tmp_path, monkeypatch):
     payload = response.json()
     assert payload["write_config"]["process_role"] == "engine"
     assert payload["write_config"]["mode"] == "local"
+
+
+def test_learning_route_returns_storage_unavailable_for_sqlite_errors(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_DB_PATH", str(db_path))
+
+    def raise_storage_error(hours: int):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(learning_route, "get_engine_health_digest", raise_storage_error)
+
+    client = TestClient(main.app)
+    response = client.get("/learning/health?hours=1")
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["status"] == "storage_unavailable"
+    assert payload["error_type"] == "OperationalError"
+    assert payload["error"] == "disk I/O error"
+    assert payload["storage_health_path"] == "/health/storage"
+    assert payload["db_path"] == str(db_path)
+
+
+def test_non_learning_sqlite_errors_are_not_reported_as_learning_storage(monkeypatch):
+    router = APIRouter()
+
+    @router.get("/test/sqlite-error")
+    def sqlite_error():
+        raise sqlite3.OperationalError("not learning")
+
+    main.app.include_router(router)
+
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.get("/test/sqlite-error")
+
+    assert response.status_code == 500
+    assert "storage_unavailable" not in response.text
 
 
 def test_learning_engine_health_reports_idle_for_healthy_quiet_worker(tmp_path, monkeypatch):

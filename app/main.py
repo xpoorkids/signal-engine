@@ -1,8 +1,10 @@
 import asyncio
 import logging
 import os
+import sqlite3
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from app.routes import health, scan, score, packet, watch, review, learning
 
@@ -22,6 +24,24 @@ app.include_router(packet.router)
 app.include_router(watch.router)
 app.include_router(review.router)
 app.include_router(learning.router)
+
+
+@app.exception_handler(sqlite3.Error)
+async def sqlite_error_handler(request: Request, exc: sqlite3.Error) -> JSONResponse:
+    if not request.url.path.startswith("/learning/"):
+        raise exc
+    db_path = resolve_engine_db_path()
+    return JSONResponse(
+        status_code=503,
+        content={
+            "status": "storage_unavailable",
+            "detail": "Learning storage is unavailable; check /health/storage before trusting learning diagnostics.",
+            "db_path": str(db_path),
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "storage_health_path": "/health/storage",
+        },
+    )
 
 
 @app.on_event("startup")
