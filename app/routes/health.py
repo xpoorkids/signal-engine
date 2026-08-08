@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import time
 
 from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse
@@ -29,8 +30,10 @@ def storage_health():
         "file_exists": db_path.exists(),
         "file_size_bytes": db_path.stat().st_size if db_path.exists() else 0,
         "read_only_connect_ok": False,
+        "write_probe_ok": False,
         "tables": [],
         "schema_error": None,
+        "write_probe_error": None,
     }
     if not db_path.exists():
         return result
@@ -57,6 +60,30 @@ def storage_health():
     except Exception as exc:
         result["status"] = "storage_error"
         result["schema_error"] = f"{type(exc).__name__}: {exc}"
+        return result
+    try:
+        with sqlite3.connect(str(db_path), timeout=5.0) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS storage_health_probe (
+                    id INTEGER PRIMARY KEY CHECK (id=1),
+                    checked_ts INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO storage_health_probe (id, checked_ts)
+                VALUES (1, ?)
+                """,
+                (int(time.time()),),
+            )
+            conn.rollback()
+            result["write_probe_ok"] = True
+    except Exception as exc:
+        result["status"] = "storage_error"
+        result["write_probe_error"] = f"{type(exc).__name__}: {exc}"
     return result
 
 
