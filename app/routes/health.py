@@ -79,7 +79,7 @@ def storage_health():
                 """,
                 (int(time.time()),),
             )
-            conn.rollback()
+            conn.commit()
             result["write_probe_ok"] = True
     except Exception as exc:
         result["status"] = "storage_error"

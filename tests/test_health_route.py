@@ -25,10 +25,8 @@ def test_storage_health_reports_read_and_write_probe_ok(tmp_path, monkeypatch):
     assert payload["write_probe_error"] is None
 
     with sqlite3.connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='storage_health_probe'"
-        ).fetchone()
-    assert row is None
+        row = conn.execute("SELECT checked_ts FROM storage_health_probe WHERE id=1").fetchone()
+    assert row is not None
 
 
 def test_storage_health_reports_disk_full_write_probe(tmp_path, monkeypatch):
