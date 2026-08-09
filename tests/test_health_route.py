@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 
 from fastapi.testclient import TestClient
 
@@ -54,3 +55,45 @@ def test_storage_health_reports_disk_full_write_probe(tmp_path, monkeypatch):
     assert payload["write_probe_ok"] is False
     assert payload["schema_error"] is None
     assert payload["write_probe_error"] == "OperationalError: database or disk is full"
+
+
+def test_storage_recover_prunes_old_learning_rows_and_runs_write_probe(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setenv("SIGNAL_ENGINE_DB_PATH", str(db_path))
+    monkeypatch.setenv("SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN", "secret-token")
+    old_ts = int(time.time()) - 40 * 86400
+    fresh_ts = int(time.time())
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE signal_snapshots (captured_ts INTEGER, snapshot_json TEXT)")
+        conn.execute("CREATE TABLE signal_snapshot_jobs (due_ts INTEGER)")
+        conn.execute("CREATE TABLE signal_decisions (created_ts INTEGER)")
+        conn.execute("CREATE TABLE signals (updated_ts INTEGER)")
+        conn.execute("INSERT INTO signal_snapshots VALUES (?, '{}')", (old_ts,))
+        conn.execute("INSERT INTO signal_snapshots VALUES (?, '{}')", (fresh_ts,))
+        conn.execute("INSERT INTO signal_snapshot_jobs VALUES (?)", (old_ts,))
+        conn.execute("INSERT INTO signal_decisions VALUES (?)", (old_ts,))
+        conn.execute("INSERT INTO signals VALUES (?)", (old_ts,))
+
+    client = TestClient(main.app)
+    denied = client.post(
+        "/health/storage/recover",
+        headers={"X-Signal-Engine-Token": "wrong"},
+        json={"max_age_days": 21, "batch_limit": 100},
+    )
+    response = client.post(
+        "/health/storage/recover",
+        headers={"X-Signal-Engine-Token": "secret-token"},
+        json={"max_age_days": 21, "batch_limit": 100},
+    )
+
+    assert denied.status_code == 403
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "recovered"
+    assert payload["write_probe"]["ok"] is True
+    assert payload["deleted"]["signal_snapshots"] == 1
+    with sqlite3.connect(db_path) as conn:
+        remaining_snapshots = conn.execute("SELECT COUNT(1) FROM signal_snapshots").fetchone()[0]
+        probe = conn.execute("SELECT checked_ts FROM storage_health_probe WHERE id=1").fetchone()
+    assert remaining_snapshots == 1
+    assert probe is not None
