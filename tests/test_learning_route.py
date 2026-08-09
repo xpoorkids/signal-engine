@@ -461,6 +461,58 @@ def test_learning_internal_ingest_rejects_bad_token(tmp_path, monkeypatch):
     assert response.status_code == 403
 
 
+def test_learning_wallet_cluster_routes_create_list_and_lookup(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN", "secret-token")
+    sls.init()
+    client = TestClient(main.app)
+
+    denied = client.post(
+        "/learning/ops/wallet-clusters",
+        headers={"X-Signal-Engine-Token": "wrong"},
+        json={"cluster_id": "team-rug", "wallets": ["wallet_a"], "category": "known_bundle"},
+    )
+    assert denied.status_code == 403
+
+    created = client.post(
+        "/learning/ops/wallet-clusters",
+        headers={"X-Signal-Engine-Token": "secret-token"},
+        json={
+            "cluster_id": "team-rug",
+            "wallets": ["wallet_a", "wallet_b"],
+            "category": "known_bundle",
+            "label": "Team Rug",
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["cluster_id"] == "team-rug"
+
+    client.post(
+        "/learning/ops/wallet-clusters/outcomes",
+        headers={"X-Signal-Engine-Token": "secret-token"},
+        json={
+            "cluster_id": "team-rug",
+            "token": "token-rug",
+            "outcome_label": "failed",
+            "max_runup_pct": -70,
+            "early_dump": True,
+        },
+    )
+
+    listed = client.get("/learning/ops/wallet-clusters?limit=10").json()
+    reputation = client.post(
+        "/learning/internal/wallet-clusters/reputation",
+        headers={"X-Signal-Engine-Token": "secret-token"},
+        json={"wallets": ["wallet_a", "unknown_wallet"]},
+    ).json()
+
+    assert listed["count"] == 1
+    assert listed["clusters"][0]["cluster_id"] == "team-rug"
+    assert reputation["cluster_ids"] == ["team-rug"]
+    assert reputation["summary"]["toxic_clusters"] == 1
+
+
 def test_learning_policy_routes_return_traces_and_shadow_eval(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

@@ -285,7 +285,12 @@ from worker.signal_policy import (
     route_signal_policy,
 )
 from app.services.signal_metrics import compute_confidence_score, metric_state
-from app.services.signal_learning_service import classify_policy_regime, record_signal_decision, resolve_live_policy
+from app.services.signal_learning_service import (
+    classify_policy_regime,
+    get_wallet_cluster_reputation,
+    record_signal_decision,
+    resolve_live_policy,
+)
 from app.services.state_service import (
     init as state_init,
     upsert_seen,
@@ -313,6 +318,8 @@ def _wallet_distribution_fail_reasons(
     total_buys_30s: int,
     unique_wallets_30s: int,
     top_wallet_share: float,
+    unique_wallet_clusters_30s: int | None = None,
+    top_wallet_cluster_share: float | None = None,
 ) -> list[str]:
     reasons: list[str] = []
     payload = wallet_risk if isinstance(wallet_risk, dict) else {}
@@ -335,6 +342,14 @@ def _wallet_distribution_fail_reasons(
         reasons.append("wallet_top_holder_concentration")
     if total_buys_30s >= 6 and unique_wallets_30s <= 2 and top_wallet_share >= 0.70:
         reasons.append("bundle_pattern_detected")
+    if (
+        unique_wallet_clusters_30s is not None
+        and top_wallet_cluster_share is not None
+        and total_buys_30s >= 6
+        and unique_wallet_clusters_30s <= 2
+        and top_wallet_cluster_share >= 0.70
+    ):
+        reasons.append("wallet_identity_bundle_pattern")
 
     deduped: list[str] = []
     for reason in reasons:
@@ -352,6 +367,9 @@ def _wallet_cluster_review(
     attention_metrics: dict[str, Any] | None,
     dex_summary: dict[str, Any] | None,
     risk_score: float | None,
+    wallet_identity: dict[str, Any] | None = None,
+    unique_wallet_clusters_30s: int | None = None,
+    top_wallet_cluster_share: float | None = None,
 ) -> dict[str, Any]:
     payload = wallet_risk if isinstance(wallet_risk, dict) else {}
     metrics = attention_metrics if isinstance(attention_metrics, dict) else {}
@@ -382,6 +400,17 @@ def _wallet_cluster_review(
     risk = float(risk_score) if isinstance(risk_score, (int, float)) else None
     sell_ratio = (float(sells5m) / float(buys5m)) if buys5m > 0 else 0.0
     vol_liq_ratio = (vol5m / liq) if liq > 0.0 else 0.0
+    identity = wallet_identity if isinstance(wallet_identity, dict) else {}
+    identity_clusters = identity.get("clusters") if isinstance(identity.get("clusters"), list) else []
+    identity_cluster_ids = [
+        str(cluster.get("cluster_id"))
+        for cluster in identity_clusters
+        if isinstance(cluster, dict) and cluster.get("cluster_id")
+    ]
+    identity_summary = identity.get("summary") if isinstance(identity.get("summary"), dict) else {}
+    toxic_history_clusters = int(identity_summary.get("toxic_clusters") or 0)
+    winner_history_clusters = int(identity_summary.get("winner_clusters") or 0)
+    mixed_history_clusters = int(identity_summary.get("mixed_clusters") or 0)
 
     signals: list[str] = []
     blockers: list[str] = []
@@ -405,6 +434,27 @@ def _wallet_cluster_review(
     elif unique_wallets_30s >= 4 and top_wallet_share <= 0.55:
         signals.append("wallet_cluster_local_breadth")
         score += 18
+    if (
+        unique_wallet_clusters_30s is not None
+        and top_wallet_cluster_share is not None
+        and total_buys_30s >= 6
+        and unique_wallet_clusters_30s <= 2
+        and top_wallet_cluster_share >= 0.70
+    ):
+        blockers.append("wallet_cluster_identity_bundle_pattern")
+        score -= 35
+    elif unique_wallet_clusters_30s is not None and unique_wallet_clusters_30s >= 4:
+        signals.append("wallet_cluster_identity_breadth")
+        score += 12
+    if toxic_history_clusters > 0:
+        blockers.append("wallet_cluster_toxic_history")
+        score -= 45
+    if mixed_history_clusters > 0:
+        blockers.append("wallet_cluster_mixed_history_review")
+        score -= 10
+    if winner_history_clusters > 0:
+        signals.append("wallet_cluster_winner_history")
+        score += 22
     if buyers_5m >= max(candidate_policy.min_unique_buyers_5m + 2, 5):
         signals.append("wallet_cluster_buyer_breadth")
         score += 18
@@ -440,6 +490,8 @@ def _wallet_cluster_review(
         "wallet_cluster_single_holder_dominant",
         "wallet_cluster_top10_dominant",
         "wallet_cluster_bundle_pattern",
+        "wallet_cluster_identity_bundle_pattern",
+        "wallet_cluster_toxic_history",
         "wallet_cluster_sell_pressure_high",
         "wallet_cluster_volume_liquidity_spike",
         "wallet_cluster_dumping",
@@ -461,7 +513,7 @@ def _wallet_cluster_review(
     )
     if toxic:
         verdict = "toxic_cluster"
-    elif constructive and smart_wallet_hits > 0:
+    elif constructive and (smart_wallet_hits > 0 or winner_history_clusters > 0):
         verdict = "smart_accumulation"
     elif constructive and (len(signals) >= 4 or unique_wallets_30s >= 4):
         verdict = "coordinated_accumulation"
@@ -482,6 +534,14 @@ def _wallet_cluster_review(
             "total_buys_30s": total_buys_30s,
             "unique_wallets_30s": unique_wallets_30s,
             "top_wallet_share_30s": round(float(top_wallet_share or 0.0), 4),
+            "unique_wallet_clusters_30s": unique_wallet_clusters_30s,
+            "top_wallet_cluster_share_30s": round(float(top_wallet_cluster_share or 0.0), 4)
+            if top_wallet_cluster_share is not None
+            else None,
+            "wallet_identity_cluster_ids": identity_cluster_ids,
+            "wallet_identity_toxic_clusters": toxic_history_clusters,
+            "wallet_identity_winner_clusters": winner_history_clusters,
+            "wallet_identity_mixed_clusters": mixed_history_clusters,
             "unique_buyers_5m": buyers_5m,
             "burst_count_60s": burst_60s,
             "tracked_wallet_hits": tracked_hits,
@@ -500,6 +560,7 @@ def _wallet_cluster_review(
 WALLET_GUARD_REASONS = {
     "wallet_distribution_high_risk",
     "wallet_top_holder_concentration",
+    "wallet_identity_bundle_pattern",
 }
 
 
@@ -745,6 +806,7 @@ def _record_decision(
     route_decision = extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}
     entry_quality = route_decision.get("entry_quality") if isinstance(route_decision.get("entry_quality"), dict) else {}
     wallet_cluster = extra.get("wallet_cluster_review") if isinstance(extra.get("wallet_cluster_review"), dict) else {}
+    wallet_identity = extra.get("wallet_identity") if isinstance(extra.get("wallet_identity"), dict) else {}
     trade_validation = extra.get("trade_validation") if isinstance(extra.get("trade_validation"), dict) else {}
     candidate_ev = extra.get("candidate_ev") if isinstance(extra.get("candidate_ev"), dict) else {}
     buy_quote = trade_validation.get("buy_quote") if isinstance(trade_validation.get("buy_quote"), dict) else {}
@@ -821,6 +883,10 @@ def _record_decision(
         "wallet_cluster_signals": wallet_cluster.get("signals") or [],
         "wallet_cluster_blockers": wallet_cluster.get("blockers") or [],
         "wallet_cluster_metrics": wallet_cluster.get("metrics") if isinstance(wallet_cluster.get("metrics"), dict) else {},
+        "wallet_identity_hits": wallet_identity.get("hits") if isinstance(wallet_identity.get("hits"), list) else [],
+        "wallet_identity_cluster_ids": wallet_identity.get("cluster_ids") if isinstance(wallet_identity.get("cluster_ids"), list) else [],
+        "wallet_identity_clusters": wallet_identity.get("clusters") if isinstance(wallet_identity.get("clusters"), list) else [],
+        "wallet_identity_summary": wallet_identity.get("summary") if isinstance(wallet_identity.get("summary"), dict) else {},
         "watch_override": extra.get("watch_override") if isinstance(extra.get("watch_override"), dict) else None,
         "watch_override_gate_bypass": extra.get("watch_override_gate_bypass") or [],
         "has_dex_pool": bool(dex_summary),
@@ -1212,6 +1278,9 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
         burst_10s = 0
         unique_30s = 0
         top_share = 0.0
+        unique_cluster_30s: int | None = None
+        top_cluster_share: float | None = None
+        wallet_identity: dict[str, Any] = {}
         now_wall = time.time()
         try:
             while st.buyers_10s and now_wall - st.buyers_10s[0][1] > 10:
@@ -1231,6 +1300,37 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             total = len(st.buys_30s)
             unique_30s = len(counts)
             top_share = (max(counts.values()) / total) if total else 0.0
+            recent_wallets = list(counts.keys())
+            if recent_wallets:
+                try:
+                    wallet_identity = get_wallet_cluster_reputation(recent_wallets)
+                except Exception:
+                    logger.exception("[wallet-identity] reputation_lookup_failed token=%s", e.token)
+                    wallet_identity = {"enabled": False, "reason": "lookup_failed", "hits": [], "cluster_ids": [], "clusters": []}
+                wallet_to_cluster = {
+                    str(hit.get("wallet")): str(hit.get("cluster_id"))
+                    for hit in wallet_identity.get("hits", [])
+                    if isinstance(hit, dict) and hit.get("wallet") and hit.get("cluster_id")
+                }
+                cluster_counts: Dict[str, int] = {}
+                for wallet, count in counts.items():
+                    actor_key = wallet_to_cluster.get(wallet) or wallet
+                    cluster_counts[actor_key] = cluster_counts.get(actor_key, 0) + count
+                unique_cluster_30s = len(cluster_counts)
+                top_cluster_share = (max(cluster_counts.values()) / total) if total else 0.0
+                if wallet_identity.get("hits"):
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        "wallet-identity",
+                        token=e.token,
+                        wallets_checked=len(recent_wallets),
+                        cluster_ids=wallet_identity.get("cluster_ids") or [],
+                        summary=wallet_identity.get("summary") or {},
+                        unique_wallets_30s=unique_30s,
+                        unique_wallet_clusters_30s=unique_cluster_30s,
+                        top_wallet_cluster_share=top_cluster_share,
+                    )
         except Exception:
             pass
 
@@ -1243,13 +1343,20 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
             attention_metrics=attn_metrics,
             dex_summary=dex_summary,
             risk_score=risk_score,
+            wallet_identity=wallet_identity,
+            unique_wallet_clusters_30s=unique_cluster_30s,
+            top_wallet_cluster_share=top_cluster_share,
         )
         extra["wallet_cluster_review"] = wallet_cluster
+        extra["wallet_identity"] = wallet_identity
+        extra["wallet_identity_cluster_ids"] = wallet_identity.get("cluster_ids") or []
         distribution_fail_reasons = _wallet_distribution_fail_reasons(
             token_wallet_risk,
             total_buys_30s=len(st.buys_30s),
             unique_wallets_30s=unique_30s,
             top_wallet_share=top_share,
+            unique_wallet_clusters_30s=unique_cluster_30s,
+            top_wallet_cluster_share=top_cluster_share,
         )
         for reason in distribution_fail_reasons:
             log_event(logger, logging.INFO, "risk-gate", token=e.token, reason=reason)
@@ -1303,7 +1410,10 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     or "wallet_distribution_high_risk" in distribution_fail_reasons
                 ):
                     risk_flags["holder_concentration"] = True
-                if "bundle_pattern_detected" in distribution_fail_reasons:
+                if (
+                    "bundle_pattern_detected" in distribution_fail_reasons
+                    or "wallet_identity_bundle_pattern" in distribution_fail_reasons
+                ):
                     risk_flags["wallet_cluster"] = True
 
         top_holder_ratio = None

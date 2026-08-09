@@ -44,6 +44,10 @@ _NEGATIVE_OUTCOME_LABELS = {"failed", "faded"}
 _OBSERVE_RECHECK_DELAYS_SECONDS = (180, 420, 900, 1800)
 _OBSERVE_ACTIVE_STATUSES = {"observe", "review", "ready_for_watch", "shadow_only"}
 _LARGE_DB_SCHEMA_TRUST_BYTES = 2 * 1024 * 1024 * 1024
+_WALLET_CLUSTER_REPUTATION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_WALLET_CLUSTER_REPUTATION_TTL_SECONDS = 120
+_WALLET_CLUSTER_TOXIC_CATEGORIES = {"known_bundle", "toxic_cluster", "toxic_wallet_cluster", "known_dev"}
+_WALLET_CLUSTER_CONSTRUCTIVE_CATEGORIES = {"smart_wallet", "smart_accumulation", "constructive_accumulation"}
 
 
 def _snapshot_max_lag_seconds() -> int:
@@ -85,6 +89,8 @@ def _core_learning_schema_present(c: sqlite3.Connection) -> bool:
         "signal_snapshots",
         "signal_snapshot_jobs",
         "runtime_heartbeats",
+        "wallet_cluster_wallets",
+        "wallet_cluster_token_outcomes",
     }
     rows = c.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name IN ({})".format(
@@ -490,6 +496,39 @@ def init() -> None:
         )
         c.execute(
             """
+            CREATE TABLE IF NOT EXISTS wallet_cluster_wallets (
+                wallet TEXT PRIMARY KEY,
+                cluster_id TEXT NOT NULL,
+                label TEXT,
+                category TEXT NOT NULL DEFAULT 'unknown',
+                confidence REAL NOT NULL DEFAULT 0.5,
+                source TEXT,
+                notes TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_ts INTEGER NOT NULL,
+                updated_ts INTEGER NOT NULL
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wallet_cluster_token_outcomes (
+                cluster_id TEXT NOT NULL,
+                token TEXT NOT NULL,
+                first_seen_ts INTEGER NOT NULL,
+                latest_seen_ts INTEGER NOT NULL,
+                outcome_label TEXT,
+                max_market_cap_change_pct REAL,
+                max_runup_pct REAL,
+                early_dump INTEGER NOT NULL DEFAULT 0,
+                source TEXT,
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY (cluster_id, token)
+            )
+            """
+        )
+        c.execute(
+            """
             CREATE TABLE IF NOT EXISTS policy_replay_runs (
                 run_id TEXT PRIMARY KEY,
                 created_ts INTEGER NOT NULL,
@@ -610,6 +649,8 @@ def init() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_observe_reviews_updated ON observe_reviews(updated_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_observe_shadow_updated ON observe_shadow_positions(updated_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_watch_overrides_status ON watch_overrides(status, expires_ts)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_wallet_cluster_wallets_cluster ON wallet_cluster_wallets(cluster_id, updated_ts DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_wallet_cluster_outcomes_cluster ON wallet_cluster_token_outcomes(cluster_id, latest_seen_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_replay_runs_ts ON policy_replay_runs(created_ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_replay_results_run ON policy_replay_results(run_id, changed)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_policy_profiles_name ON policy_profiles(policy_name, created_ts DESC)")
@@ -1184,6 +1225,403 @@ def _json_loads_list(raw: str | None) -> list[Any]:
         return value if isinstance(value, list) else []
     except Exception:
         return []
+
+
+def _normalize_wallet_address(wallet: Any) -> str:
+    return str(wallet or "").strip()
+
+
+def _normalize_wallet_cluster_category(category: Any) -> str:
+    text = str(category or "unknown").strip().lower()
+    aliases = {
+        "dev": "known_dev",
+        "bundle": "known_bundle",
+        "bundler": "known_bundle",
+        "toxic": "toxic_cluster",
+        "rug": "toxic_cluster",
+        "smart": "smart_wallet",
+        "winner": "smart_wallet",
+        "accumulation": "constructive_accumulation",
+    }
+    return aliases.get(text, text or "unknown")
+
+
+def _wallet_cluster_reputation_from_counts(
+    *,
+    category: str,
+    winners: int,
+    failures: int,
+    early_dumps: int,
+    tokens_seen: int,
+) -> str:
+    if category in _WALLET_CLUSTER_TOXIC_CATEGORIES:
+        return "toxic_history"
+    if tokens_seen <= 0:
+        return "manual_constructive" if category in _WALLET_CLUSTER_CONSTRUCTIVE_CATEGORIES else "unknown"
+    if failures >= 3 and failures >= max(2, winners * 2):
+        return "toxic_history"
+    if early_dumps >= 3 and early_dumps >= max(2, winners):
+        return "toxic_history"
+    if winners >= 3 and winners >= failures + 2:
+        return "winner_history"
+    if winners > 0 and failures > 0:
+        return "mixed_history"
+    if category in _WALLET_CLUSTER_CONSTRUCTIVE_CATEGORIES and failures == 0:
+        return "winner_history" if winners > 0 else "manual_constructive"
+    return "unknown"
+
+
+def _wallet_cluster_cache_key(wallets: list[Any]) -> str:
+    normalized = sorted({wallet.lower() for wallet in (_normalize_wallet_address(w) for w in wallets) if wallet})
+    return "|".join(normalized)
+
+
+def _wallet_cluster_outcome_stats(c: sqlite3.Connection, cluster_id: str, *, hours: int = 24 * 90) -> dict[str, Any]:
+    cutoff_ts = int(time.time()) - max(1, int(hours)) * 3600
+    rows = c.execute(
+        """
+        SELECT token, outcome_label, max_market_cap_change_pct, max_runup_pct, early_dump, latest_seen_ts
+        FROM wallet_cluster_token_outcomes
+        WHERE cluster_id=? AND latest_seen_ts >= ?
+        ORDER BY latest_seen_ts DESC
+        """,
+        (cluster_id, cutoff_ts),
+    ).fetchall()
+    tokens: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        token = str(row["token"] or "").strip()
+        if not token:
+            continue
+        label = str(row["outcome_label"] or "").strip().lower()
+        max_change = _to_float(row["max_market_cap_change_pct"])
+        max_runup = _to_float(row["max_runup_pct"])
+        tokens[token] = {
+            "token": token,
+            "outcome_label": label or None,
+            "max_market_cap_change_pct": max_change,
+            "max_runup_pct": max_runup,
+            "early_dump": bool(row["early_dump"]),
+            "latest_seen_ts": int(row["latest_seen_ts"] or 0),
+        }
+
+    decision_rows = c.execute(
+        """
+        SELECT sd.token, sd.created_ts, sd.features_json, ss.outcome_label,
+               ss.market_cap_change_pct, ss.horizon_minutes
+        FROM signal_decisions sd
+        LEFT JOIN signal_snapshots ss ON ss.signal_id=sd.signal_id
+        WHERE sd.created_ts >= ?
+          AND sd.token IS NOT NULL
+          AND sd.features_json LIKE ?
+        ORDER BY sd.created_ts DESC, ss.horizon_minutes DESC
+        LIMIT 3000
+        """,
+        (cutoff_ts, f"%{cluster_id}%"),
+    ).fetchall()
+    for row in decision_rows:
+        token = str(row["token"] or "").strip()
+        if not token:
+            continue
+        features = _json_loads_dict(row["features_json"])
+        cluster_ids = features.get("wallet_identity_cluster_ids")
+        if not isinstance(cluster_ids, list):
+            identity_clusters = features.get("wallet_identity_clusters")
+            cluster_ids = [
+                str(item.get("cluster_id"))
+                for item in identity_clusters
+                if isinstance(item, dict) and item.get("cluster_id")
+            ] if isinstance(identity_clusters, list) else []
+        if cluster_id not in {str(item) for item in cluster_ids}:
+            continue
+        current = tokens.setdefault(
+            token,
+            {
+                "token": token,
+                "outcome_label": None,
+                "max_market_cap_change_pct": None,
+                "max_runup_pct": None,
+                "early_dump": False,
+                "latest_seen_ts": int(row["created_ts"] or 0),
+            },
+        )
+        label = str(row["outcome_label"] or "").strip().lower()
+        change = _to_float(row["market_cap_change_pct"])
+        if label:
+            current["outcome_label"] = label
+        if change is not None:
+            previous = current.get("max_market_cap_change_pct")
+            current["max_market_cap_change_pct"] = change if previous is None else max(float(previous), change)
+            current["max_runup_pct"] = current["max_market_cap_change_pct"]
+            if change <= -60.0:
+                current["early_dump"] = True
+        current["latest_seen_ts"] = max(int(current.get("latest_seen_ts") or 0), int(row["created_ts"] or 0))
+
+    winners = 0
+    failures = 0
+    early_dumps = 0
+    max_runups: list[float] = []
+    for item in tokens.values():
+        label = str(item.get("outcome_label") or "").lower()
+        runup = _to_float(item.get("max_runup_pct"))
+        if runup is not None:
+            max_runups.append(runup)
+        if label in _POSITIVE_OUTCOME_LABELS or (runup is not None and runup >= 300.0):
+            winners += 1
+        if label in _NEGATIVE_OUTCOME_LABELS or bool(item.get("early_dump")) or (runup is not None and runup <= -60.0):
+            failures += 1
+        if bool(item.get("early_dump")):
+            early_dumps += 1
+
+    tokens_seen = len(tokens)
+    return {
+        "tokens_seen": tokens_seen,
+        "winners": winners,
+        "failures": failures,
+        "early_dumps": early_dumps,
+        "winner_rate": round(winners / tokens_seen, 4) if tokens_seen else 0.0,
+        "failure_rate": round(failures / tokens_seen, 4) if tokens_seen else 0.0,
+        "early_dump_rate": round(early_dumps / tokens_seen, 4) if tokens_seen else 0.0,
+        "avg_max_runup_pct": round(sum(max_runups) / len(max_runups), 2) if max_runups else None,
+        "sample_tokens": sorted(tokens.values(), key=lambda item: int(item.get("latest_seen_ts") or 0), reverse=True)[:10],
+    }
+
+
+def upsert_wallet_cluster(payload: dict[str, Any]) -> dict[str, Any]:
+    _ensure_schema()
+    wallets_raw = payload.get("wallets")
+    if wallets_raw is None and payload.get("wallet") is not None:
+        wallets_raw = [payload.get("wallet")]
+    wallets = list(dict.fromkeys(_normalize_wallet_address(wallet) for wallet in (wallets_raw or []) if _normalize_wallet_address(wallet)))
+    if not wallets:
+        raise ValueError("wallets_required")
+    cluster_id = str(payload.get("cluster_id") or wallets[0]).strip()
+    if not cluster_id:
+        raise ValueError("cluster_id_required")
+    category = _normalize_wallet_cluster_category(payload.get("category"))
+    label = str(payload.get("label") or "").strip() or None
+    source = str(payload.get("source") or "operator").strip() or "operator"
+    notes = str(payload.get("notes") or "").strip() or None
+    try:
+        confidence = max(0.0, min(1.0, float(payload.get("confidence", 0.8))))
+    except Exception:
+        confidence = 0.8
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    now = int(time.time())
+    with _connect() as c:
+        for wallet in wallets:
+            c.execute(
+                """
+                INSERT INTO wallet_cluster_wallets (
+                    wallet, cluster_id, label, category, confidence, source, notes,
+                    metadata_json, created_ts, updated_ts
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(wallet) DO UPDATE SET
+                    cluster_id=excluded.cluster_id,
+                    label=excluded.label,
+                    category=excluded.category,
+                    confidence=excluded.confidence,
+                    source=excluded.source,
+                    notes=excluded.notes,
+                    metadata_json=excluded.metadata_json,
+                    updated_ts=excluded.updated_ts
+                """,
+                (wallet, cluster_id, label, category, confidence, source, notes, _json_dumps(metadata), now, now),
+            )
+    _WALLET_CLUSTER_REPUTATION_CACHE.clear()
+    return get_wallet_cluster_profile(cluster_id=cluster_id, include_wallets=True)
+
+
+def record_wallet_cluster_token_outcome(payload: dict[str, Any]) -> dict[str, Any]:
+    _ensure_schema()
+    cluster_id = str(payload.get("cluster_id") or "").strip()
+    token = str(payload.get("token") or "").strip()
+    if not cluster_id or not token:
+        raise ValueError("cluster_id_and_token_required")
+    now = int(time.time())
+    first_seen_ts = int(payload.get("first_seen_ts") or payload.get("seen_ts") or now)
+    latest_seen_ts = int(payload.get("latest_seen_ts") or payload.get("seen_ts") or now)
+    outcome_label = str(payload.get("outcome_label") or "").strip().lower() or None
+    max_change = _to_float(payload.get("max_market_cap_change_pct"))
+    max_runup = _to_float(payload.get("max_runup_pct"))
+    early_dump = 1 if bool(payload.get("early_dump")) else 0
+    source = str(payload.get("source") or "operator").strip() or "operator"
+    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    with _connect() as c:
+        c.execute(
+            """
+            INSERT INTO wallet_cluster_token_outcomes (
+                cluster_id, token, first_seen_ts, latest_seen_ts, outcome_label,
+                max_market_cap_change_pct, max_runup_pct, early_dump, source, evidence_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cluster_id, token) DO UPDATE SET
+                latest_seen_ts=MAX(wallet_cluster_token_outcomes.latest_seen_ts, excluded.latest_seen_ts),
+                outcome_label=COALESCE(excluded.outcome_label, wallet_cluster_token_outcomes.outcome_label),
+                max_market_cap_change_pct=CASE
+                    WHEN excluded.max_market_cap_change_pct IS NULL THEN wallet_cluster_token_outcomes.max_market_cap_change_pct
+                    WHEN wallet_cluster_token_outcomes.max_market_cap_change_pct IS NULL THEN excluded.max_market_cap_change_pct
+                    ELSE MAX(wallet_cluster_token_outcomes.max_market_cap_change_pct, excluded.max_market_cap_change_pct)
+                END,
+                max_runup_pct=CASE
+                    WHEN excluded.max_runup_pct IS NULL THEN wallet_cluster_token_outcomes.max_runup_pct
+                    WHEN wallet_cluster_token_outcomes.max_runup_pct IS NULL THEN excluded.max_runup_pct
+                    ELSE MAX(wallet_cluster_token_outcomes.max_runup_pct, excluded.max_runup_pct)
+                END,
+                early_dump=MAX(wallet_cluster_token_outcomes.early_dump, excluded.early_dump),
+                source=excluded.source,
+                evidence_json=excluded.evidence_json
+            """,
+            (cluster_id, token, first_seen_ts, latest_seen_ts, outcome_label, max_change, max_runup, early_dump, source, _json_dumps(evidence)),
+        )
+    _WALLET_CLUSTER_REPUTATION_CACHE.clear()
+    return get_wallet_cluster_profile(cluster_id=cluster_id, include_wallets=True)
+
+
+def get_wallet_cluster_profile(*, cluster_id: str, include_wallets: bool = True, hours: int = 24 * 90) -> dict[str, Any]:
+    _ensure_schema()
+    cluster_id = str(cluster_id or "").strip()
+    if not cluster_id:
+        raise ValueError("cluster_id_required")
+    with _connect() as c:
+        rows = c.execute(
+            """
+            SELECT wallet, cluster_id, label, category, confidence, source, notes, metadata_json, created_ts, updated_ts
+            FROM wallet_cluster_wallets
+            WHERE cluster_id=?
+            ORDER BY updated_ts DESC, wallet
+            """,
+            (cluster_id,),
+        ).fetchall()
+        stats = _wallet_cluster_outcome_stats(c, cluster_id, hours=hours)
+    category = _normalize_wallet_cluster_category(rows[0]["category"] if rows else "unknown")
+    reputation = _wallet_cluster_reputation_from_counts(
+        category=category,
+        winners=int(stats.get("winners") or 0),
+        failures=int(stats.get("failures") or 0),
+        early_dumps=int(stats.get("early_dumps") or 0),
+        tokens_seen=int(stats.get("tokens_seen") or 0),
+    )
+    profile = {
+        "cluster_id": cluster_id,
+        "category": category,
+        "label": rows[0]["label"] if rows else None,
+        "confidence": float(rows[0]["confidence"] or 0.0) if rows else 0.0,
+        "source": rows[0]["source"] if rows else None,
+        "notes": rows[0]["notes"] if rows else None,
+        "reputation": reputation,
+        "outcomes": stats,
+    }
+    if include_wallets:
+        profile["wallets"] = [
+            {
+                "wallet": row["wallet"],
+                "label": row["label"],
+                "category": row["category"],
+                "confidence": float(row["confidence"] or 0.0),
+                "source": row["source"],
+                "notes": row["notes"],
+                "metadata": _json_loads_dict(row["metadata_json"]),
+                "updated_ts": int(row["updated_ts"] or 0),
+            }
+            for row in rows
+        ]
+    return profile
+
+
+def list_wallet_cluster_profiles(*, limit: int = 100, category: str | None = None, hours: int = 24 * 90) -> dict[str, Any]:
+    _ensure_schema()
+    limit = max(1, min(int(limit), 1000))
+    normalized_category = _normalize_wallet_cluster_category(category) if category else None
+    with _connect() as c:
+        if normalized_category:
+            rows = c.execute(
+                """
+                SELECT cluster_id, MAX(updated_ts) AS updated_ts
+                FROM wallet_cluster_wallets
+                WHERE category=?
+                GROUP BY cluster_id
+                ORDER BY updated_ts DESC
+                LIMIT ?
+                """,
+                (normalized_category, limit),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                """
+                SELECT cluster_id, MAX(updated_ts) AS updated_ts
+                FROM wallet_cluster_wallets
+                GROUP BY cluster_id
+                ORDER BY updated_ts DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    profiles = [
+        get_wallet_cluster_profile(cluster_id=str(row["cluster_id"]), include_wallets=True, hours=hours)
+        for row in rows
+    ]
+    return {"count": len(profiles), "clusters": profiles}
+
+
+def get_wallet_cluster_reputation(wallets: list[Any], *, hours: int = 24 * 90) -> dict[str, Any]:
+    wallet_values = list(dict.fromkeys(_normalize_wallet_address(wallet) for wallet in wallets if _normalize_wallet_address(wallet)))
+    if not wallet_values:
+        return {"enabled": True, "wallets_checked": 0, "hits": [], "cluster_ids": [], "clusters": []}
+    cache_key = f"{max(1, int(hours))}:{_wallet_cluster_cache_key(wallet_values)}"
+    cached = _WALLET_CLUSTER_REPUTATION_CACHE.get(cache_key)
+    now = time.time()
+    if cached and cached[0] > now:
+        return dict(cached[1])
+
+    if _learning_process_role() == "worker" and _learning_write_base_url():
+        remote = _post_internal_learning_write(
+            "/learning/internal/wallet-clusters/reputation",
+            {"wallets": wallet_values, "hours": hours},
+        )
+        if isinstance(remote, dict):
+            _WALLET_CLUSTER_REPUTATION_CACHE[cache_key] = (now + _WALLET_CLUSTER_REPUTATION_TTL_SECONDS, remote)
+            return dict(remote)
+
+    _ensure_schema()
+    placeholders = ",".join("?" for _ in wallet_values)
+    with _connect() as c:
+        rows = c.execute(
+            f"""
+            SELECT wallet, cluster_id, label, category, confidence, source, notes
+            FROM wallet_cluster_wallets
+            WHERE wallet IN ({placeholders})
+            """,
+            tuple(wallet_values),
+        ).fetchall()
+        hits = [
+            {
+                "wallet": row["wallet"],
+                "cluster_id": row["cluster_id"],
+                "label": row["label"],
+                "category": row["category"],
+                "confidence": float(row["confidence"] or 0.0),
+                "source": row["source"],
+                "notes": row["notes"],
+            }
+            for row in rows
+        ]
+    cluster_ids = sorted({str(hit["cluster_id"]) for hit in hits if hit.get("cluster_id")})
+    clusters = [get_wallet_cluster_profile(cluster_id=cluster_id, include_wallets=False, hours=hours) for cluster_id in cluster_ids]
+    result = {
+        "enabled": True,
+        "wallets_checked": len(wallet_values),
+        "hits": hits,
+        "cluster_ids": cluster_ids,
+        "clusters": clusters,
+        "summary": {
+            "toxic_clusters": sum(1 for cluster in clusters if cluster.get("reputation") == "toxic_history"),
+            "winner_clusters": sum(1 for cluster in clusters if cluster.get("reputation") in {"winner_history", "manual_constructive"}),
+            "mixed_clusters": sum(1 for cluster in clusters if cluster.get("reputation") == "mixed_history"),
+        },
+    }
+    _WALLET_CLUSTER_REPUTATION_CACHE[cache_key] = (now + _WALLET_CLUSTER_REPUTATION_TTL_SECONDS, result)
+    return dict(result)
 
 
 def _reason_family(reason: str) -> str:
@@ -6775,7 +7213,7 @@ def _infer_wallet_guard_category(features: dict[str, Any], reasons: list[Any]) -
     verdict = str(features.get("wallet_cluster_verdict") or "").strip()
     if verdict in {"toxic_cluster", "smart_accumulation", "coordinated_accumulation", "uncertain_concentration"}:
         return verdict
-    if normalized & {"wallet_distribution_high_risk", "wallet_top_holder_concentration"}:
+    if normalized & {"wallet_distribution_high_risk", "wallet_top_holder_concentration", "wallet_identity_bundle_pattern"}:
         return "concentration_watch"
     if normalized & {"concentrated_wallet_flow", "wallet_flow_concentration"}:
         return "flow_concentration_watch"

@@ -60,6 +60,61 @@ def test_record_signal_event_persists_signal_and_jobs(tmp_path, monkeypatch):
     assert job_count == len(sls.SNAPSHOT_HORIZONS_MINUTES)
 
 
+def test_wallet_cluster_profiles_track_toxic_and_winner_outcomes(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+
+    toxic = sls.upsert_wallet_cluster(
+        {
+            "cluster_id": "team-rug",
+            "wallets": ["wallet_a", "wallet_b"],
+            "category": "known_bundle",
+            "label": "Team Rug",
+            "confidence": 0.95,
+        }
+    )
+    winner = sls.upsert_wallet_cluster(
+        {
+            "cluster_id": "smart-flow",
+            "wallets": ["wallet_c"],
+            "category": "smart_wallet",
+            "label": "Smart Flow",
+            "confidence": 0.85,
+        }
+    )
+
+    for token in ("rug1", "rug2", "rug3"):
+        toxic = sls.record_wallet_cluster_token_outcome(
+            {
+                "cluster_id": "team-rug",
+                "token": token,
+                "outcome_label": "failed",
+                "max_runup_pct": -70,
+                "early_dump": True,
+            }
+        )
+    for token in ("win1", "win2", "win3"):
+        winner = sls.record_wallet_cluster_token_outcome(
+            {
+                "cluster_id": "smart-flow",
+                "token": token,
+                "outcome_label": "worked",
+                "max_runup_pct": 500,
+                "early_dump": False,
+            }
+        )
+
+    reputation = sls.get_wallet_cluster_reputation(["wallet_a", "wallet_c", "unknown_wallet"])
+
+    assert toxic["reputation"] == "toxic_history"
+    assert toxic["outcomes"]["failures"] == 3
+    assert winner["reputation"] == "winner_history"
+    assert winner["outcomes"]["winners"] == 3
+    assert reputation["summary"] == {"toxic_clusters": 1, "winner_clusters": 1, "mixed_clusters": 0}
+    assert set(reputation["cluster_ids"]) == {"smart-flow", "team-rug"}
+
+
 def test_due_snapshot_jobs_skip_stale_work_and_report_backlog(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

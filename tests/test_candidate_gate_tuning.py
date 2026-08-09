@@ -238,6 +238,22 @@ def test_wallet_distribution_fail_reasons_flags_bundle_and_severe_concentration(
     assert "bundle_pattern_detected" in reasons
 
 
+def test_wallet_distribution_fail_reasons_flags_identity_bundle():
+    reasons = _wallet_distribution_fail_reasons(
+        {
+            "risk": "ok",
+            "top_holder_pct": 0.04,
+        },
+        total_buys_30s=8,
+        unique_wallets_30s=6,
+        top_wallet_share=0.30,
+        unique_wallet_clusters_30s=2,
+        top_wallet_cluster_share=0.75,
+    )
+
+    assert reasons == ["wallet_identity_bundle_pattern"]
+
+
 def test_wallet_distribution_fail_reasons_keeps_common_launch_concentration_out_of_hard_fail():
     reasons = _wallet_distribution_fail_reasons(
         {
@@ -322,6 +338,63 @@ def test_wallet_cluster_review_blocks_toxic_bundle_shape():
     assert cluster["verdict"] == "toxic_cluster"
     assert allowed is False
     assert "wallet_cluster_toxic" in blockers
+
+
+def test_wallet_cluster_review_blocks_known_toxic_identity_even_with_wallet_breadth():
+    cluster = _wallet_cluster_review(
+        {"risk": "ok", "top_holder_pct": 0.06, "top10_pct": 0.22},
+        total_buys_30s=8,
+        unique_wallets_30s=6,
+        top_wallet_share=0.30,
+        unique_wallet_clusters_30s=2,
+        top_wallet_cluster_share=0.75,
+        wallet_identity={
+            "cluster_ids": ["rug-team-1"],
+            "clusters": [{"cluster_id": "rug-team-1", "reputation": "toxic_history"}],
+            "summary": {"toxic_clusters": 1, "winner_clusters": 0, "mixed_clusters": 0},
+        },
+        attention_metrics={"unique_buyers_5m": 8, "burst_count_60s": 9},
+        dex_summary={
+            "liquidity_usd": 30000.0,
+            "txns_m5_buys": 14,
+            "txns_m5_sells": 4,
+            "volume_m5": 18000.0,
+            "price_change_m5": 12.0,
+        },
+        risk_score=0.30,
+    )
+
+    assert cluster["verdict"] == "toxic_cluster"
+    assert "wallet_cluster_toxic_history" in cluster["blockers"]
+    assert cluster["metrics"]["wallet_identity_cluster_ids"] == ["rug-team-1"]
+
+
+def test_wallet_cluster_review_uses_winner_history_only_with_constructive_flow():
+    cluster = _wallet_cluster_review(
+        {"risk": "ok", "top_holder_pct": 0.06, "top10_pct": 0.22},
+        total_buys_30s=8,
+        unique_wallets_30s=6,
+        top_wallet_share=0.30,
+        unique_wallet_clusters_30s=5,
+        top_wallet_cluster_share=0.35,
+        wallet_identity={
+            "cluster_ids": ["smart-1"],
+            "clusters": [{"cluster_id": "smart-1", "reputation": "winner_history"}],
+            "summary": {"toxic_clusters": 0, "winner_clusters": 1, "mixed_clusters": 0},
+        },
+        attention_metrics={"unique_buyers_5m": 8, "burst_count_60s": 9},
+        dex_summary={
+            "liquidity_usd": 30000.0,
+            "txns_m5_buys": 14,
+            "txns_m5_sells": 4,
+            "volume_m5": 18000.0,
+            "price_change_m5": 12.0,
+        },
+        risk_score=0.30,
+    )
+
+    assert cluster["verdict"] == "smart_accumulation"
+    assert "wallet_cluster_winner_history" in cluster["signals"]
 
 
 def test_wallet_guard_observe_blocks_mixed_or_weak_hard_fail():

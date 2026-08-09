@@ -29,10 +29,14 @@ from app.services.signal_learning_service import (
     get_active_watch_override,
     get_watch_overrides,
     get_watch_override_autopilot_status,
+    get_wallet_cluster_profile,
+    get_wallet_cluster_reputation,
     get_wallet_guard_feedback,
     ingest_signal_decision,
     ingest_signal_event,
     ingest_runtime_heartbeat,
+    list_wallet_cluster_profiles,
+    record_wallet_cluster_token_outcome,
     get_learning_digest,
     get_latest_learning_report,
     get_daily_opportunity_brief,
@@ -68,6 +72,7 @@ from app.services.signal_learning_service import (
     render_learning_digest_html,
     render_learning_report_html,
     sync_observe_review_queue,
+    upsert_wallet_cluster,
     update_policy_approval_status,
 )
 from app.services.tuning_service import (
@@ -1000,6 +1005,76 @@ def learning_ops_watch_override_revoke(token: str, payload: dict[str, object] = 
 @router.get("/learning/ops/wallet-guard/feedback")
 def learning_ops_wallet_guard_feedback(hours: int = 168, limit: int = 1000):
     return get_wallet_guard_feedback(hours=max(1, hours), limit=max(1, limit))
+
+
+@router.get("/learning/ops/wallet-clusters")
+def learning_ops_wallet_clusters(limit: int = 100, category: str | None = None, hours: int = 2160):
+    return list_wallet_cluster_profiles(limit=max(1, limit), category=category, hours=max(1, hours))
+
+
+@router.get("/learning/ops/wallet-clusters/{cluster_id}")
+def learning_ops_wallet_cluster_profile(cluster_id: str, hours: int = 2160):
+    try:
+        return get_wallet_cluster_profile(cluster_id=cluster_id, include_wallets=True, hours=max(1, hours))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/learning/ops/wallet-clusters")
+def learning_ops_wallet_cluster_upsert(
+    payload: dict[str, object] = Body(...),
+    x_signal_engine_token: str | None = Header(default=None),
+):
+    _validate_internal_write_token(x_signal_engine_token)
+    try:
+        return upsert_wallet_cluster(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/learning/ops/wallet-clusters/import")
+def learning_ops_wallet_cluster_import(
+    payload: dict[str, object] = Body(...),
+    x_signal_engine_token: str | None = Header(default=None),
+):
+    _validate_internal_write_token(x_signal_engine_token)
+    entries = payload.get("clusters") or payload.get("entries") or []
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=400, detail="clusters_must_be_list")
+    results = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            results.append(upsert_wallet_cluster(entry))
+        except ValueError as exc:
+            results.append({"error": str(exc), "entry": entry})
+    return {"count": len(results), "clusters": results}
+
+
+@router.post("/learning/ops/wallet-clusters/outcomes")
+def learning_ops_wallet_cluster_outcome(
+    payload: dict[str, object] = Body(...),
+    x_signal_engine_token: str | None = Header(default=None),
+):
+    _validate_internal_write_token(x_signal_engine_token)
+    try:
+        return record_wallet_cluster_token_outcome(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/learning/internal/wallet-clusters/reputation")
+def learning_internal_wallet_cluster_reputation(
+    payload: dict[str, object] = Body(...),
+    x_signal_engine_token: str | None = Header(default=None),
+):
+    _validate_internal_write_token(x_signal_engine_token)
+    wallets = payload.get("wallets") or []
+    if not isinstance(wallets, list):
+        raise HTTPException(status_code=400, detail="wallets_must_be_list")
+    hours = int(payload.get("hours") or 2160)
+    return get_wallet_cluster_reputation(wallets, hours=max(1, hours))
 
 
 @router.get("/learning/ops/token-review/{token}")
