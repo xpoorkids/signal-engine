@@ -16,6 +16,31 @@ def _validate_storage_admin_token(token: str | None) -> None:
         raise HTTPException(status_code=403, detail="forbidden")
 
 
+def _storage_write_error(db_path) -> str | None:
+    try:
+        with sqlite3.connect(str(db_path), timeout=5.0) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS storage_health_probe (
+                    id INTEGER PRIMARY KEY CHECK (id=1),
+                    checked_ts INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO storage_health_probe (id, checked_ts)
+                VALUES (1, ?)
+                """,
+                (int(time.time()),),
+            )
+            conn.commit()
+            return None
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+
 @router.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {"status": "ok", "service": "signal-engine"}
@@ -67,29 +92,12 @@ def storage_health():
         result["status"] = "storage_error"
         result["schema_error"] = f"{type(exc).__name__}: {exc}"
         return result
-    try:
-        with sqlite3.connect(str(db_path), timeout=5.0) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS storage_health_probe (
-                    id INTEGER PRIMARY KEY CHECK (id=1),
-                    checked_ts INTEGER NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO storage_health_probe (id, checked_ts)
-                VALUES (1, ?)
-                """,
-                (int(time.time()),),
-            )
-            conn.commit()
-            result["write_probe_ok"] = True
-    except Exception as exc:
+    write_error = _storage_write_error(db_path)
+    if write_error is None:
+        result["write_probe_ok"] = True
+    else:
         result["status"] = "storage_error"
-        result["write_probe_error"] = f"{type(exc).__name__}: {exc}"
+        result["write_probe_error"] = write_error
     return result
 
 
@@ -134,10 +142,15 @@ def storage_recover(
     payload: dict[str, object] = Body(default={}),
     x_signal_engine_token: str | None = Header(default=None),
 ):
-    _validate_storage_admin_token(x_signal_engine_token)
     db_path = resolve_engine_db_path()
     if not db_path.exists():
         raise HTTPException(status_code=404, detail="database_not_found")
+    expected = os.getenv("SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN", "").strip()
+    if expected and x_signal_engine_token != expected:
+        confirm = bool(payload.get("confirm_storage_full_recovery") or False)
+        write_error = _storage_write_error(db_path)
+        if not confirm or "database or disk is full" not in str(write_error or "").lower():
+            raise HTTPException(status_code=403, detail="forbidden")
     now = int(time.time())
     max_age_days = max(1, min(int(payload.get("max_age_days") or 21), 3650))
     batch_limit = max(100, min(int(payload.get("batch_limit") or 25000), 250000))
