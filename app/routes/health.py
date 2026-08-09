@@ -156,6 +156,7 @@ def storage_recover(
     batch_limit = max(100, min(int(payload.get("batch_limit") or 25000), 250000))
     cutoff_ts = now - max_age_days * 86400
     dry_run = bool(payload.get("dry_run") or False)
+    unsafe_journal_off = bool(payload.get("unsafe_journal_off") or False)
     result = {
         "status": "dry_run" if dry_run else "attempted",
         "db_path": str(db_path),
@@ -163,6 +164,7 @@ def storage_recover(
         "cutoff_ts": cutoff_ts,
         "max_age_days": max_age_days,
         "batch_limit": batch_limit,
+        "unsafe_journal_off": unsafe_journal_off,
         "deleted": {},
         "checkpoint": None,
         "write_probe": None,
@@ -178,6 +180,11 @@ def storage_recover(
         with sqlite3.connect(str(db_path), timeout=30.0) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout=30000")
+            if unsafe_journal_off and not dry_run:
+                conn.execute("PRAGMA synchronous=OFF")
+                result["journal_mode_before_recovery"] = [
+                    list(row) for row in conn.execute("PRAGMA journal_mode=OFF").fetchall()
+                ]
             if dry_run:
                 for table, ts_col in targets:
                     if not _table_exists(conn, table):
