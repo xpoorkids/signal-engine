@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import time
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -65,6 +66,35 @@ def _background_workers_enabled() -> bool:
     return os.getenv("SIGNAL_ENGINE_ENABLE_BACKGROUND_WORKERS", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _storage_write_available() -> bool:
+    db_path = resolve_engine_db_path()
+    if not db_path.exists():
+        return True
+    try:
+        with sqlite3.connect(str(db_path), timeout=5.0) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS storage_health_probe (
+                    id INTEGER PRIMARY KEY CHECK (id=1),
+                    checked_ts INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO storage_health_probe (id, checked_ts)
+                VALUES (1, ?)
+                """,
+                (int(time.time()),),
+            )
+            conn.commit()
+            return True
+    except Exception as exc:
+        logger.warning("[startup] storage write probe failed; background workers suppressed error=%s", exc)
+        return False
+
+
 def _policy_automation_worker_enabled() -> bool:
     if not _background_workers_enabled():
         return False
@@ -98,6 +128,9 @@ def _snapshot_worker_enabled() -> bool:
 
 @app.on_event("startup")
 async def start_background_workers() -> None:
+    if not _storage_write_available():
+        logger.warning("[startup] storage unavailable; learning background workers disabled until next restart")
+        return
     if _snapshot_worker_enabled():
         name = "learning_snapshots"
         if name not in _BACKGROUND_TASKS or _BACKGROUND_TASKS[name].done():
