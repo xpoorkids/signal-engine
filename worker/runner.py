@@ -201,9 +201,11 @@ Gotchas
 
 import asyncio
 import os
+import sqlite3
 import time
 import traceback
 import logging
+from pathlib import Path
 from typing import Any
 
 logging.basicConfig(level=logging.INFO)
@@ -273,6 +275,35 @@ def _observe_recheck_worker_enabled() -> bool:
         "no",
         "off",
     }
+
+
+def _storage_write_available(db_path) -> bool:
+    path = Path(db_path)
+    if not path.exists():
+        return True
+    try:
+        with sqlite3.connect(str(path), timeout=5.0) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS storage_health_probe (
+                    id INTEGER PRIMARY KEY CHECK (id=1),
+                    checked_ts INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO storage_health_probe (id, checked_ts)
+                VALUES (1, ?)
+                """,
+                (int(time.time()),),
+            )
+            conn.commit()
+            return True
+    except Exception as exc:
+        logger.warning("[startup] worker storage write probe failed; runtime suppressed error=%s", exc)
+        return False
 
 
 def _task_health() -> dict[str, dict[str, Any]]:
@@ -611,6 +642,16 @@ async def run_worker() -> None:
         logger.warning(
             "[startup] SIGNAL_ENGINE_DB_PATH is unset; worker may write to a local SQLite file that is not shared with engine."
         )
+    if not _storage_write_available(db_path):
+        log_event(
+            logger,
+            logging.ERROR,
+            "worker",
+            action="storage_unavailable_hold",
+            db_path=str(db_path),
+        )
+        while True:
+            await asyncio.sleep(60)
     global _QUEUE
     tasks = []
     q: asyncio.Queue = asyncio.Queue(maxsize=2000)
