@@ -157,6 +157,7 @@ def storage_recover(
     cutoff_ts = now - max_age_days * 86400
     dry_run = bool(payload.get("dry_run") or False)
     unsafe_journal_off = bool(payload.get("unsafe_journal_off") or False)
+    clear_stale_locks = bool(payload.get("clear_stale_locks") or False)
     result = {
         "status": "dry_run" if dry_run else "attempted",
         "db_path": str(db_path),
@@ -165,6 +166,8 @@ def storage_recover(
         "max_age_days": max_age_days,
         "batch_limit": batch_limit,
         "unsafe_journal_off": unsafe_journal_off,
+        "clear_stale_locks": clear_stale_locks,
+        "companion_files": {},
         "deleted": {},
         "checkpoint": None,
         "write_probe": None,
@@ -176,6 +179,23 @@ def storage_recover(
         ("signal_decisions", "created_ts"),
         ("signals", "updated_ts"),
     ]
+    for suffix in ("-wal", "-shm", "-journal"):
+        companion = db_path.with_name(db_path.name + suffix)
+        result["companion_files"][suffix] = {
+            "exists": companion.exists(),
+            "size_bytes": companion.stat().st_size if companion.exists() else 0,
+            "removed": False,
+        }
+    if clear_stale_locks and not dry_run:
+        for suffix in ("-shm", "-journal"):
+            companion = db_path.with_name(db_path.name + suffix)
+            if not companion.exists():
+                continue
+            try:
+                companion.unlink()
+                result["companion_files"][suffix]["removed"] = True
+            except Exception as exc:
+                result["errors"].append(f"{suffix}: {type(exc).__name__}: {exc}")
     try:
         with sqlite3.connect(str(db_path), timeout=30.0) as conn:
             conn.row_factory = sqlite3.Row
