@@ -158,6 +158,7 @@ def storage_recover(
     dry_run = bool(payload.get("dry_run") or False)
     unsafe_journal_off = bool(payload.get("unsafe_journal_off") or False)
     clear_stale_locks = bool(payload.get("clear_stale_locks") or False)
+    clear_wal = bool(payload.get("clear_wal") or False)
     result = {
         "status": "dry_run" if dry_run else "attempted",
         "db_path": str(db_path),
@@ -167,6 +168,7 @@ def storage_recover(
         "batch_limit": batch_limit,
         "unsafe_journal_off": unsafe_journal_off,
         "clear_stale_locks": clear_stale_locks,
+        "clear_wal": clear_wal,
         "companion_files": {},
         "deleted": {},
         "checkpoint": None,
@@ -186,8 +188,11 @@ def storage_recover(
             "size_bytes": companion.stat().st_size if companion.exists() else 0,
             "removed": False,
         }
-    if clear_stale_locks and not dry_run:
-        for suffix in ("-shm", "-journal"):
+    if (clear_stale_locks or clear_wal) and not dry_run:
+        suffixes = ["-shm", "-journal"]
+        if clear_wal:
+            suffixes.insert(0, "-wal")
+        for suffix in suffixes:
             companion = db_path.with_name(db_path.name + suffix)
             if not companion.exists():
                 continue
