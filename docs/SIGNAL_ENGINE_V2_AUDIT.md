@@ -46,6 +46,7 @@ Audit snapshot captured on 2026-08-26 from starting SHA `fc4f8b0d9fec616ac078914
 - Existing outcome analysis includes last/reference price paths; executable quote quality is not consistently separated.
 - Jupiter adapter currently uses the older quote path and is not versioned as Swap V2.
 - Holder concentration needs explicit exclusion of pools, burns, programs, bonding curves, and known custody before V2 should treat it as effective circulating supply.
+- Worker V2 behavior was not implemented in the initial V2 contract slice; only the target stages and gaps were documented.
 
 ## Baseline Report
 
