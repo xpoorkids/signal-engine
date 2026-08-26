@@ -679,6 +679,26 @@ def _candidate_send_decision(
     return eligible, reasons, confirmations
 
 
+def _candidate_gate_skip_should_mature(
+    reasons: list[str] | None,
+    *,
+    lifecycle: str | None,
+) -> bool:
+    if lifecycle != "dex":
+        return False
+    normalized = [str(reason or "").strip() for reason in (reasons or []) if str(reason or "").strip()]
+    if not normalized:
+        return False
+    transient_prefixes = (
+        "age<",
+        "attention<",
+        "confirmation_signals<",
+        "dex_gate:vol5m<",
+        "dex_gate:buys5m<",
+    )
+    return all(any(reason.startswith(prefix) for prefix in transient_prefixes) for reason in normalized)
+
+
 def _apply_candidate_ev_gate(
     *,
     send_eligible: bool,
@@ -1860,6 +1880,50 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     reasons=gate_reasons,
                 )
             if not ok:
+                if e.token and _candidate_gate_skip_should_mature(gate_reasons, lifecycle=lifecycle):
+                    creator_score_value = float(creator_score_info.get("score") or 0.0)
+                    upsert_candidate_state(
+                        e.token,
+                        attention_score or 0.0,
+                        e.confidence,
+                        current_metrics.get("liquidity") or 0.0,
+                        current_metrics.get("unique_buyers_5m") or 0,
+                        creator_score_value,
+                        lifecycle,
+                    )
+                    cand_state = get_candidate_state(e.token)
+                    now_ts = int(time.time())
+                    next_check_at = int(cand_state.get("next_check_at") or 0)
+                    if not should_mute(e.token) and next_check_at <= now_ts and min_liquidity_gate(extra, CAND_MIN_CURVE_LIQ_USD):
+                        extra["candidate_maturation_recheck"] = {
+                            "stage": "A",
+                            "reasons": list(gate_reasons),
+                        }
+
+                        async def _recheck_fn(token: str) -> None:
+                            await process_event(
+                                state,
+                                Event(
+                                    type="recheck",
+                                    source="engine",
+                                    token=token,
+                                    creator=ts.creator,
+                                    confidence=0.0,
+                                    reasons=["candidate_maturation_recheck"],
+                                    extra=dict(extra),
+                                ),
+                            )
+
+                        e._recheck_fn = _recheck_fn  # type: ignore[attr-defined]
+                        asyncio.create_task(
+                            schedule_rechecks(
+                                state,
+                                e,
+                                extra,
+                                CAND_MIN_CURVE_LIQ_USD,
+                                "A",
+                            )
+                        )
                 logger.info(
                     "[pre-candidate-skip] token=%s sniper_conditions_met=%s",
                     e.token,

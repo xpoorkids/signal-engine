@@ -1,6 +1,7 @@
 from worker.alert_gate import admission_check_candidate
 from worker.promote import (
     _candidate_send_eligible,
+    _candidate_gate_skip_should_mature,
     _wallet_cluster_review,
     _wallet_guard_category,
     _wallet_distribution_fail_reasons,
@@ -201,6 +202,22 @@ def test_candidate_send_eligible_requires_real_attention_even_with_creator_quali
     assert _candidate_send_eligible(0.20, 0.90) is False
     assert _candidate_send_eligible(0.36, 0.90) is True
     assert _candidate_send_eligible(0.50, 0.0) is True
+
+
+def test_candidate_gate_skip_matures_only_transient_dex_reasons():
+    assert _candidate_gate_skip_should_mature(
+        ["age<15s", "attention<0.14", "dex_gate:vol5m<5000.0", "confirmation_signals<2"],
+        lifecycle="dex",
+    ) is True
+    assert _candidate_gate_skip_should_mature(["age<15s"], lifecycle="bonding_curve") is False
+    assert _candidate_gate_skip_should_mature(
+        ["age<15s", "wallet_distribution_high_risk"],
+        lifecycle="dex",
+    ) is False
+    assert _candidate_gate_skip_should_mature(
+        ["age<15s", "dex_gate:price_change_5m<-18.0"],
+        lifecycle="dex",
+    ) is False
 
 
 def test_candidate_gate_uses_policy_override_thresholds():
