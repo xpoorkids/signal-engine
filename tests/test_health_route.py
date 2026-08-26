@@ -97,3 +97,42 @@ def test_storage_recover_prunes_old_learning_rows_and_runs_write_probe(tmp_path,
         probe = conn.execute("SELECT checked_ts FROM storage_health_probe WHERE id=1").fetchone()
     assert remaining_snapshots == 1
     assert probe is not None
+
+
+def test_storage_recover_resets_confirmed_malformed_database(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setenv("SIGNAL_ENGINE_DB_PATH", str(db_path))
+    monkeypatch.setenv("SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN", "secret-token")
+    db_path.write_bytes(b"not a sqlite database")
+    wal_path = db_path.with_name(db_path.name + "-wal")
+    wal_path.write_bytes(b"stale wal")
+
+    client = TestClient(main.app)
+    denied = client.post(
+        "/health/storage/recover",
+        headers={"X-Signal-Engine-Token": "wrong"},
+        json={"dry_run": True},
+    )
+    dry_run = client.post(
+        "/health/storage/recover",
+        headers={"X-Signal-Engine-Token": "wrong"},
+        json={"dry_run": True, "confirm_malformed_storage_reset": True},
+    )
+    response = client.post(
+        "/health/storage/recover",
+        headers={"X-Signal-Engine-Token": "wrong"},
+        json={"confirm_malformed_storage_reset": True},
+    )
+
+    assert denied.status_code == 403
+    assert dry_run.status_code == 200
+    assert dry_run.json()["status"] == "malformed_reset_available"
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "reset"
+    assert payload["write_probe"]["ok"] is True
+    assert str(db_path) in payload["removed_files"]
+    assert not wal_path.exists()
+    with sqlite3.connect(db_path) as conn:
+        probe = conn.execute("SELECT checked_ts FROM storage_health_probe WHERE id=1").fetchone()
+    assert probe is not None

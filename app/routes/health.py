@@ -1,4 +1,5 @@
 import os
+import gc
 import sqlite3
 import time
 
@@ -39,6 +40,26 @@ def _storage_write_error(db_path) -> str | None:
             return None
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
+
+
+def _storage_schema_error(db_path) -> str | None:
+    if not db_path.exists():
+        return None
+    try:
+        uri = db_path.resolve().as_uri() + "?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=5.0) as conn:
+            conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchall()
+        return None
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+
+def _is_malformed_storage_error(error: str | None) -> bool:
+    normalized = str(error or "").lower()
+    return (
+        "database disk image is malformed" in normalized
+        or "file is not a database" in normalized
+    )
 
 
 @router.api_route("/", methods=["GET", "HEAD"])
@@ -148,8 +169,14 @@ def storage_recover(
     expected = os.getenv("SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN", "").strip()
     if expected and x_signal_engine_token != expected:
         confirm = bool(payload.get("confirm_storage_full_recovery") or False)
+        confirm_malformed_reset = bool(payload.get("confirm_malformed_storage_reset") or False)
         write_error = _storage_write_error(db_path)
-        if not confirm or "database or disk is full" not in str(write_error or "").lower():
+        schema_error = _storage_schema_error(db_path)
+        disk_full_confirmed = confirm and "database or disk is full" in str(write_error or "").lower()
+        malformed_confirmed = confirm_malformed_reset and (
+            _is_malformed_storage_error(write_error) or _is_malformed_storage_error(schema_error)
+        )
+        if not (disk_full_confirmed or malformed_confirmed):
             raise HTTPException(status_code=403, detail="forbidden")
     now = int(time.time())
     max_age_days = max(1, min(int(payload.get("max_age_days") or 21), 3650))
@@ -159,6 +186,7 @@ def storage_recover(
     unsafe_journal_off = bool(payload.get("unsafe_journal_off") or False)
     clear_stale_locks = bool(payload.get("clear_stale_locks") or False)
     clear_wal = bool(payload.get("clear_wal") or False)
+    reset_malformed_storage = bool(payload.get("confirm_malformed_storage_reset") or False)
     result = {
         "status": "dry_run" if dry_run else "attempted",
         "db_path": str(db_path),
@@ -169,6 +197,7 @@ def storage_recover(
         "unsafe_journal_off": unsafe_journal_off,
         "clear_stale_locks": clear_stale_locks,
         "clear_wal": clear_wal,
+        "reset_malformed_storage": reset_malformed_storage,
         "companion_files": {},
         "deleted": {},
         "checkpoint": None,
@@ -188,6 +217,48 @@ def storage_recover(
             "size_bytes": companion.stat().st_size if companion.exists() else 0,
             "removed": False,
         }
+    schema_error = _storage_schema_error(db_path)
+    write_error_before = _storage_write_error(db_path)
+    result["schema_error_before"] = schema_error
+    result["write_error_before"] = write_error_before
+    if reset_malformed_storage and _is_malformed_storage_error(schema_error or write_error_before):
+        if dry_run:
+            result["status"] = "malformed_reset_available"
+            result["would_remove_db"] = True
+            return result
+        gc.collect()
+        removed = []
+        for path in [
+            db_path,
+            db_path.with_name(db_path.name + "-wal"),
+            db_path.with_name(db_path.name + "-shm"),
+            db_path.with_name(db_path.name + "-journal"),
+        ]:
+            if not path.exists():
+                continue
+            try:
+                path.unlink()
+                removed.append(str(path))
+                for suffix, details in result["companion_files"].items():
+                    if path == db_path.with_name(db_path.name + suffix):
+                        details["removed"] = True
+            except Exception as exc:
+                result["errors"].append(f"{path.name}: {type(exc).__name__}: {exc}")
+        if result["errors"]:
+            result["status"] = "storage_error"
+            result["removed_files"] = removed
+            result["file_size_bytes_after"] = db_path.stat().st_size if db_path.exists() else 0
+            return result
+        try:
+            write_error_after = _storage_write_error(db_path)
+            result["write_probe"] = {"ok": write_error_after is None, "error": write_error_after}
+            result["status"] = "reset" if write_error_after is None else "storage_error"
+        except Exception as exc:
+            result["write_probe"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            result["status"] = "storage_error"
+        result["removed_files"] = removed
+        result["file_size_bytes_after"] = db_path.stat().st_size if db_path.exists() else 0
+        return result
     if (clear_stale_locks or clear_wal) and not dry_run:
         suffixes = ["-shm", "-journal"]
         if clear_wal:
