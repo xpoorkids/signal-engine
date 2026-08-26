@@ -889,6 +889,36 @@ def test_community_takeover_counts_as_quality_support():
     assert reasons == []
 
 
+def test_j7tracker_counts_as_non_x_quality_support_with_real_flow():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.12,
+        creator_score=0.0,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 4,
+                "burst_count_60s": 8,
+                "j7tracker_watch": True,
+                "discovery_sources": ["j7tracker"],
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 72_000.0,
+            "volume_m5": 14_000.0,
+            "txns_m5_buys": 32,
+            "txns_m5_sells": 11,
+            "price_change_m5": 8.0,
+            "market_cap_usd": 1_400_000.0,
+        },
+    )
+
+    assert eligible is True
+    assert "j7tracker_watch" in confirmations
+    assert "quality_confirmation_missing" not in reasons
+    assert reasons == []
+
+
 def test_dormant_revival_watch_counts_as_dex_breakout():
     eligible, reasons, confirmations = candidate_send_reasons(
         attention_score=0.12,

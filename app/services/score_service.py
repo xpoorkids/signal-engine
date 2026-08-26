@@ -8,6 +8,7 @@ USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 EXCLUDED_QUOTES = {WSOL_MINT, USDC_MINT, USDT_MINT}
 SOLANA_CHAIN_VALUES = {"sol", "solana"}
 _DEX_TOKEN_STATE: dict[str, dict[str, float]] = {}
+NON_X_DISCOVERY_SOURCES = {"community_takeover", "external_seed", "j7tracker"}
 
 
 def _clean_address(value: object) -> str:
@@ -170,6 +171,7 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
             vol_liq_ratio = vol5m / max(1.0, liq)
             market_cap = float(p.get("marketCap") or p.get("fdv") or 0)
             sources = _discovery_sources(p)
+            source_set = set(sources)
             has_curated_source = bool(
                 {
                     "community_takeover",
@@ -178,7 +180,7 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                     "token_profile",
                     "token_boost_top",
                 }
-                & set(sources)
+                & source_set
             )
             near_pass = age <= 0.5 and liq >= 800 and vol5m >= 20 and chg5m >= -10
             momentum_watch = (
@@ -265,7 +267,10 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                             "buy_sell_ratio_5m": round(buy_sell_ratio, 4),
                             "volume_liquidity_ratio_5m": round(vol_liq_ratio, 4),
                             "discovery_sources": sources,
-                            "community_takeover": "community_takeover" in sources,
+                            "community_takeover": "community_takeover" in source_set,
+                            "j7tracker_watch": "j7tracker" in source_set,
+                            "external_seed_watch": "external_seed" in source_set,
+                            "non_x_discovery_support": bool(NON_X_DISCOVERY_SOURCES & source_set),
                             "dormant_revival_watch": dormant_revival_watch,
                             "realish_chart_continuity": realish_chart_continuity,
                             "single_scan_chart_spike": single_scan_chart_spike,
@@ -279,7 +284,7 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                                     "token_boost_top",
                                     "dex_boost_active",
                                 }
-                                & set(sources)
+                                & source_set
                             ),
                             **scan_evidence,
                         },

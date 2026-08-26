@@ -6438,6 +6438,40 @@ def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
             "in_progress": scanner_in_progress,
             "last_error": scanner_error or None,
         }
+        source_health = dex_health.get("sources") if isinstance(dex_health.get("sources"), dict) else {}
+        non_x_sources: dict[str, Any] = {}
+        for source_name in ("j7tracker", "external_seed", "community_takeover", "token_profile"):
+            source = source_health.get(source_name) if isinstance(source_health.get(source_name), dict) else {}
+            token_count = int(source.get("token_count") or 0)
+            pair_count = int(source.get("pair_count") or 0)
+            observed = bool(token_count > 0 or pair_count > 0)
+            enabled = bool(source.get("enabled", observed))
+            configured = bool(source.get("configured", observed))
+            ok = bool(source.get("ok", True))
+            source_status = "disabled"
+            if enabled and not configured:
+                source_status = "missing_config"
+            elif enabled and configured and not ok:
+                source_status = "degraded"
+            elif enabled and configured:
+                source_status = "ok" if token_count > 0 or pair_count > 0 else "empty"
+            non_x_sources[source_name] = {
+                "status": source_status,
+                "enabled": enabled,
+                "configured": configured,
+                "token_count": token_count,
+                "pair_count": pair_count,
+                "last_error": source.get("last_error"),
+            }
+        non_x_available = any(
+            item.get("status") in {"ok", "empty"} and item.get("enabled") and item.get("configured")
+            for item in non_x_sources.values()
+        )
+        dependency_status["non_x_sources"] = {
+            "status": "available" if non_x_available else "unavailable",
+            "fallback_for_x": bool(x_status in {"degraded", "missing_config", "disabled"} and non_x_available),
+            "sources": non_x_sources,
+        }
 
         delivery = producer.get("discord_delivery_health") if isinstance(producer.get("discord_delivery_health"), dict) else {}
         main_delivery = delivery.get("main") if isinstance(delivery.get("main"), dict) else {}

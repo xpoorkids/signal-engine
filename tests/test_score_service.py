@@ -217,6 +217,34 @@ def test_score_pairs_returns_curated_discovery_watch_for_community_takeover():
     assert scored[0]["metrics"]["paid_visibility"] is False
 
 
+def test_score_pairs_marks_j7tracker_as_non_x_discovery_support():
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    token = "DdPrHYqM8Ueovnk9kAnAgoGhswkuaTqmxcoZzU3Zpump"
+    pairs = [
+        {
+            "chainId": "solana",
+            "signal_engine_sources": ["j7tracker"],
+            "baseToken": {"address": token, "symbol": "J7"},
+            "quoteToken": {
+                "address": "So11111111111111111111111111111111111111112",
+                "symbol": "SOL",
+            },
+            "liquidity": {"usd": 150_000},
+            "volume": {"m5": 1_400},
+            "priceChange": {"m5": 2.5},
+            "txns": {"m5": {"buys": 11, "sells": 5}},
+            "marketCap": 2_000_000,
+            "pairCreatedAt": now_ms - 2 * 24 * 60 * 60_000,
+        }
+    ]
+
+    scored = score_pairs(pairs)
+
+    assert scored[0]["reason"] == "curated_discovery_watch"
+    assert scored[0]["metrics"]["j7tracker_watch"] is True
+    assert scored[0]["metrics"]["non_x_discovery_support"] is True
+
+
 def test_score_pairs_returns_dormant_revival_watch_after_two_days():
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
     token = "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump"

@@ -573,6 +573,9 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         "top_wallet_share_30s": 0.0,
         "discovery_sources": [],
         "community_takeover": False,
+        "j7tracker_watch": False,
+        "external_seed_watch": False,
+        "non_x_discovery_support": False,
         "paid_visibility": False,
         "paid_visibility_class": "unknown",
         "source_stability": "unknown",
@@ -593,6 +596,16 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         if isinstance(seed_metrics.get("discovery_sources"), list):
             metrics["discovery_sources"] = [str(item) for item in seed_metrics.get("discovery_sources") if str(item or "")]
         metrics["community_takeover"] = bool(seed_metrics.get("community_takeover"))
+        metrics["j7tracker_watch"] = bool(seed_metrics.get("j7tracker_watch"))
+        metrics["external_seed_watch"] = bool(seed_metrics.get("external_seed_watch"))
+        source_set = set(metrics["discovery_sources"])
+        metrics["non_x_discovery_support"] = bool(
+            seed_metrics.get("non_x_discovery_support")
+            or metrics["community_takeover"]
+            or metrics["j7tracker_watch"]
+            or metrics["external_seed_watch"]
+            or {"community_takeover", "j7tracker", "external_seed"} & source_set
+        )
         metrics["paid_visibility"] = bool(seed_metrics.get("paid_visibility"))
         metrics["paid_visibility_class"] = str(seed_metrics.get("paid_visibility_class") or "unknown")
         metrics["source_stability"] = str(seed_metrics.get("source_stability") or "unknown")
@@ -680,6 +693,10 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         _append_reason(reasons, "DEX dormant revival watch")
     if metrics.get("realish_chart_continuity"):
         _append_reason(reasons, "DEX realish chart continuity")
+    if metrics.get("j7tracker_watch"):
+        _append_reason(reasons, "J7Tracker discovery support")
+    if metrics.get("external_seed_watch"):
+        _append_reason(reasons, "External seed discovery support")
 
     # DexScreener boosts/orders
     dex_boost = 0.0

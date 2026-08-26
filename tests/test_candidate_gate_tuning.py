@@ -274,6 +274,40 @@ def test_candidate_dex_gate_allows_dormant_revival_low_attention():
     assert extra["candidate_admission_revival_bypass"][0].startswith("attention<")
 
 
+def test_candidate_dex_gate_allows_j7tracker_low_attention_with_flow():
+    extra = {
+        "metrics": {
+            "age_minutes": 90.0,
+        },
+        "attention_metrics": {
+            "j7tracker_watch": True,
+            "discovery_sources": ["j7tracker"],
+            "unique_buyers_5m": 4,
+            "burst_count_60s": 8,
+        },
+    }
+    ok, reasons, lifecycle = admission_check_candidate(
+        attention_score=0.06,
+        risk_score=0.05,
+        extra=extra,
+        dex_summary={
+            "age_minutes": 90.0,
+            "liquidity_usd": 92_000.0,
+            "volume_m5": 16_000.0,
+            "txns_m5_buys": 34,
+            "txns_m5_sells": 9,
+            "price_change_m5": 7.0,
+            "market_cap_usd": 1_100_000.0,
+        },
+        attention_unavailable=False,
+    )
+
+    assert lifecycle == "dex"
+    assert ok is True
+    assert reasons == []
+    assert extra["candidate_admission_non_x_bypass"][0].startswith("attention<")
+
+
 def test_candidate_send_eligible_requires_real_attention_even_with_creator_quality():
     assert _candidate_send_eligible(0.20, 0.90) is False
     assert _candidate_send_eligible(0.36, 0.90) is True

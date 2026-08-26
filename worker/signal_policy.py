@@ -5,6 +5,25 @@ import os
 from typing import Any
 
 
+NON_X_DISCOVERY_SOURCES = {"community_takeover", "external_seed", "j7tracker"}
+
+
+def _discovery_source_set(payload: dict[str, Any]) -> set[str]:
+    sources = payload.get("discovery_sources") if isinstance(payload.get("discovery_sources"), list) else []
+    return {str(item).strip() for item in sources if str(item or "").strip()}
+
+
+def _has_non_x_discovery_support(payload: dict[str, Any]) -> bool:
+    source_set = _discovery_source_set(payload)
+    return bool(
+        payload.get("community_takeover")
+        or payload.get("j7tracker_watch")
+        or payload.get("external_seed_watch")
+        or payload.get("non_x_discovery_support")
+        or NON_X_DISCOVERY_SOURCES & source_set
+    )
+
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, str(default)))
@@ -623,8 +642,7 @@ def dex_accumulation_watch_signal(
         volume_delta = 0.0
     persistent = bool(payload.get("dex_scan_persistent")) or repeat_count >= 2
     independent_flow = bool(payload.get("independent_flow_confirmed"))
-    sources = payload.get("discovery_sources") if isinstance(payload.get("discovery_sources"), list) else []
-    credible_source = bool(payload.get("community_takeover")) or "community_takeover" in sources
+    credible_source = _has_non_x_discovery_support(payload)
     sell_ratio = sells5m / max(1, buys5m)
 
     return (
@@ -677,12 +695,23 @@ def viral_theme_dex_momentum_signal(
     buy_sell_ratio = float(buys5m) / float(max(sells5m, 1)) if buys5m > 0 else 0.0
     sell_buy_ratio = float(sells5m) / float(max(buys5m, 1)) if buys5m > 0 else 0.0
     repeat_count = int(payload.get("dex_scan_repeat_count") or 0)
-    sources = payload.get("discovery_sources") if isinstance(payload.get("discovery_sources"), list) else []
+    sources = _discovery_source_set(payload)
     source_supported = bool(
         payload.get("community_takeover")
+        or payload.get("j7tracker_watch")
+        or payload.get("external_seed_watch")
+        or payload.get("non_x_discovery_support")
         or payload.get("dex_scan_persistent")
         or repeat_count >= 2
-        or {"community_takeover", "token_profile", "token_boost_top", "token_boost_latest"} & set(sources)
+        or {
+            "community_takeover",
+            "external_seed",
+            "j7tracker",
+            "token_profile",
+            "token_boost_top",
+            "token_boost_latest",
+        }
+        & sources
     )
 
     return (
@@ -779,6 +808,9 @@ def candidate_confirmation_signals(
     viral_theme_hits = metrics.get("viral_theme_hits") if isinstance(metrics.get("viral_theme_hits"), list) else []
     viral_x_signal = bool(metrics.get("viral_x_signal"))
     community_takeover = bool(metrics.get("community_takeover"))
+    source_set = _discovery_source_set(metrics)
+    j7tracker_watch = bool(metrics.get("j7tracker_watch")) or "j7tracker" in source_set
+    external_seed_watch = bool(metrics.get("external_seed_watch")) or "external_seed" in source_set
     independent_flow_confirmed = bool(metrics.get("independent_flow_confirmed"))
     paid_visibility = bool(metrics.get("paid_visibility"))
     volume_window_phase = str(metrics.get("volume_window_phase") or "").strip().lower()
@@ -812,6 +844,10 @@ def candidate_confirmation_signals(
         confirmations.append("narrative_alignment")
     if community_takeover:
         confirmations.append("community_takeover")
+    if j7tracker_watch:
+        confirmations.append("j7tracker_watch")
+    if external_seed_watch:
+        confirmations.append("external_seed_watch")
     if bool(metrics.get("realish_chart_continuity")):
         confirmations.append("realish_chart_continuity")
     if viral_theme_hits:
@@ -1170,8 +1206,7 @@ def adversarial_signal_flags(
         volume_delta = float(payload.get("dex_scan_volume_delta_5m") or 0.0)
     except Exception:
         volume_delta = 0.0
-    sources = payload.get("discovery_sources") if isinstance(payload.get("discovery_sources"), list) else []
-    credible_source = bool(payload.get("community_takeover")) or "community_takeover" in sources
+    credible_source = _has_non_x_discovery_support(payload)
     x_mentions = int(payload.get("x_tweet_count") or 0)
     x_authors = int(payload.get("x_unique_authors") or 0)
     x_heavy_authors = int(payload.get("x_heavy_author_count") or 0)
@@ -1334,6 +1369,8 @@ def winner_send_guard_reasons(
             "credible_x_reach",
             "social_support",
             "community_takeover",
+            "j7tracker_watch",
+            "external_seed_watch",
             "viral_x_momentum",
         }
         & confirmation_set
@@ -1424,6 +1461,8 @@ def candidate_send_reasons(
             "credible_x_reach",
             "narrative_alignment",
             "community_takeover",
+            "j7tracker_watch",
+            "external_seed_watch",
             "realish_chart_continuity",
             "viral_x_momentum",
         }
@@ -1636,6 +1675,10 @@ def classify_route_signal(
     burst_60s = int(metrics.get("burst_count_60s") or 0)
     x_mentions = int(metrics.get("x_tweet_count") or 0)
     x_authors = int(metrics.get("x_unique_authors") or 0)
+    source_set = _discovery_source_set(metrics)
+    j7tracker_watch = bool(metrics.get("j7tracker_watch")) or "j7tracker" in source_set
+    external_seed_watch = bool(metrics.get("external_seed_watch")) or "external_seed" in source_set
+    non_x_discovery_support = bool(_has_non_x_discovery_support(metrics))
     attention = float(attention_score or 0.0)
 
     confirmations: list[str] = []
@@ -1657,6 +1700,10 @@ def classify_route_signal(
         confirmations.append("attention_support")
     if x_mentions >= policy.heating_min_x_mentions and x_authors >= policy.heating_min_x_authors:
         confirmations.append("social_support")
+    if j7tracker_watch:
+        confirmations.append("j7tracker_watch")
+    if external_seed_watch:
+        confirmations.append("external_seed_watch")
 
     adversarial_flags = adversarial_signal_flags(
         metrics=metrics,
@@ -1680,7 +1727,14 @@ def classify_route_signal(
     quality_confirmations = [
         item
         for item in confirmations
-        if item in {"tracked_wallet_flow", "kol_wallet_flow", "market_support", "social_support"}
+        if item in {
+            "tracked_wallet_flow",
+            "kol_wallet_flow",
+            "market_support",
+            "social_support",
+            "j7tracker_watch",
+            "external_seed_watch",
+        }
     ]
     hard_quality_confirmations = [
         item
@@ -1758,6 +1812,7 @@ def classify_route_signal(
             or elite_score >= max(7, policy.sniper_min_elite - 1)
             or tracked_hits > 0
             or kol_hits > 0
+            or (non_x_discovery_support and flow_strength_confirmed)
         )
         and (
             bool(hard_quality_confirmations)

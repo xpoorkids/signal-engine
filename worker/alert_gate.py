@@ -290,6 +290,18 @@ def admission_check_candidate(
             reasons = [reason for reason in reasons if reason not in bypassed_reasons]
             if isinstance(extra, dict):
                 extra["candidate_admission_revival_bypass"] = bypassed_reasons
+    if lifecycle == "dex" and {"j7tracker_watch", "external_seed_watch"} & set(confirmations):
+        has_market_support = "market_support" in confirmations
+        has_flow_support = bool(
+            {"dex_flow_confirmed", "dex_buyer_pressure", "entry_buy_pressure", "buyer_breadth", "burst_strength"}
+            & set(confirmations)
+        )
+        if has_market_support and has_flow_support:
+            bypassed_reasons = [reason for reason in reasons if reason.startswith("attention<")]
+            if bypassed_reasons:
+                reasons = [reason for reason in reasons if reason not in bypassed_reasons]
+                if isinstance(extra, dict):
+                    extra["candidate_admission_non_x_bypass"] = bypassed_reasons
     if lifecycle == "dex" and dex_summary and _dex_accumulation_watch(extra, dex_summary):
         soft_watch_reasons = {
             "dex_gate:vol5m<5000.0",
