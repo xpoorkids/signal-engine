@@ -255,6 +255,50 @@ def test_learning_engine_health_reports_idle_for_healthy_quiet_worker(tmp_path, 
 
     health = client.get("/learning/health?hours=1").json()
     assert health["status"] == "idle"
+    assert health["dependency_status"]["status"] == "ok"
+
+
+def test_learning_engine_health_reports_degraded_x_dependency(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    monkeypatch.setenv("SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN", "secret-token")
+    sls.init()
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/learning/internal/heartbeat",
+        headers={"X-Signal-Engine-Token": "secret-token"},
+        json={
+            "service_role": "worker",
+            "heartbeat_ts": 2_000_000_000,
+            "metadata": {
+                "x_signal_enabled": True,
+                "x_bearer_configured": True,
+                "enable_dex": True,
+                "enable_discord": True,
+                "discord_webhook_configured": True,
+                "discord_candidate_webhook_configured": True,
+                "producer_health": {
+                    "x_signal_health": {
+                        "configured": True,
+                        "last_error": "http_401",
+                        "last_status_code": 401,
+                    },
+                    "dex_source_health": {"total_pairs": 42},
+                    "scanner_scan_in_progress": False,
+                    "scanner_last_error": None,
+                    "discord_delivery_health": {"main": {}, "candidate": {}},
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+
+    health = client.get("/learning/health?hours=1").json()
+
+    assert health["status"] == "degraded"
+    assert "x_signal:http_401" in health["dependency_status"]["reasons"]
+    assert health["dependency_status"]["x_signal"]["status"] == "degraded"
 
 
 def test_known_runners_route_accepts_token_list(tmp_path, monkeypatch):

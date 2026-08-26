@@ -6385,6 +6385,88 @@ def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
             "metadata": heartbeat_metadata if isinstance(heartbeat_metadata, dict) else {},
         }
 
+    dependency_status = {
+        "status": "unknown",
+        "reasons": [],
+        "x_signal": {"status": "unknown"},
+        "dex_scanner": {"status": "unknown"},
+        "discord": {"status": "unknown"},
+    }
+    if worker_heartbeat and worker_heartbeat.get("status") == "healthy":
+        metadata = worker_heartbeat.get("metadata") if isinstance(worker_heartbeat.get("metadata"), dict) else {}
+        producer = metadata.get("producer_health") if isinstance(metadata.get("producer_health"), dict) else {}
+        x_health = producer.get("x_signal_health") if isinstance(producer.get("x_signal_health"), dict) else {}
+        x_enabled = bool(metadata.get("x_signal_enabled"))
+        x_configured = bool(metadata.get("x_bearer_configured")) or bool(x_health.get("configured"))
+        x_error = str(x_health.get("last_error") or "").strip()
+        x_status = "ok"
+        if x_enabled and not x_configured:
+            x_status = "missing_config"
+        elif x_enabled and x_configured and x_error:
+            x_status = "degraded"
+        elif not x_enabled:
+            x_status = "disabled"
+        dependency_status["x_signal"] = {
+            "status": x_status,
+            "enabled": x_enabled,
+            "configured": x_configured,
+            "last_error": x_error or None,
+            "last_status_code": x_health.get("last_status_code"),
+            "last_success_ts": x_health.get("last_success_ts"),
+        }
+        if x_status == "degraded":
+            dependency_status["reasons"].append(f"x_signal:{x_error}")
+        elif x_status == "missing_config":
+            dependency_status["reasons"].append("x_signal:missing_config")
+
+        dex_health = producer.get("dex_source_health") if isinstance(producer.get("dex_source_health"), dict) else {}
+        dex_enabled = bool(metadata.get("enable_dex"))
+        dex_pairs = int(dex_health.get("total_pairs") or 0)
+        scanner_error = str(producer.get("scanner_last_error") or "").strip()
+        scanner_in_progress = bool(producer.get("scanner_scan_in_progress"))
+        dex_status = "disabled" if not dex_enabled else "ok"
+        if dex_enabled and scanner_error:
+            dex_status = "degraded"
+            dependency_status["reasons"].append("dex_scanner:last_error")
+        elif dex_enabled and dex_pairs <= 0 and not scanner_in_progress:
+            dex_status = "degraded"
+            dependency_status["reasons"].append("dex_scanner:no_pairs")
+        dependency_status["dex_scanner"] = {
+            "status": dex_status,
+            "enabled": dex_enabled,
+            "total_pairs": dex_pairs,
+            "in_progress": scanner_in_progress,
+            "last_error": scanner_error or None,
+        }
+
+        delivery = producer.get("discord_delivery_health") if isinstance(producer.get("discord_delivery_health"), dict) else {}
+        main_delivery = delivery.get("main") if isinstance(delivery.get("main"), dict) else {}
+        candidate_delivery = delivery.get("candidate") if isinstance(delivery.get("candidate"), dict) else {}
+        discord_enabled = bool(metadata.get("enable_discord"))
+        webhook_configured = bool(metadata.get("discord_webhook_configured"))
+        candidate_webhook_configured = bool(metadata.get("discord_candidate_webhook_configured"))
+        discord_errors = [
+            str(item.get("reason") or item.get("error") or "").strip()
+            for item in (main_delivery, candidate_delivery)
+            if isinstance(item, dict) and bool(item.get("success")) is False and (item.get("reason") or item.get("error"))
+        ]
+        discord_status = "disabled" if not discord_enabled else "ok"
+        if discord_enabled and (not webhook_configured or not candidate_webhook_configured):
+            discord_status = "missing_config"
+            dependency_status["reasons"].append("discord:missing_webhook")
+        elif discord_errors:
+            discord_status = "degraded"
+            dependency_status["reasons"].append(f"discord:{discord_errors[0]}")
+        dependency_status["discord"] = {
+            "status": discord_status,
+            "enabled": discord_enabled,
+            "webhook_configured": webhook_configured,
+            "candidate_webhook_configured": candidate_webhook_configured,
+            "last_errors": discord_errors,
+        }
+
+        dependency_status["status"] = "degraded" if dependency_status["reasons"] else "ok"
+
     status = "quiet"
     status_detail = "The engine is processing, but recent sends are sparse."
     if total_decisions == 0 and latest_signal is None:
@@ -6412,6 +6494,9 @@ def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
             status_detail += " Engine is in local-only write mode with no shared DB path configured."
         elif write_config.get("process_role") == "worker" and write_config.get("mode") == "remote" and not write_config.get("remote_base_url"):
             status_detail += " Worker remote write mode is enabled but no remote base URL is configured."
+    if dependency_status.get("status") == "degraded":
+        status = "degraded" if status in {"active", "processing", "idle", "quiet"} else status
+        status_detail += " Dependency degradation: " + ", ".join(str(reason) for reason in dependency_status.get("reasons") or [])
 
     top_skip_reasons = summary.get("top_skip_reasons") if isinstance(summary.get("top_skip_reasons"), list) else []
     top_reasons = top_skip_reasons[:5]
@@ -6430,6 +6515,7 @@ def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
         "latest_signal": latest_signal,
         "latest_decision": latest_decision,
         "worker_heartbeat": worker_heartbeat,
+        "dependency_status": dependency_status,
         "top_skip_reasons": top_reasons,
         "storage": storage,
         "write_config": write_config,
