@@ -161,6 +161,85 @@ def test_score_pairs_returns_curated_discovery_watch_for_community_takeover():
     assert scored[0]["metrics"]["paid_visibility"] is False
 
 
+def test_score_pairs_returns_dormant_revival_watch_after_two_days():
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    token = "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump"
+    pairs = [
+        {
+            "chainId": "solana",
+            "baseToken": {"address": token, "symbol": "REVIVE"},
+            "quoteToken": {
+                "address": "So11111111111111111111111111111111111111112",
+                "symbol": "SOL",
+            },
+            "liquidity": {"usd": 92_000},
+            "volume": {"m5": 8_400},
+            "priceChange": {"m5": 11.5, "h1": 44.0},
+            "txns": {"m5": {"buys": 52, "sells": 16}},
+            "marketCap": 840_000,
+            "pairCreatedAt": now_ms - 2 * 24 * 60 * 60_000,
+        }
+    ]
+
+    scored = score_pairs(pairs)
+
+    assert scored[0]["reason"] == "dormant_revival_watch"
+    metrics = scored[0]["metrics"]
+    assert metrics["age_minutes"] == 2880.0
+    assert metrics["dormant_revival_watch"] is True
+    assert metrics["price_change_1h"] == 44.0
+    assert metrics["buy_sell_ratio_5m"] == 3.25
+
+
+def test_score_pairs_returns_dormant_revival_watch_after_thirty_days():
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    token = "DdPrHYqM8Ueovnk9kAnAgoGhswkuaTqmxcoZzU3Zpump"
+    pairs = [
+        {
+            "chainId": "solana",
+            "baseToken": {"address": token, "symbol": "MONTH"},
+            "quoteToken": {
+                "address": "So11111111111111111111111111111111111111112",
+                "symbol": "SOL",
+            },
+            "liquidity": {"usd": 180_000},
+            "volume": {"m5": 14_000},
+            "priceChange": {"m5": 5.0, "h1": 33.0},
+            "txns": {"m5": {"buys": 74, "sells": 30}},
+            "marketCap": 2_100_000,
+            "pairCreatedAt": now_ms - 30 * 24 * 60 * 60_000,
+        }
+    ]
+
+    scored = score_pairs(pairs)
+
+    assert scored[0]["reason"] == "dormant_revival_watch"
+    assert scored[0]["metrics"]["age_minutes"] == 43200.0
+
+
+def test_score_pairs_rejects_old_token_without_revival_flow():
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    token = "D6sA8hKpreRfWEqLRo2fyx5UpmcHeEmGsQ1UndLWpump"
+    pairs = [
+        {
+            "chainId": "solana",
+            "baseToken": {"address": token, "symbol": "OLD"},
+            "quoteToken": {
+                "address": "So11111111111111111111111111111111111111112",
+                "symbol": "SOL",
+            },
+            "liquidity": {"usd": 180_000},
+            "volume": {"m5": 2_100},
+            "priceChange": {"m5": 1.0, "h1": 8.0},
+            "txns": {"m5": {"buys": 12, "sells": 10}},
+            "marketCap": 2_100_000,
+            "pairCreatedAt": now_ms - 30 * 24 * 60 * 60_000,
+        }
+    ]
+
+    assert score_pairs(pairs) == []
+
+
 def test_score_route_persists_contract_before_symbol(monkeypatch):
     appended = {}
 

@@ -157,12 +157,15 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
             liq = float(p.get("liquidity", {}).get("usd") or 0)
             vol5m = float(p.get("volume", {}).get("m5") or 0)
             chg5m = float(p.get("priceChange", {}).get("m5") or 0)
+            chg1h = float(p.get("priceChange", {}).get("h1") or 0)
             created = p.get("pairCreatedAt")
             if not created:
                 continue
 
             age = (now_ms - created) / 60000
             buys5m, sells5m, sell_ratio = _txn_metrics(p)
+            buy_sell_ratio = buys5m / max(1, sells5m)
+            vol_liq_ratio = vol5m / max(1.0, liq)
             market_cap = float(p.get("marketCap") or p.get("fdv") or 0)
             sources = _discovery_sources(p)
             has_curated_source = bool(
@@ -192,8 +195,19 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                 and chg5m >= -20
                 and 50_000 <= market_cap <= 50_000_000
             )
+            dormant_revival_watch = (
+                24 * 60 < age <= 45 * 24 * 60
+                and liq >= 25_000
+                and vol5m >= 5_000
+                and buys5m >= 25
+                and buy_sell_ratio >= 1.8
+                and sell_ratio <= 0.85
+                and vol_liq_ratio <= 1.2
+                and (4.0 <= chg5m <= 35.0 or 18.0 <= chg1h <= 160.0)
+                and 50_000 <= market_cap <= 10_000_000
+            )
 
-            if near_pass or momentum_watch or discovery_watch:
+            if near_pass or momentum_watch or discovery_watch or dormant_revival_watch:
                 token = _pick_contract_address(p)
                 if not token or token in seen_tokens:
                     continue
@@ -201,6 +215,8 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                 reason = "aggressive_near_pass" if near_pass else "dex_momentum_watch"
                 if discovery_watch and not near_pass and not momentum_watch:
                     reason = "curated_discovery_watch"
+                if dormant_revival_watch and not near_pass and not momentum_watch:
+                    reason = "dormant_revival_watch"
                 scan_evidence = _scan_evidence(
                     token,
                     volume_5m=vol5m,
@@ -219,13 +235,17 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                             "liquidity": round(liq, 2),
                             "volume_5m": round(vol5m, 2),
                             "price_change_5m": round(chg5m, 2),
+                            "price_change_1h": round(chg1h, 2),
                             "age_minutes": round(age, 1),
                             "market_cap": round(market_cap, 2),
                             "buys_5m": buys5m,
                             "sells_5m": sells5m,
                             "sell_ratio_5m": sell_ratio,
+                            "buy_sell_ratio_5m": round(buy_sell_ratio, 4),
+                            "volume_liquidity_ratio_5m": round(vol_liq_ratio, 4),
                             "discovery_sources": sources,
                             "community_takeover": "community_takeover" in sources,
+                            "dormant_revival_watch": dormant_revival_watch,
                             "source_stability": "repeat_seen" if scan_evidence["dex_scan_persistent"] else "first_seen",
                             "paid_visibility_class": paid_class,
                             "independent_flow_confirmed": bool(buys5m >= 8 and vol5m >= 5_000 and sells5m <= buys5m * 2),

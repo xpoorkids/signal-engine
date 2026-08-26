@@ -736,6 +736,66 @@ def test_community_takeover_counts_as_quality_support():
     assert reasons == []
 
 
+def test_dormant_revival_watch_counts_as_dex_breakout():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.12,
+        creator_score=0.0,
+        extra={
+            "attention_metrics": {
+                "dormant_revival_watch": True,
+                "independent_flow_confirmed": True,
+                "unique_buyers_5m": 0,
+                "burst_count_60s": 0,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={
+            "age_minutes": 30 * 24 * 60,
+            "liquidity_usd": 180_000.0,
+            "volume_m5": 14_000.0,
+            "txns_m5_buys": 74,
+            "txns_m5_sells": 30,
+            "price_change_m5": 5.0,
+            "price_change_h1": 33.0,
+            "market_cap_usd": 2_100_000.0,
+        },
+    )
+
+    assert eligible is True
+    assert reasons == []
+    assert "dormant_revival_watch" in confirmations
+    assert "market_support" in confirmations
+    assert "dex_buyer_pressure" in confirmations
+
+
+def test_dormant_revival_watch_rejects_overextended_old_move():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.12,
+        creator_score=0.0,
+        extra={
+            "attention_metrics": {
+                "dormant_revival_watch": True,
+                "independent_flow_confirmed": True,
+            }
+        },
+        dex_summary={
+            "age_minutes": 30 * 24 * 60,
+            "liquidity_usd": 180_000.0,
+            "volume_m5": 14_000.0,
+            "txns_m5_buys": 74,
+            "txns_m5_sells": 30,
+            "price_change_m5": 60.0,
+            "price_change_h1": 220.0,
+            "market_cap_usd": 2_100_000.0,
+        },
+    )
+
+    assert eligible is False
+    assert "dormant_revival_watch" not in confirmations
+    assert "winner_breadth_missing" in reasons
+
+
 def test_viral_animal_theme_with_x_and_dex_flow_can_alert():
     eligible, reasons, confirmations = candidate_send_reasons(
         attention_score=0.34,

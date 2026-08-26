@@ -700,6 +700,57 @@ def viral_theme_dex_momentum_signal(
     )
 
 
+def dormant_revival_watch_signal(
+    metrics: dict[str, Any] | None,
+    dex_summary: dict[str, Any] | None,
+) -> bool:
+    payload = metrics if isinstance(metrics, dict) else {}
+    summary = dex_summary if isinstance(dex_summary, dict) else {}
+
+    age_min = _first_positive_float(summary, payload, keys=("age_minutes",))
+    liq = _first_positive_float(summary, payload, keys=("liquidity_usd", "liquidity"))
+    vol5m = _first_positive_float(summary, payload, keys=("volume_m5", "volume_m5_usd", "volume_5m"))
+    market_cap = _first_positive_float(summary, payload, keys=("market_cap_usd", "market_cap", "fdv"))
+    try:
+        buys5m = int(summary.get("txns_m5_buys") or summary.get("buys_5m") or payload.get("txns_m5_buys") or payload.get("buys_5m") or 0)
+    except Exception:
+        buys5m = 0
+    try:
+        sells5m = int(summary.get("txns_m5_sells") or summary.get("sells_5m") or payload.get("txns_m5_sells") or payload.get("sells_5m") or 0)
+    except Exception:
+        sells5m = 0
+    try:
+        price_change_m5 = float(summary.get("price_change_m5") or summary.get("price_change_5m") or payload.get("price_change_m5") or payload.get("price_change_5m") or 0.0)
+    except Exception:
+        price_change_m5 = 0.0
+    try:
+        price_change_h1 = float(summary.get("price_change_h1") or summary.get("price_change_1h") or payload.get("price_change_h1") or payload.get("price_change_1h") or 0.0)
+    except Exception:
+        price_change_h1 = 0.0
+
+    buy_sell_ratio = float(buys5m) / float(max(sells5m, 1)) if buys5m > 0 else 0.0
+    sell_buy_ratio = float(sells5m) / float(max(buys5m, 1)) if buys5m > 0 else 0.0
+    vol_liq_ratio = (float(vol5m) / float(liq)) if vol5m is not None and liq is not None and liq > 0.0 else 0.0
+    return (
+        age_min is not None
+        and 24 * 60 < age_min <= 45 * 24 * 60
+        and liq is not None
+        and liq >= 25_000.0
+        and vol5m is not None
+        and vol5m >= 5_000.0
+        and buys5m >= 25
+        and buy_sell_ratio >= 1.8
+        and sell_buy_ratio <= 0.85
+        and vol_liq_ratio <= 1.2
+        and (
+            4.0 <= price_change_m5 <= 35.0
+            or 18.0 <= price_change_h1 <= 160.0
+        )
+        and market_cap is not None
+        and 50_000.0 <= market_cap <= 10_000_000.0
+    )
+
+
 def candidate_confirmation_signals(
     *,
     attention_score: float,
@@ -897,6 +948,8 @@ def candidate_confirmation_signals(
         confirmations.append("dex_accumulation_watch")
     if viral_theme_dex_momentum_signal(metrics, dex_summary):
         confirmations.append("viral_dex_momentum")
+    if dormant_revival_watch_signal(metrics, dex_summary):
+        confirmations.append("dormant_revival_watch")
 
     if (
         top_wallet_share >= policy.anti_wash_top_wallet_share
@@ -1263,7 +1316,7 @@ def winner_send_guard_reasons(
             and sell_buy_ratio <= 0.75
         )
     )
-    has_high_quality_proxy = "winner_breadth_proxy" in confirmation_set
+    has_high_quality_proxy = bool({"winner_breadth_proxy", "dormant_revival_watch"} & confirmation_set)
 
     reasons: list[str] = []
     if not (trusted_support or has_real_breadth or has_developing_breadth or has_high_quality_proxy):
@@ -1346,6 +1399,10 @@ def candidate_send_reasons(
         "market_support",
         "dex_accumulation_watch",
     }.issubset(confirmation_set)
+    has_dormant_revival_breakout = (
+        "dormant_revival_watch" in confirmation_set
+        and bool({"dex_buyer_pressure", "entry_buy_pressure", "dex_flow_confirmed"} & confirmation_set)
+    )
     has_viral_breakout = (
         (
             {"market_support", "viral_x_momentum"}.issubset(confirmation_set)
@@ -1362,6 +1419,7 @@ def candidate_send_reasons(
     if (
         len(confirmations) < policy.min_send_confirmation_signals
         and not has_dex_accumulation_breakout
+        and not has_dormant_revival_breakout
         and not has_viral_breakout
         and not (
             attn >= policy.exceptional_attention_threshold
@@ -1398,6 +1456,7 @@ def candidate_send_reasons(
         or has_balanced_quality
         or has_dex_breakout
         or has_dex_accumulation_breakout
+        or has_dormant_revival_breakout
         or has_viral_breakout
     ) and not reasons
     if not (
@@ -1406,6 +1465,7 @@ def candidate_send_reasons(
         or has_balanced_quality
         or has_dex_breakout
         or has_dex_accumulation_breakout
+        or has_dormant_revival_breakout
         or has_viral_breakout
     ):
         reasons.append("attention_creator_alignment_missing")

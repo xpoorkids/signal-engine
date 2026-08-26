@@ -606,6 +606,10 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
             "dex_scan_minutes_since_previous",
             "dex_scan_volume_delta_5m",
             "dex_scan_liquidity_delta_pct",
+            "dormant_revival_watch",
+            "buy_sell_ratio_5m",
+            "volume_liquidity_ratio_5m",
+            "price_change_1h",
             "sells_5m",
             "sell_ratio_5m",
         ):
@@ -668,6 +672,8 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         _append_reason(reasons, "DEX independent flow confirmed")
     if metrics.get("dex_scan_persistent"):
         _append_reason(reasons, f"DEX repeat seen: {metrics.get('dex_scan_repeat_count')}")
+    if metrics.get("dormant_revival_watch"):
+        _append_reason(reasons, "DEX dormant revival watch")
 
     # DexScreener boosts/orders
     dex_boost = 0.0

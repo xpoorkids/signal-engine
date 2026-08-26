@@ -237,6 +237,43 @@ def test_candidate_dex_gate_allows_curated_accumulation_after_burst():
     ]
 
 
+def test_candidate_dex_gate_allows_dormant_revival_low_attention():
+    extra = {
+        "attention_metrics": {
+            "dormant_revival_watch": True,
+            "independent_flow_confirmed": True,
+            "unique_buyers_5m": 0,
+            "burst_count_60s": 0,
+        },
+        "metrics": {
+            "age_minutes": 30 * 24 * 60,
+            "dormant_revival_watch": True,
+        },
+    }
+    ok, reasons, lifecycle = admission_check_candidate(
+        attention_score=0.12,
+        risk_score=0.05,
+        extra=extra,
+        dex_summary={
+            "age_minutes": 30 * 24 * 60,
+            "liquidity_usd": 180_000.0,
+            "volume_m5": 14_000.0,
+            "txns_m5_buys": 74,
+            "txns_m5_sells": 30,
+            "price_change_m5": 5.0,
+            "price_change_h1": 33.0,
+            "market_cap_usd": 2_100_000.0,
+        },
+        attention_unavailable=False,
+    )
+
+    assert lifecycle == "dex"
+    assert ok is True
+    assert reasons == []
+    assert len(extra["candidate_admission_revival_bypass"]) == 1
+    assert extra["candidate_admission_revival_bypass"][0].startswith("attention<")
+
+
 def test_candidate_send_eligible_requires_real_attention_even_with_creator_quality():
     assert _candidate_send_eligible(0.20, 0.90) is False
     assert _candidate_send_eligible(0.36, 0.90) is True

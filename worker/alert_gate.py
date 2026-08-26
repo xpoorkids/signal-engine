@@ -284,6 +284,12 @@ def admission_check_candidate(
             if isinstance(extra, dict):
                 extra["candidate_age_bypass_reason"] = "winner_breadth_proxy"
                 extra["candidate_admission_proxy_bypass"] = bypassed_reasons
+    if lifecycle == "dex" and "dormant_revival_watch" in confirmations:
+        bypassed_reasons = [reason for reason in reasons if reason.startswith("attention<")]
+        if bypassed_reasons:
+            reasons = [reason for reason in reasons if reason not in bypassed_reasons]
+            if isinstance(extra, dict):
+                extra["candidate_admission_revival_bypass"] = bypassed_reasons
     if lifecycle == "dex" and dex_summary and _dex_accumulation_watch(extra, dex_summary):
         soft_watch_reasons = {
             "dex_gate:vol5m<5000.0",
