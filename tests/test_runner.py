@@ -208,6 +208,9 @@ def test_worker_health_metadata_exposes_discovery_source_health(monkeypatch):
     assert "jupiter_api_key_configured" in metadata
     producer = metadata["producer_health"]
     assert "dex_source_health" in producer
+    assert "scanner_scan_started_age_seconds" in producer
+    assert "scanner_scan_in_progress" in producer
+    assert "scanner_current_source" in producer
     assert "x_signal_health" in producer
     assert "discord_delivery_health" in producer
 

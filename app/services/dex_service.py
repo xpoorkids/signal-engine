@@ -19,6 +19,8 @@ DEFAULT_SEARCH_QUERIES = ["solana", "pump", "raydium", "moonshot", "bonk", "tren
 LAST_SOURCE_HEALTH: dict[str, object] = {
     "last_started_ts": None,
     "last_finished_ts": None,
+    "in_progress": False,
+    "current_source": None,
     "total_pairs": 0,
     "sources": {},
     "errors": {},
@@ -113,6 +115,8 @@ def get_dex_source_health() -> dict[str, object]:
     return {
         "last_started_ts": LAST_SOURCE_HEALTH.get("last_started_ts"),
         "last_finished_ts": LAST_SOURCE_HEALTH.get("last_finished_ts"),
+        "in_progress": bool(LAST_SOURCE_HEALTH.get("in_progress")),
+        "current_source": LAST_SOURCE_HEALTH.get("current_source"),
         "total_pairs": LAST_SOURCE_HEALTH.get("total_pairs", 0),
         "sources": dict(LAST_SOURCE_HEALTH.get("sources") or {}),
         "errors": dict(LAST_SOURCE_HEALTH.get("errors") or {}),
@@ -260,6 +264,14 @@ def _fetch_j7tracker_pairs() -> tuple[list[dict], dict[str, dict]]:
 def fetch_solana_pairs():
     pairs = []
     started = time.time()
+    LAST_SOURCE_HEALTH.update(
+        {
+            "last_started_ts": started,
+            "in_progress": True,
+            "current_source": None,
+            "errors": {},
+        }
+    )
     source_health: dict[str, dict] = {}
     errors: dict[str, str] = {}
     for label, fetcher in (
@@ -268,6 +280,7 @@ def fetch_solana_pairs():
         ("external_seed", _fetch_external_seed_pairs),
         ("j7tracker", _fetch_j7tracker_pairs),
     ):
+        LAST_SOURCE_HEALTH["current_source"] = label
         try:
             fetched, health = fetcher()
             pairs.extend(fetched)
@@ -280,6 +293,8 @@ def fetch_solana_pairs():
         {
             "last_started_ts": started,
             "last_finished_ts": time.time(),
+            "in_progress": False,
+            "current_source": None,
             "total_pairs": len(pairs),
             "sources": source_health,
             "errors": errors,

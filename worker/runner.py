@@ -329,6 +329,8 @@ def _worker_health_metadata() -> dict[str, Any]:
     now = time.time()
     ws_last_activity = float(getattr(helius_listener, "LAST_WS_ACTIVITY", 0.0) or 0.0)
     scan_last_ts = float(getattr(scanner, "LAST_SCAN_TS", 0.0) or 0.0)
+    dex_source_health = get_dex_source_health()
+    scan_started_ts = float(dex_source_health.get("last_started_ts") or 0.0)
     rate_limit_state = get_candidate_rate_limit_state(max(1, EARLY_WATCH_RATE_LIMIT_PER_HOUR))
     metadata: dict[str, Any] = {
         "deploy_sha": os.getenv("RENDER_GIT_COMMIT", "unknown"),
@@ -359,9 +361,12 @@ def _worker_health_metadata() -> dict[str, Any]:
         "producer_health": {
             "ws_last_activity_age_seconds": round(now - ws_last_activity, 1) if ws_last_activity else None,
             "scanner_last_scan_age_seconds": round(now - scan_last_ts, 1) if scan_last_ts else None,
+            "scanner_scan_started_age_seconds": round(now - scan_started_ts, 1) if scan_started_ts else None,
+            "scanner_scan_in_progress": bool(dex_source_health.get("in_progress")),
+            "scanner_current_source": dex_source_health.get("current_source"),
             "scanner_last_candidate_count": getattr(scanner, "LAST_SCAN_COUNT", None),
             "scanner_last_error": getattr(scanner, "LAST_SCAN_ERROR", None),
-            "dex_source_health": get_dex_source_health(),
+            "dex_source_health": dex_source_health,
             "x_signal_health": get_x_signal_health(),
             "discord_delivery_health": get_discord_delivery_health(),
         },
