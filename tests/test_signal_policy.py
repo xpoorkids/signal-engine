@@ -85,6 +85,61 @@ def test_candidate_confirmation_signals_accept_high_conviction_dex_breadth_proxy
     assert "confirmation_signals<2" not in reasons
 
 
+def test_candidate_confirmation_signals_accept_thin_ignition_breadth_proxy():
+    reasons, confirmations = candidate_confirmation_signals(
+        attention_score=0.20,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 0,
+                "burst_count_60s": 0,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 90_000.0,
+            "volume_m5": 3_800.0,
+            "txns_m5_buys": 190,
+            "txns_m5_sells": 48,
+            "price_change_m5": 8.4,
+            "market_cap_usd": 640_000.0,
+        },
+    )
+
+    assert "market_support" in confirmations
+    assert "entry_buy_pressure" not in confirmations
+    assert "winner_breadth_proxy" in confirmations
+    assert "thin_ignition_watch" in confirmations
+    assert "confirmation_signals<2" not in reasons
+
+
+def test_candidate_confirmation_signals_reject_thin_ignition_huge_cap_proxy():
+    reasons, confirmations = candidate_confirmation_signals(
+        attention_score=0.20,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 0,
+                "burst_count_60s": 0,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 900_000.0,
+            "volume_m5": 4_900.0,
+            "txns_m5_buys": 190,
+            "txns_m5_sells": 5,
+            "price_change_m5": 8.4,
+            "market_cap_usd": 100_000_000.0,
+        },
+    )
+
+    assert "market_support" in confirmations
+    assert "thin_ignition_watch" not in confirmations
+    assert "winner_breadth_proxy" not in confirmations
+    assert "confirmation_signals<2" in reasons
+
+
 def test_paid_visibility_still_needs_real_flow_for_dex_confirmation():
     reasons, confirmations = candidate_confirmation_signals(
         attention_score=0.20,

@@ -869,6 +869,17 @@ def candidate_confirmation_signals(
         and (vol5m / max(liq, 1.0)) <= 0.20
         and 50_000 <= market_cap <= 5_000_000
     )
+    thin_ignition_breadth_proxy = (
+        buyers_5m <= 0
+        and buys5m >= max(policy.entry_confirm_buys5m_min * 10, 150)
+        and buy_sell_ratio >= 3.0
+        and sell_buy_ratio <= 0.35
+        and 2.0 <= price_change_m5 <= 18.0
+        and 2_500 <= vol5m < 5_000
+        and liq >= max(policy.entry_chase_min_liq_usd * 2, 50_000.0)
+        and (vol5m / max(liq, 1.0)) <= 0.20
+        and 50_000 <= market_cap <= 7_500_000
+    )
     if (
         buyers_5m <= 0
         and buys5m >= max(policy.entry_confirm_buys5m_min * 6, 90)
@@ -878,8 +889,10 @@ def candidate_confirmation_signals(
         and vol5m >= 10_000
         and liq >= max(policy.entry_chase_min_liq_usd, 25_000.0)
         and (vol5m / max(liq, 1.0)) <= 3.0
-    ) or high_conviction_dex_breadth_proxy:
+    ) or high_conviction_dex_breadth_proxy or thin_ignition_breadth_proxy:
         confirmations.append("winner_breadth_proxy")
+        if thin_ignition_breadth_proxy:
+            confirmations.append("thin_ignition_watch")
     if dex_accumulation_watch_signal(metrics, dex_summary):
         confirmations.append("dex_accumulation_watch")
     if viral_theme_dex_momentum_signal(metrics, dex_summary):
