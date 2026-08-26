@@ -670,6 +670,94 @@ def test_candidate_send_reasons_reject_social_echo_chamber_without_trusted_flow(
     assert "social_echo_chamber" in reasons
 
 
+def test_candidate_send_reasons_reject_price_pump_without_flow():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.76,
+        creator_score=0.70,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 1,
+                "burst_count_60s": 1,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 45_000.0,
+            "volume_m5": 12_000.0,
+            "volume_h1": 20_000.0,
+            "market_cap_usd": 900_000.0,
+            "txns_m5_buys": 8,
+            "txns_m5_sells": 3,
+            "price_change_m5": 42.0,
+            "price_change_h1": 150.0,
+        },
+    )
+
+    assert eligible is False
+    assert "price_pump_without_flow" in reasons
+    assert "one_sided_chart_risk" in reasons
+
+
+def test_candidate_send_reasons_reject_liquidity_volume_spike():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.70,
+        creator_score=0.70,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 1,
+                "burst_count_60s": 2,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 18_000.0,
+            "volume_m5": 62_000.0,
+            "volume_h1": 80_000.0,
+            "market_cap_usd": 700_000.0,
+            "txns_m5_buys": 10,
+            "txns_m5_sells": 8,
+            "price_change_m5": 6.0,
+        },
+    )
+
+    assert eligible is False
+    assert "liquidity_volume_spike" in reasons
+
+
+def test_candidate_send_reasons_allows_high_flow_runner_shape():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.30,
+        creator_score=0.0,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 5,
+                "burst_count_60s": 8,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+                "independent_flow_confirmed": True,
+                "volume_window_phase": "surging",
+                "volume_pace_ratio": 1.5,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 120_000.0,
+            "volume_m5": 18_000.0,
+            "volume_h24": 900_000.0,
+            "market_cap_usd": 950_000.0,
+            "txns_m5_buys": 72,
+            "txns_m5_sells": 22,
+            "price_change_m5": 22.0,
+        },
+    )
+
+    assert eligible is True
+    assert reasons == []
+    assert "dex_buyer_pressure" in confirmations
+    assert "entry_buy_pressure" in confirmations
+
+
 def test_candidate_confirmation_signals_include_heavy_x_support():
     reasons, confirmations = candidate_confirmation_signals(
         attention_score=0.40,

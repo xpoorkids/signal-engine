@@ -78,6 +78,59 @@ def test_validate_trade_rejects_on_authority_and_sell_slippage():
     assert "liquidity_below_threshold" in reasons or "buy_slippage_too_high" in reasons or "sell_slippage_too_high" in reasons
 
 
+def test_validate_trade_rejects_price_pump_without_flow():
+    result = validate_trade(
+        token="token-1",
+        best_pair=_pair(liq_usd=50000.0, price_usd=0.5),
+        dex_summary={
+            "liquidity_usd": 50000.0,
+            "price_change_m5": 44.0,
+            "price_change_h1": 150.0,
+            "volume_m5": 14000.0,
+            "txns_m5_buys": 8,
+            "txns_m5_sells": 3,
+            "snapshot_ts": 2_000_000_000,
+        },
+        token_meta={"decimals": 6},
+        risk_score=0.20,
+        wallet_risk={"top_holder_pct": 0.04},
+        mint_authority=False,
+        freeze_authority=False,
+        top_holder_ratio=0.10,
+        intended_size_usd=100.0,
+    )
+
+    assert result["approved"] is False
+    assert "price_pump_without_flow" in result["reasons"]
+    assert "one_sided_chart_risk" in result["reasons"]
+
+
+def test_validate_trade_approves_high_flow_runner_shape():
+    result = validate_trade(
+        token="token-1",
+        best_pair=_pair(liq_usd=120000.0, price_usd=0.5),
+        dex_summary={
+            "liquidity_usd": 120000.0,
+            "price_change_m5": 28.0,
+            "price_change_h1": 90.0,
+            "volume_m5": 18000.0,
+            "txns_m5_buys": 72,
+            "txns_m5_sells": 22,
+            "snapshot_ts": 2_000_000_000,
+        },
+        token_meta={"decimals": 6},
+        risk_score=0.20,
+        wallet_risk={"top_holder_pct": 0.04},
+        mint_authority=False,
+        freeze_authority=False,
+        top_holder_ratio=0.10,
+        intended_size_usd=100.0,
+    )
+
+    assert result["approved"] is True
+    assert result["reasons"] == []
+
+
 def test_validate_trade_rejects_stale_market_data(monkeypatch):
     monkeypatch.setattr("worker.trade_validator.time.time", lambda: 1000.0)
     result = validate_trade(

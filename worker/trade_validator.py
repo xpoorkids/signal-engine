@@ -123,6 +123,41 @@ def _market_data_age_seconds(dex_summary: dict[str, Any] | None, now_ts: int) ->
     return max(0.0, float(now_ts - snapshot_ts))
 
 
+def _market_shape_value(dex_summary: dict[str, Any] | None, *names: str) -> float:
+    payload = dex_summary if isinstance(dex_summary, dict) else {}
+    for name in names:
+        try:
+            value = payload.get(name)
+            if value not in (None, ""):
+                return float(value)
+        except Exception:
+            continue
+    return 0.0
+
+
+def market_manipulation_reasons(dex_summary: dict[str, Any] | None) -> list[str]:
+    liq = _market_shape_value(dex_summary, "liquidity_usd", "liquidity")
+    vol5m = _market_shape_value(dex_summary, "volume_m5", "volume_m5_usd", "volume_5m")
+    buys5m = int(_market_shape_value(dex_summary, "txns_m5_buys", "buys_5m"))
+    sells5m = int(_market_shape_value(dex_summary, "txns_m5_sells", "sells_5m"))
+    price_change_m5 = _market_shape_value(dex_summary, "price_change_m5", "price_change_5m")
+    price_change_h1 = _market_shape_value(dex_summary, "price_change_h1", "price_change_1h")
+    buy_sell_ratio = float(buys5m) / float(max(sells5m, 1)) if buys5m > 0 else 0.0
+    sell_buy_ratio = float(sells5m) / float(max(buys5m, 1)) if buys5m > 0 else 0.0
+    vol_liq_ratio = vol5m / liq if liq > 0.0 else 0.0
+    reasons: list[str] = []
+
+    if (price_change_m5 >= 35.0 or price_change_h1 >= 140.0) and not (
+        buys5m >= 25 and buy_sell_ratio >= 1.8 and sell_buy_ratio <= 0.85
+    ):
+        reasons.append("price_pump_without_flow")
+    if liq > 0.0 and vol_liq_ratio >= 3.0 and buys5m < 25:
+        reasons.append("liquidity_volume_spike")
+    if price_change_m5 >= 20.0 and buys5m < 12:
+        reasons.append("one_sided_chart_risk")
+    return reasons
+
+
 def build_pair_context(best_pair: dict[str, Any] | None, token: str) -> PairContext | None:
     if not isinstance(best_pair, dict) or not token:
         return None
@@ -249,6 +284,11 @@ def validate_trade(
     checks.append(ValidationCheck("liquidity_usd", liq_pass, liq_usd, TRADE_VALIDATION_MIN_LIQ_USD, None if liq_pass else "liquidity_below_threshold"))
     if not liq_pass:
         reasons.append("liquidity_below_threshold")
+
+    manipulation_reasons = market_manipulation_reasons(dex_summary)
+    for reason in manipulation_reasons:
+        checks.append(ValidationCheck(f"market_shape:{reason}", False, True, False, reason))
+    reasons.extend(manipulation_reasons)
 
     if mint_authority is True:
         checks.append(ValidationCheck("mint_authority", False, True, False, "mint_authority_active"))

@@ -1159,6 +1159,10 @@ def adversarial_signal_flags(
             price_change_m5 = float(summary.get("price_change_m5") or summary.get("price_change_5m") or 0.0)
         except Exception:
             price_change_m5 = 0.0
+    try:
+        price_change_h1 = float(summary.get("price_change_h1") or summary.get("price_change_1h") or payload.get("price_change_h1") or payload.get("price_change_1h") or 0.0)
+    except Exception:
+        price_change_h1 = 0.0
     repeat_count = int(payload.get("dex_scan_repeat_count") or 0)
     try:
         volume_delta = float(payload.get("dex_scan_volume_delta_5m") or 0.0)
@@ -1194,6 +1198,38 @@ def adversarial_signal_flags(
     )
     if synthetic_churn_shape:
         flags.append("synthetic_churn_without_independent_flow")
+    buy_sell_ratio = float(buys5m) / float(max(sells5m, 1)) if buys5m > 0 else 0.0
+    sell_buy_ratio = float(sells5m) / float(max(buys5m, 1)) if buys5m > 0 else 0.0
+    has_current_flow_support = (
+        any_wallet_support
+        or credible_source
+        or credible_social_support
+        or buyers_5m >= min_unique_buyers_5m
+        or (
+            buys5m >= max(25, min_burst_count_60s * 3)
+            and buy_sell_ratio >= 1.8
+            and sell_buy_ratio <= 0.85
+        )
+    )
+    if (
+        (float(price_change_m5 or 0.0) >= 35.0 or price_change_h1 >= 140.0)
+        and not has_current_flow_support
+    ):
+        flags.append("price_pump_without_flow")
+    if (
+        liq > 0.0
+        and (vol5m / liq) >= max(1.5, max_vol_liq_ratio_5m * 0.75)
+        and buyers_5m < min_unique_buyers_5m
+        and not has_current_flow_support
+    ):
+        flags.append("liquidity_volume_spike")
+    if (
+        float(price_change_m5 or 0.0) >= 20.0
+        and buys5m < max(12, min_burst_count_60s * 2)
+        and not any_wallet_support
+        and not credible_social_support
+    ):
+        flags.append("one_sided_chart_risk")
 
     holder_ratio = _first_positive_float(
         payload,
@@ -1444,6 +1480,9 @@ def candidate_send_reasons(
         "entry_extended_without_breadth",
         "entry_extended_buy_pressure_missing",
         "entry_hype_volume_liquidity",
+        "price_pump_without_flow",
+        "liquidity_volume_spike",
+        "one_sided_chart_risk",
     }
     has_severe_adversarial_flag = bool(severe_adversarial_flags & set(adversarial_flags))
     if adversarial_flags and not route_fast_lane and (not hard_quality_confirmed or has_severe_adversarial_flag):
