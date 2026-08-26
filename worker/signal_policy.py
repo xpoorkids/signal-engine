@@ -812,6 +812,8 @@ def candidate_confirmation_signals(
         confirmations.append("narrative_alignment")
     if community_takeover:
         confirmations.append("community_takeover")
+    if bool(metrics.get("realish_chart_continuity")):
+        confirmations.append("realish_chart_continuity")
     if viral_theme_hits:
         confirmations.append("viral_theme")
     if (
@@ -1183,6 +1185,8 @@ def adversarial_signal_flags(
         and (x_author_followers >= 25_000 or x_verified_authors > 0 or x_heavy_authors > 0)
     )
     credible_social_support = credible_social_support or viral_x_support
+    realish_chart_continuity = bool(payload.get("realish_chart_continuity"))
+    single_scan_chart_spike = bool(payload.get("single_scan_chart_spike"))
     synthetic_churn_shape = (
         buys5m >= 25
         and sells5m >= 20
@@ -1204,6 +1208,7 @@ def adversarial_signal_flags(
         any_wallet_support
         or credible_source
         or credible_social_support
+        or realish_chart_continuity
         or buyers_5m >= min_unique_buyers_5m
         or (
             buys5m >= max(25, min_burst_count_60s * 3)
@@ -1211,6 +1216,14 @@ def adversarial_signal_flags(
             and sell_buy_ratio <= 0.85
         )
     )
+    if (
+        single_scan_chart_spike
+        and not any_wallet_support
+        and not credible_source
+        and not credible_social_support
+        and buyers_5m < min_unique_buyers_5m
+    ):
+        flags.append("single_scan_chart_spike")
     if (
         (float(price_change_m5 or 0.0) >= 35.0 or price_change_h1 >= 140.0)
         and not has_current_flow_support
@@ -1353,6 +1366,7 @@ def winner_send_guard_reasons(
         )
     )
     has_high_quality_proxy = bool({"winner_breadth_proxy", "dormant_revival_watch"} & confirmation_set)
+    has_high_quality_proxy = has_high_quality_proxy or "realish_chart_continuity" in confirmation_set
 
     reasons: list[str] = []
     if not (trusted_support or has_real_breadth or has_developing_breadth or has_high_quality_proxy):
@@ -1410,6 +1424,7 @@ def candidate_send_reasons(
             "credible_x_reach",
             "narrative_alignment",
             "community_takeover",
+            "realish_chart_continuity",
             "viral_x_momentum",
         }
         & confirmation_set
@@ -1483,6 +1498,7 @@ def candidate_send_reasons(
         "price_pump_without_flow",
         "liquidity_volume_spike",
         "one_sided_chart_risk",
+        "single_scan_chart_spike",
     }
     has_severe_adversarial_flag = bool(severe_adversarial_flags & set(adversarial_flags))
     if adversarial_flags and not route_fast_lane and (not hard_quality_confirmed or has_severe_adversarial_flag):

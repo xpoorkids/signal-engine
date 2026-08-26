@@ -135,6 +135,8 @@ def _scan_evidence(token: str, *, volume_5m: float, price_change_5m: float, liqu
         "dex_scan_first_seen_age_seconds": round(observed_ts - first_seen, 1),
         "dex_scan_repeat_count": repeat_count,
         "dex_scan_minutes_since_previous": round(minutes_since_prev, 2) if repeat_count > 1 else None,
+        "dex_scan_previous_volume_5m": round(previous_volume, 2) if previous_volume else None,
+        "dex_scan_previous_liquidity": round(previous_liquidity, 2) if previous_liquidity else None,
         "dex_scan_volume_delta_5m": round(volume_delta, 2),
         "dex_scan_liquidity_delta_pct": round(liquidity_delta_pct, 4),
         "dex_scan_price_change_5m": round(price_change_5m, 2),
@@ -225,6 +227,25 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                     observed_ts=now_ts,
                 )
                 paid_class = _paid_visibility_class(sources, buys5m, sells5m, vol5m)
+                repeat_count = int(scan_evidence["dex_scan_repeat_count"])
+                volume_delta = float(scan_evidence["dex_scan_volume_delta_5m"])
+                liquidity_delta_pct = float(scan_evidence["dex_scan_liquidity_delta_pct"])
+                realish_chart_continuity = bool(
+                    repeat_count >= 2
+                    and vol5m >= 1_000
+                    and buys5m >= 8
+                    and sell_ratio <= 1.10
+                    and liquidity_delta_pct >= -25.0
+                    and (volume_delta >= 250.0 or vol5m >= 0.75 * float(scan_evidence.get("dex_scan_previous_volume_5m") or 0.0))
+                    and chg5m >= -12.0
+                )
+                single_scan_chart_spike = bool(
+                    repeat_count == 1
+                    and vol5m >= 5_000
+                    and chg5m >= 20.0
+                    and not has_curated_source
+                    and buy_sell_ratio < 2.5
+                )
                 out.append(
                     {
                         "token": token,
@@ -246,6 +267,8 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                             "discovery_sources": sources,
                             "community_takeover": "community_takeover" in sources,
                             "dormant_revival_watch": dormant_revival_watch,
+                            "realish_chart_continuity": realish_chart_continuity,
+                            "single_scan_chart_spike": single_scan_chart_spike,
                             "source_stability": "repeat_seen" if scan_evidence["dex_scan_persistent"] else "first_seen",
                             "paid_visibility_class": paid_class,
                             "independent_flow_confirmed": bool(buys5m >= 8 and vol5m >= 5_000 and sells5m <= buys5m * 2),

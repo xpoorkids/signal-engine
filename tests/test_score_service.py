@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from app.routes.score import score
-from app.services.score_service import _is_solana_pair, _pick_contract_address, score_pairs
+from app.services.score_service import _DEX_TOKEN_STATE, _is_solana_pair, _pick_contract_address, score_pairs
 
 
 def test_pick_contract_address_prefers_quote_token_when_base_is_wsol():
@@ -131,6 +131,62 @@ def test_score_pairs_returns_bounded_momentum_watch_candidate():
     assert metrics["paid_visibility_class"] == "organic"
     assert metrics["independent_flow_confirmed"] is True
     assert metrics["dex_scan_repeat_count"] >= 1
+
+
+def test_score_pairs_marks_single_scan_chart_spike_until_repeat_confirms():
+    _DEX_TOKEN_STATE.clear()
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    token = "7vfCXTUXx5W7D3eK7oN7htTz3h6m5r3WQYgbR1fRpump"
+    pair = {
+        "chainId": "solana",
+        "baseToken": {"address": token, "symbol": "SPIKE"},
+        "quoteToken": {
+            "address": "So11111111111111111111111111111111111111112",
+            "symbol": "SOL",
+        },
+        "liquidity": {"usd": 80_000},
+        "volume": {"m5": 9_000},
+        "priceChange": {"m5": 24.0},
+        "txns": {"m5": {"buys": 28, "sells": 14}},
+        "marketCap": 900_000,
+        "pairCreatedAt": now_ms - 45 * 60_000,
+    }
+
+    first = score_pairs([pair])[0]["metrics"]
+    second = score_pairs([{**pair, "volume": {"m5": 10_400}, "liquidity": {"usd": 82_000}}])[0]["metrics"]
+
+    assert first["single_scan_chart_spike"] is True
+    assert first["realish_chart_continuity"] is False
+    assert second["single_scan_chart_spike"] is False
+    assert second["realish_chart_continuity"] is True
+    assert second["dex_scan_repeat_count"] == 2
+    assert second["dex_scan_volume_delta_5m"] == 1400.0
+
+
+def test_score_pairs_rejects_realish_continuity_when_liquidity_gets_pulled():
+    _DEX_TOKEN_STATE.clear()
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    token = "8GB6MhYXzu2VEVMxbUq6REAmHowmYXwdoUUdSrSKpump"
+    pair = {
+        "chainId": "solana",
+        "baseToken": {"address": token, "symbol": "PULL"},
+        "quoteToken": {
+            "address": "So11111111111111111111111111111111111111112",
+            "symbol": "SOL",
+        },
+        "liquidity": {"usd": 100_000},
+        "volume": {"m5": 12_000},
+        "priceChange": {"m5": 8.0},
+        "txns": {"m5": {"buys": 40, "sells": 14}},
+        "marketCap": 900_000,
+        "pairCreatedAt": now_ms - 90 * 60_000,
+    }
+
+    score_pairs([pair])
+    second = score_pairs([{**pair, "volume": {"m5": 13_000}, "liquidity": {"usd": 60_000}}])[0]["metrics"]
+
+    assert second["dex_scan_liquidity_delta_pct"] == -40.0
+    assert second["realish_chart_continuity"] is False
 
 
 def test_score_pairs_returns_curated_discovery_watch_for_community_takeover():

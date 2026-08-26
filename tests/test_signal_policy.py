@@ -726,6 +726,71 @@ def test_candidate_send_reasons_reject_liquidity_volume_spike():
     assert "liquidity_volume_spike" in reasons
 
 
+def test_candidate_send_reasons_reject_single_scan_chart_spike():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.70,
+        creator_score=0.70,
+        extra={
+            "attention_metrics": {
+                "single_scan_chart_spike": True,
+                "dex_scan_repeat_count": 1,
+                "unique_buyers_5m": 1,
+                "burst_count_60s": 1,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 80_000.0,
+            "volume_m5": 9_000.0,
+            "volume_h24": 40_000.0,
+            "market_cap_usd": 900_000.0,
+            "txns_m5_buys": 28,
+            "txns_m5_sells": 14,
+            "price_change_m5": 24.0,
+        },
+    )
+
+    assert eligible is False
+    assert "single_scan_chart_spike" in reasons
+
+
+def test_candidate_send_reasons_accepts_realish_chart_continuity():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.22,
+        creator_score=0.0,
+        extra={
+            "attention_metrics": {
+                "realish_chart_continuity": True,
+                "dex_scan_repeat_count": 2,
+                "dex_scan_volume_delta_5m": 1400.0,
+                "dex_scan_liquidity_delta_pct": 2.5,
+                "unique_buyers_5m": 0,
+                "burst_count_60s": 0,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+                "independent_flow_confirmed": True,
+                "volume_window_phase": "surging",
+                "volume_pace_ratio": 1.2,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 82_000.0,
+            "volume_m5": 10_400.0,
+            "volume_h24": 760_000.0,
+            "market_cap_usd": 900_000.0,
+            "txns_m5_buys": 28,
+            "txns_m5_sells": 14,
+            "price_change_m5": 12.0,
+        },
+    )
+
+    assert eligible is True
+    assert reasons == []
+    assert "realish_chart_continuity" in confirmations
+    assert "market_support" in confirmations
+
+
 def test_candidate_send_reasons_allows_high_flow_runner_shape():
     eligible, reasons, confirmations = candidate_send_reasons(
         attention_score=0.30,
