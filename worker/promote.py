@@ -663,6 +663,89 @@ def _candidate_send_eligible(
     return attn >= 0.50 or (creator_score >= creator_min and attn >= 0.35)
 
 
+def _float_metric(payload: dict[str, Any], *names: str) -> float:
+    for name in names:
+        try:
+            value = payload.get(name)
+            if value is not None:
+                return float(value)
+        except Exception:
+            continue
+    return 0.0
+
+
+def _int_metric(payload: dict[str, Any], *names: str) -> int:
+    for name in names:
+        try:
+            value = payload.get(name)
+            if value is not None:
+                return int(value)
+        except Exception:
+            continue
+    return 0
+
+
+def _candidate_maturation_watch_signal(
+    reasons: list[str] | None,
+    *,
+    lifecycle: str | None,
+    attention_score: float | None,
+    risk_score: float | None,
+    extra: dict[str, Any] | None,
+    dex_summary: dict[str, Any] | None,
+) -> tuple[bool, list[str]]:
+    if not _candidate_gate_skip_should_mature(reasons, lifecycle=lifecycle):
+        return False, []
+    if not isinstance(dex_summary, dict):
+        return False, []
+
+    payload = extra if isinstance(extra, dict) else {}
+    confirmations = [
+        str(signal or "").strip()
+        for signal in payload.get("candidate_confirmation_signals") or []
+        if str(signal or "").strip()
+    ]
+    liq = _float_metric(dex_summary, "liquidity_usd", "liquidity")
+    vol5m = _float_metric(dex_summary, "volume_m5", "volume_m5_usd", "volume_5m")
+    buys5m = _int_metric(dex_summary, "txns_m5_buys", "buys_5m")
+    sells5m = _int_metric(dex_summary, "txns_m5_sells", "sells_5m")
+    price_change_m5 = _float_metric(dex_summary, "price_change_m5", "price_change_5m")
+    market_cap = _float_metric(dex_summary, "market_cap_usd", "market_cap", "fdv")
+    buy_sell_ratio = float(buys5m) / max(1.0, float(sells5m))
+    sell_buy_ratio = float(sells5m) / max(1.0, float(buys5m))
+    vol_liq_ratio = vol5m / max(1.0, liq)
+    attn = float(attention_score or 0.0)
+    risk = float(risk_score) if isinstance(risk_score, (int, float)) else 0.0
+
+    signals: list[str] = []
+    if "winner_breadth_proxy" in confirmations:
+        signals.append("winner_breadth_proxy")
+    if "thin_ignition_watch" in confirmations:
+        signals.append("thin_ignition_watch")
+    if buys5m >= 120 and buy_sell_ratio >= 2.5 and sell_buy_ratio <= 0.40:
+        signals.append("dex_buy_pressure_watch")
+    if 2_500 <= vol5m < 5_000 and 2.0 <= price_change_m5 <= 20.0:
+        signals.append("pre_volume_breakout")
+    if liq >= 50_000.0 and vol_liq_ratio <= 0.25:
+        signals.append("liquid_thin_ignition")
+    if attn >= 0.12:
+        signals.append("early_attention_watch")
+
+    ok = (
+        risk < RISK_VETO_THRESHOLD
+        and liq >= 50_000.0
+        and 2_500 <= vol5m < 5_000
+        and buys5m >= 120
+        and buy_sell_ratio >= 2.5
+        and sell_buy_ratio <= 0.40
+        and 2.0 <= price_change_m5 <= 20.0
+        and vol_liq_ratio <= 0.25
+        and 50_000.0 <= market_cap <= 7_500_000.0
+        and len(set(signals)) >= 3
+    )
+    return ok, list(dict.fromkeys(signals))
+
+
 def _candidate_send_decision(
     *,
     attention_score: float | None,
@@ -1880,7 +1963,16 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                     reasons=gate_reasons,
                 )
             if not ok:
+                maturation_watch, maturation_watch_signals = _candidate_maturation_watch_signal(
+                    gate_reasons,
+                    lifecycle=lifecycle,
+                    attention_score=attention_score,
+                    risk_score=risk_score,
+                    extra=extra,
+                    dex_summary=dex_summary,
+                )
                 if e.token and _candidate_gate_skip_should_mature(gate_reasons, lifecycle=lifecycle):
+                    scheduled_maturation_recheck = False
                     creator_score_value = float(creator_score_info.get("score") or 0.0)
                     upsert_candidate_state(
                         e.token,
@@ -1899,6 +1991,7 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                             "stage": "A",
                             "reasons": list(gate_reasons),
                         }
+                        scheduled_maturation_recheck = True
 
                         async def _recheck_fn(token: str) -> None:
                             await process_event(
@@ -1924,6 +2017,49 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                                 "A",
                             )
                         )
+                    if scheduled_maturation_recheck and maturation_watch and not should_mute(e.token):
+                        allow_watch_rate = allow_candidate_rate_limit(max(1, EARLY_WATCH_RATE_LIMIT_PER_HOUR))
+                        extra["candidate_maturation_watch"] = {
+                            "stage": "A",
+                            "gate_reasons": list(gate_reasons),
+                            "signals": list(maturation_watch_signals),
+                        }
+                        extra["candidate_send_eligible"] = True
+                        extra["candidate_rate_limit_checked"] = True
+                        extra["candidate_rate_limit_allowed"] = allow_watch_rate
+                        extra["candidate_confirmation_signals"] = list(
+                            dict.fromkeys(
+                                [
+                                    *(extra.get("candidate_confirmation_signals") or []),
+                                    "candidate_maturation_watch",
+                                    *maturation_watch_signals,
+                                ]
+                            )
+                        )
+                        extra["candidate_send_reasons"] = [
+                            "candidate_maturation_watch",
+                            *maturation_watch_signals,
+                        ]
+                        extra["candidate_send"] = bool(allow_watch_rate)
+                        extra["candidate_edit"] = False
+                        extra["candidate_improved"] = False
+                        extra["candidate_improved_keys"] = []
+                        extra["candidate_message_id"] = ""
+                        _record_decision(
+                            e,
+                            stage="candidate",
+                            decision="candidate_maturation_watch",
+                            action_taken="emit" if allow_watch_rate else "hold",
+                            reasons=extra["candidate_send_reasons"] if allow_watch_rate else ["rate_limited"],
+                            attention_score=attention_score,
+                            risk_score=risk_score,
+                            confidence_score=e.confidence,
+                            creator_score=float(creator_score_info.get("score") or 0.0),
+                            lifecycle=lifecycle,
+                            policy_name=candidate_policy.get("policy_name"),
+                            policy_version=candidate_policy.get("policy_version"),
+                        )
+                        candidate_event_extra = dict(extra)
                 logger.info(
                     "[pre-candidate-skip] token=%s sniper_conditions_met=%s",
                     e.token,

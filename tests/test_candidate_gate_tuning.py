@@ -2,6 +2,7 @@ from worker.alert_gate import admission_check_candidate
 from worker.promote import (
     _candidate_send_eligible,
     _candidate_gate_skip_should_mature,
+    _candidate_maturation_watch_signal,
     _wallet_cluster_review,
     _wallet_guard_category,
     _wallet_distribution_fail_reasons,
@@ -256,6 +257,73 @@ def test_candidate_gate_skip_matures_only_transient_dex_reasons():
         ["age<15s", "dex_gate:price_change_5m<-18.0"],
         lifecycle="dex",
     ) is False
+
+
+def test_candidate_maturation_watch_accepts_thin_ignition_near_pass():
+    ok, signals = _candidate_maturation_watch_signal(
+        ["age<15s", "attention<0.14", "dex_gate:vol5m<5000.0", "confirmation_signals<2"],
+        lifecycle="dex",
+        attention_score=0.13,
+        risk_score=0.05,
+        extra={
+            "candidate_confirmation_signals": ["winner_breadth_proxy", "thin_ignition_watch"],
+        },
+        dex_summary={
+            "liquidity_usd": 140_000.0,
+            "volume_m5": 3_700.0,
+            "txns_m5_buys": 164,
+            "txns_m5_sells": 42,
+            "price_change_m5": 8.2,
+            "market_cap_usd": 620_000.0,
+        },
+    )
+
+    assert ok is True
+    assert "candidate_maturation_watch" not in signals
+    assert "thin_ignition_watch" in signals
+    assert "pre_volume_breakout" in signals
+
+
+def test_candidate_maturation_watch_rejects_hard_risk_skip():
+    ok, signals = _candidate_maturation_watch_signal(
+        ["age<15s", "wallet_distribution_high_risk"],
+        lifecycle="dex",
+        attention_score=0.13,
+        risk_score=0.05,
+        extra={"candidate_confirmation_signals": ["thin_ignition_watch"]},
+        dex_summary={
+            "liquidity_usd": 140_000.0,
+            "volume_m5": 3_700.0,
+            "txns_m5_buys": 164,
+            "txns_m5_sells": 42,
+            "price_change_m5": 8.2,
+            "market_cap_usd": 620_000.0,
+        },
+    )
+
+    assert ok is False
+    assert signals == []
+
+
+def test_candidate_maturation_watch_rejects_overextended_move():
+    ok, signals = _candidate_maturation_watch_signal(
+        ["age<15s", "dex_gate:vol5m<5000.0", "confirmation_signals<2"],
+        lifecycle="dex",
+        attention_score=0.13,
+        risk_score=0.05,
+        extra={"candidate_confirmation_signals": ["thin_ignition_watch"]},
+        dex_summary={
+            "liquidity_usd": 140_000.0,
+            "volume_m5": 3_700.0,
+            "txns_m5_buys": 164,
+            "txns_m5_sells": 42,
+            "price_change_m5": 42.0,
+            "market_cap_usd": 620_000.0,
+        },
+    )
+
+    assert ok is False
+    assert "pre_volume_breakout" not in signals
 
 
 def test_candidate_gate_uses_policy_override_thresholds():
