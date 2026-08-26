@@ -284,6 +284,95 @@ def _rug_assessment(
     }
 
 
+def _manual_buy_assessment(
+    *,
+    attention_score: float,
+    risk_score: float,
+    elite_score: int,
+    dex_summary: dict[str, Any],
+    security: dict[str, Any],
+    rug_check: dict[str, Any],
+) -> dict[str, Any]:
+    liq = _float(dex_summary.get("liquidity_usd"))
+    vol5 = _float(dex_summary.get("volume_m5"))
+    buys5 = _int(dex_summary.get("txns_m5_buys"))
+    sells5 = _int(dex_summary.get("txns_m5_sells"))
+    market_cap = _float(dex_summary.get("market_cap"))
+    age = _float(dex_summary.get("age_minutes"))
+    buy_sell_ratio = buys5 / max(sells5, 1) if buys5 > 0 else 0.0
+
+    blockers: list[str] = []
+    warnings: list[str] = []
+    reasons: list[str] = []
+
+    if security.get("mint_authority_active") is True:
+        blockers.append("mint_authority_active")
+    if security.get("freeze_authority_active") is True:
+        blockers.append("freeze_authority_active")
+    if str(rug_check.get("verdict") or "").lower() == "high":
+        blockers.append("rug_risk_high")
+    if not dex_summary:
+        blockers.append("dex_pair_missing")
+    if liq and liq < 2_000:
+        blockers.append("liquidity_too_thin")
+    if risk_score >= 0.70:
+        blockers.append("risk_score_high")
+
+    if liq < 15_000:
+        warnings.append("liquidity_below_review_floor")
+    if buys5 < 8:
+        warnings.append("buy_breadth_low")
+    if buy_sell_ratio < 1.1:
+        warnings.append("buy_sell_ratio_not_constructive")
+    if market_cap and market_cap > 10_000_000 and vol5 < 25_000:
+        warnings.append("market_cap_volume_support_weak")
+    if age and age < 1:
+        warnings.append("very_new_token")
+
+    if liq >= 15_000:
+        reasons.append("tradable_liquidity_observed")
+    if buys5 >= 8 and buy_sell_ratio >= 1.1:
+        reasons.append("buy_flow_constructive")
+    if attention_score >= 0.65:
+        reasons.append("legacy_attention_support")
+    if risk_score <= 0.35:
+        reasons.append("risk_score_contained")
+    if elite_score >= 5:
+        reasons.append("elite_score_support")
+
+    if blockers:
+        action = "HARD_FAIL" if any(item in blockers for item in ("mint_authority_active", "freeze_authority_active", "rug_risk_high")) else "AVOID"
+    elif risk_score > 0.50 or len(warnings) >= 3:
+        action = "AVOID"
+    elif attention_score >= 0.80 and risk_score <= 0.25 and liq >= 25_000 and buys5 >= 15 and buy_sell_ratio >= 1.3:
+        action = "VALIDATED_WATCH"
+    elif attention_score >= 0.60 and risk_score <= 0.40 and liq >= 15_000 and buys5 >= 8:
+        action = "WATCH"
+    else:
+        action = "OBSERVE"
+
+    return {
+        "action": action,
+        "mode": "manual_review_shadow",
+        "calibration_status": "heuristic_uncalibrated",
+        "not_financial_advice": True,
+        "summary": {
+            "attention_score": round(attention_score, 4),
+            "risk_score": round(risk_score, 4),
+            "elite_score": elite_score,
+            "liquidity_usd": liq,
+            "volume_5m": vol5,
+            "buys_5m": buys5,
+            "sells_5m": sells5,
+            "buy_sell_ratio_5m": round(buy_sell_ratio, 4),
+        },
+        "positive_reasons": reasons[:5],
+        "warnings": warnings[:5],
+        "blockers": blockers,
+        "explanation": "Heuristic CA review only. It does not submit orders, does not enable live trading, and must be validated against executable outcomes before routing use.",
+    }
+
+
 async def review_contract(token: str) -> dict[str, Any]:
     token = (token or "").strip()
     if not _CA_RE.match(token):
@@ -385,6 +474,21 @@ async def review_contract(token: str) -> dict[str, Any]:
             },
         },
     )
+    security = {
+        "mint_authority_active": mint_authority,
+        "freeze_authority_active": freeze_authority,
+        "liquidity_locked": liq_locked,
+        "liquidity_drop_spike": liq_drop,
+        "holder_risk": holder_risk,
+    }
+    manual_buy_assessment = _manual_buy_assessment(
+        attention_score=attention_score,
+        risk_score=risk_score,
+        elite_score=elite_score,
+        dex_summary=dex_summary,
+        security=security,
+        rug_check=rug_check,
+    )
 
     return {
         "token": token,
@@ -409,14 +513,9 @@ async def review_contract(token: str) -> dict[str, Any]:
             "price_change_h24": dex_summary.get("price_change_h24"),
             "age_minutes": dex_summary.get("age_minutes"),
         },
-        "security": {
-            "mint_authority_active": mint_authority,
-            "freeze_authority_active": freeze_authority,
-            "liquidity_locked": liq_locked,
-            "liquidity_drop_spike": liq_drop,
-            "holder_risk": holder_risk,
-        },
+        "security": security,
         "rug_check": rug_check,
+        "manual_buy_assessment": manual_buy_assessment,
         "social": x_signal or {
             "tweet_count": 0,
             "unique_authors": 0,
@@ -443,6 +542,7 @@ def render_review_html(review: dict[str, Any]) -> str:
     links = review.get("links") if isinstance(review.get("links"), dict) else {}
     rug_check = review.get("rug_check") if isinstance(review.get("rug_check"), dict) else {}
     metric_states = review.get("metric_states") if isinstance(review.get("metric_states"), dict) else {}
+    manual_buy = review.get("manual_buy_assessment") if isinstance(review.get("manual_buy_assessment"), dict) else {}
 
     token_raw = str(review.get("token") or "")
     symbol_raw = str(review.get("symbol") or "UNK").upper()
@@ -470,6 +570,7 @@ def render_review_html(review: dict[str, Any]) -> str:
     signal_class = signal_type("review", vm.attention_score, vm.risk_score)
     title = html.escape(signal_title(signal_class, vm.symbol))
     quick_read = html.escape(summary_blurb(vm.attention_score, vm.risk_score, vm.lifecycle))
+    manual_action = str(manual_buy.get("action") or "OBSERVE")
     lifecycle_label_raw = (
         "Solana DEX"
         if vm.lifecycle == "dex"
@@ -498,6 +599,7 @@ def render_review_html(review: dict[str, Any]) -> str:
     )
     decision_strip = " ".join(
         [
+            f"<span class=\"metric-pill\">ACTION {html.escape(manual_action)}</span>",
             f"<span class=\"metric-pill\">CONF {html.escape(confidence_value)}</span>",
             f"<span class=\"metric-pill\">RISK {html.escape(risk_value)}</span>",
             f"<span class=\"metric-pill\">ATTN {html.escape(attention_value)}</span>",
@@ -633,6 +735,22 @@ def render_review_html(review: dict[str, Any]) -> str:
         ),
     )
     quality_panel = panel("Quality", f'<div class="kv-grid">{"".join(quality_bits)}</div>')
+    manual_reasons = manual_buy.get("positive_reasons") if isinstance(manual_buy.get("positive_reasons"), list) else []
+    manual_warnings = manual_buy.get("warnings") if isinstance(manual_buy.get("warnings"), list) else []
+    manual_blockers = manual_buy.get("blockers") if isinstance(manual_buy.get("blockers"), list) else []
+    manual_panel = panel(
+        "Manual Buy Assessment",
+        (
+            '<div class="kv-grid">'
+            f'{kv("Action", manual_action)}'
+            f'{kv("Mode", str(manual_buy.get("mode") or "manual_review_shadow"))}'
+            f'{kv("Calibration", str(manual_buy.get("calibration_status") or "heuristic_uncalibrated"))}'
+            "</div>"
+            f'<div class="subtitle">Reasons: {html.escape(", ".join(str(item) for item in manual_reasons) or "N/A")}</div>'
+            f'<div class="subtitle">Warnings: {html.escape(", ".join(str(item) for item in manual_warnings) or "N/A")}</div>'
+            f'<div class="subtitle">Blockers: {html.escape(", ".join(str(item) for item in manual_blockers) or "N/A")}</div>'
+        ),
+    )
     intelligence_panel = panel(
         "Signal Intelligence",
         f'<ul class="list">{reason_items}</ul>' if reason_items else '<div class="subtitle">No trigger explanation available.</div>',
@@ -770,6 +888,7 @@ def render_review_html(review: dict[str, Any]) -> str:
     <div class="grid">
       {market_panel}
       {flow_panel}
+      {manual_panel}
       {quality_panel}
       {intelligence_panel}
       {security_panel}
