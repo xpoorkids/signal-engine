@@ -1,12 +1,31 @@
 # Python
 __pycache__/
 *.pyc
+.pytest_cache/
+.venv/
 
 # Runtime
 worker.log
 state/engine.db
+*.db
+*.sqlite
+*.sqlite3
+*.log
+logs/
+
+# Secrets and local operator config
+.env
+.env.*
+!.env.example
+
+# Generated analytics and private model artifacts
+artifacts/*.parquet
+*.parquet
+models/
+model_artifacts/
+*.joblib
+*.pkl
 
 # OS
 .DS_Store
 Thumbs.db
-.github/

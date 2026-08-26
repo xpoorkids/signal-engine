@@ -1,0 +1,11 @@
+title = "signal-engine gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow documented placeholder environment keys only"
+paths = [
+  '''\.env\.example$''',
+  '''docs/SECURITY_ROTATION\.md$''',
+]

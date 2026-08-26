@@ -31,3 +31,20 @@ def test_log_event_emits_structured_message(caplog):
     assert "token=abc456" in caplog.text
     assert "delivered=false" in caplog.text
     assert "reason=cooldown" in caplog.text
+
+
+def test_structured_log_message_redacts_secrets_without_hiding_public_token():
+    message = structured_log_message(
+        "source",
+        token="public_mint_address",
+        api_key="secret-value",
+        authorization="Bearer secret-token",
+        callback="https://discord.com/api/webhooks/123/secret",
+        nested={"webhook_url": "https://discord.com/api/webhooks/456/hidden"},
+    )
+
+    assert "token=public_mint_address" in message
+    assert "secret-value" not in message
+    assert "secret-token" not in message
+    assert "discord.com/api/webhooks" not in message
+    assert "[REDACTED]" in message
