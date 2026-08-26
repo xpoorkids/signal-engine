@@ -1,0 +1,112 @@
+{
+  "captured_at": "2026-08-26T06:25:26.9272453Z",
+  "starting_git_sha": "fc4f8b0d9fec616ac0789148a2b0cf884030deb3",
+  "branch": "signal-engine-v2-worker-v2",
+  "deployed_worker_sha": "fc4f8b0d9fec616ac0789148a2b0cf884030deb3",
+  "lookback_hours": 3,
+  "status": "degraded",
+  "status_detail": "The engine is active and sending alerts in the selected window. Dependency degradation: x_signal:http_401",
+  "sent_count": 14,
+  "skipped_count": 3166,
+  "blocked_count": 0,
+  "total_decisions": 5000,
+  "send_rate": 0.3,
+  "skip_pressure": 63.3,
+  "block_pressure": 0.0,
+  "latest_decision": {
+    "decision": "candidate_gate_skip",
+    "token": "Nqn85XpkouFtmQ9f62w43En9no8Sj9QWwA9DMLrpump",
+    "age_minutes": 0.0
+  },
+  "latest_signal": {
+    "event_type": "token_resolved",
+    "token": "GeSfrQiscfsEv4Hx2TKaB9Nfid12qND1YYRYS1vSpump",
+    "age_minutes": 1.0
+  },
+  "worker": {
+    "status": "healthy",
+    "heartbeat_age_seconds": 24,
+    "dry_run": false,
+    "enable_ws": true,
+    "enable_dex": true,
+    "enable_discord": true,
+    "memory_cpu": "not_exposed"
+  },
+  "storage": {
+    "status": "ok",
+    "write_probe_ok": true,
+    "db_path": "/var/data/engine.db",
+    "file_size_bytes": 49459200
+  },
+  "producer": {
+    "dex_total_pairs": 266,
+    "scanner_last_candidate_count": 8,
+    "scanner_last_scan_age_seconds": 37.5,
+    "ws_last_activity_age_seconds": 846.1,
+    "x_signal": {
+      "configured": true,
+      "last_error": "http_401",
+      "last_status_code": 401,
+      "last_success_ts": null
+    }
+  },
+  "diagnostics": {
+    "counts_by_decision": {
+      "candidate_gate_skip": 684,
+      "hard_fail": 284,
+      "heating_gate_skip": 12,
+      "candidate_maturation_watch": 1,
+      "candidate_not_eligible": 17,
+      "blacklist_skip": 2
+    },
+    "counts_by_action": {
+      "skip": 999,
+      "emit": 1
+    },
+    "counts_by_stage": {
+      "candidate": 702,
+      "routing": 286,
+      "heating_up": 12
+    },
+    "top_skip_reasons": [
+      {
+        "reason": "age<15s",
+        "count": 2790
+      },
+      {
+        "reason": "confirmation_signals<2",
+        "count": 2133
+      },
+      {
+        "reason": "dex_gate:vol5m<5000.0",
+        "count": 2075
+      },
+      {
+        "reason": "wallet_distribution_high_risk",
+        "count": 1214
+      },
+      {
+        "reason": "wallet_top_holder_concentration",
+        "count": 1214
+      }
+    ]
+  },
+  "not_exposed_by_current_readiness_or_diagnostics": [
+    "event_throughput",
+    "queue_depth",
+    "event_to_decision_latency_p50",
+    "event_to_decision_latency_p95",
+    "enrichment_latency_by_source",
+    "source_failure_rate_as_single_metric",
+    "reconnect_count",
+    "duplicate_rate",
+    "positive_unsent_count",
+    "missed_runner_count",
+    "resolved_label_coverage",
+    "shadow_pnl_coverage",
+    "stale_metric_rate",
+    "worker_memory",
+    "worker_cpu"
+  ],
+  "test_status_at_capture": "pending"
+}

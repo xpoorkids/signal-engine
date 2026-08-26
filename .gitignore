@@ -21,8 +21,8 @@ logs/
 # Generated analytics and private model artifacts
 artifacts/*.parquet
 *.parquet
-models/
-model_artifacts/
+/models/
+/model_artifacts/
 *.joblib
 *.pkl
 
