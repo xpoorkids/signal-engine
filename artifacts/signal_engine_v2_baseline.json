@@ -108,5 +108,5 @@
     "worker_memory",
     "worker_cpu"
   ],
-  "test_status_at_capture": "pending"
+  "test_status_at_capture": "339 passed, 6 FastAPI deprecation warnings"
 }

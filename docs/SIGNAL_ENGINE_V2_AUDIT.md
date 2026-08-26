@@ -64,6 +64,7 @@ Live baseline over the 3 hour lookback:
 - Candidate-gate skip diagnostic count: `684`
 - Storage: writable, `/var/data/engine.db`, `49459200` bytes
 - DEX scanner: `266` pairs in latest producer metadata
+- Tests after initial V2 contracts: `339 passed`, with `6` FastAPI deprecation warnings
 - Not currently exposed: queue depth, latency p50/p95, enrichment latency by source, duplicate rate, stale metric rate, worker CPU, and worker memory
 
 No improvement is claimed from this baseline. It records current behavior before V2 behavior changes.
