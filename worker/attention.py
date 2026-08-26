@@ -583,6 +583,11 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         "dex_scan_repeat_count": 0,
         "dex_scan_momentum_slope": 0.0,
         "dex_scan_persistent": False,
+        "dex_flow_quality_score": None,
+        "dex_flow_quality_tier": "unknown",
+        "dex_flow_quality_supports": [],
+        "dex_flow_failure_reasons": [],
+        "dex_flow_failure_shape": False,
         "x_query_attempted": False,
         "x_query_reason": "",
         "x_signal_available": False,
@@ -629,6 +634,11 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
             "price_change_1h",
             "sells_5m",
             "sell_ratio_5m",
+            "dex_flow_quality_score",
+            "dex_flow_quality_tier",
+            "dex_flow_quality_supports",
+            "dex_flow_failure_reasons",
+            "dex_flow_failure_shape",
         ):
             if key in seed_metrics:
                 metrics[key] = seed_metrics.get(key)
@@ -693,6 +703,10 @@ def compute_attention(e, state) -> Tuple[float, List[str], Dict[str, Any]]:
         _append_reason(reasons, "DEX dormant revival watch")
     if metrics.get("realish_chart_continuity"):
         _append_reason(reasons, "DEX realish chart continuity")
+    if metrics.get("dex_flow_quality_tier") == "confirmed":
+        _append_reason(reasons, "DEX flow quality confirmed")
+    elif metrics.get("dex_flow_failure_shape"):
+        _append_reason(reasons, "DEX weak flow quality")
     if metrics.get("j7tracker_watch"):
         _append_reason(reasons, "J7Tracker discovery support")
     if metrics.get("external_seed_watch"):

@@ -3,6 +3,7 @@ from worker.signal_policy import (
     candidate_confirmation_signals,
     candidate_send_reasons,
     classify_route_signal,
+    dex_flow_quality_profile,
     entry_quality_profile,
     heating_delivery_decision,
     promotion_confirmation_target,
@@ -726,6 +727,51 @@ def test_candidate_send_reasons_reject_liquidity_volume_spike():
     assert "liquidity_volume_spike" in reasons
 
 
+def test_dex_flow_quality_profile_marks_confirmed_flow():
+    profile = dex_flow_quality_profile(
+        metrics={"unique_buyers_5m": 5},
+        dex_summary={
+            "liquidity_usd": 95_000.0,
+            "volume_m5": 12_500.0,
+            "txns_m5_buys": 31,
+            "txns_m5_sells": 10,
+            "price_change_m5": 9.0,
+        },
+    )
+
+    assert profile["tier"] == "confirmed"
+    assert profile["score"] >= 75
+    assert "buy_sell_constructive" in profile["supports"]
+
+
+def test_candidate_send_reasons_reject_weak_dex_flow_failure_shape():
+    eligible, reasons, confirmations = candidate_send_reasons(
+        attention_score=0.72,
+        creator_score=0.70,
+        extra={
+            "attention_metrics": {
+                "unique_buyers_5m": 1,
+                "burst_count_60s": 1,
+                "tracked_wallet_hits": 0,
+                "kol_wallet_hits": 0,
+            }
+        },
+        dex_summary={
+            "liquidity_usd": 18_000.0,
+            "volume_m5": 2_400.0,
+            "market_cap_usd": 700_000.0,
+            "txns_m5_buys": 7,
+            "txns_m5_sells": 15,
+            "price_change_m5": -15.0,
+        },
+    )
+
+    assert eligible is False
+    assert "dex_flow_failure_shape" in reasons
+    assert "dex_flow_sell_pressure" in reasons
+    assert "healthy_dex_flow" not in confirmations
+
+
 def test_candidate_send_reasons_reject_single_scan_chart_spike():
     eligible, reasons, confirmations = candidate_send_reasons(
         attention_score=0.70,
@@ -821,6 +867,7 @@ def test_candidate_send_reasons_allows_high_flow_runner_shape():
     assert reasons == []
     assert "dex_buyer_pressure" in confirmations
     assert "entry_buy_pressure" in confirmations
+    assert "healthy_dex_flow" in confirmations
 
 
 def test_candidate_confirmation_signals_include_heavy_x_support():

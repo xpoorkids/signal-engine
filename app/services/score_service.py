@@ -95,6 +95,73 @@ def _txn_metrics(pair: dict) -> tuple[int, int, float]:
     return buys5m, sells5m, sell_ratio
 
 
+def _dex_flow_quality(
+    *,
+    liq: float,
+    vol5m: float,
+    chg5m: float,
+    buys5m: int,
+    sells5m: int,
+    buy_sell_ratio: float,
+    sell_ratio: float,
+    vol_liq_ratio: float,
+) -> dict[str, object]:
+    score = 0
+    supports: list[str] = []
+    failures: list[str] = []
+
+    if liq >= 50_000:
+        score += 18
+        supports.append("liquidity_depth")
+    elif liq >= 25_000:
+        score += 10
+    else:
+        failures.append("dex_flow_thin_liquidity")
+
+    if vol5m >= 5_000:
+        score += 14
+        supports.append("volume_floor")
+    else:
+        failures.append("dex_flow_low_volume")
+
+    if buys5m >= 25:
+        score += 18
+        supports.append("buy_count_depth")
+    elif buys5m >= 12:
+        score += 10
+    else:
+        failures.append("dex_flow_buy_pressure_weak")
+
+    if buy_sell_ratio >= 1.8 and sell_ratio <= 0.85:
+        score += 22
+        supports.append("buy_sell_constructive")
+    elif sell_ratio > 1.0:
+        failures.append("dex_flow_sell_pressure")
+
+    if vol_liq_ratio <= 1.2:
+        score += 14
+        supports.append("volume_liquidity_sane")
+    elif vol_liq_ratio > 2.0:
+        failures.append("dex_flow_overheated_vol_liq")
+
+    if -5.0 <= chg5m <= 35.0:
+        score += 14
+        supports.append("price_change_sane")
+    elif chg5m < -12.0:
+        failures.append("dex_flow_hard_price_drop")
+    elif chg5m > 55.0:
+        failures.append("dex_flow_overextended_price")
+
+    tier = "confirmed" if score >= 75 else "developing" if score >= 55 else "weak"
+    return {
+        "dex_flow_quality_score": score,
+        "dex_flow_quality_tier": tier,
+        "dex_flow_quality_supports": supports,
+        "dex_flow_failure_reasons": failures,
+        "dex_flow_failure_shape": bool(tier == "weak" and failures),
+    }
+
+
 def _paid_visibility_class(sources: list[str], buys5m: int, sells5m: int, vol5m: float) -> str:
     source_set = set(sources)
     paid = bool({"paid_ad", "token_boost_latest", "token_boost_top", "dex_boost_active"} & source_set)
@@ -228,6 +295,16 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                     liquidity=liq,
                     observed_ts=now_ts,
                 )
+                flow_quality = _dex_flow_quality(
+                    liq=liq,
+                    vol5m=vol5m,
+                    chg5m=chg5m,
+                    buys5m=buys5m,
+                    sells5m=sells5m,
+                    buy_sell_ratio=buy_sell_ratio,
+                    sell_ratio=sell_ratio,
+                    vol_liq_ratio=vol_liq_ratio,
+                )
                 paid_class = _paid_visibility_class(sources, buys5m, sells5m, vol5m)
                 repeat_count = int(scan_evidence["dex_scan_repeat_count"])
                 volume_delta = float(scan_evidence["dex_scan_volume_delta_5m"])
@@ -287,6 +364,7 @@ def score_pairs(pairs: list[dict]) -> list[dict]:
                                 & source_set
                             ),
                             **scan_evidence,
+                            **flow_quality,
                         },
                     }
                 )

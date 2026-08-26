@@ -63,6 +63,13 @@ def test_record_decision_persists_tradeability_and_ev_features(tmp_path, monkeyp
                 "dex_gate:vol5m<5000.0",
                 "confirmation_signals<2",
             ],
+            "attention_metrics": {
+                "dex_flow_quality_score": 86,
+                "dex_flow_quality_tier": "confirmed",
+                "dex_flow_quality_supports": ["liquidity_depth", "buy_sell_constructive"],
+                "dex_flow_failure_reasons": [],
+                "dex_flow_failure_shape": False,
+            },
             "wallet_cluster_review": {
                 "verdict": "coordinated_accumulation",
                 "score": 43,
@@ -113,6 +120,10 @@ def test_record_decision_persists_tradeability_and_ev_features(tmp_path, monkeyp
     assert features["candidate_rate_limit_allowed"] is False
     assert features["candidate_rate_limit_checked"] is True
     assert features["candidate_progression_ok"] is True
+    assert features["dex_flow_quality_score"] == 86
+    assert features["dex_flow_quality_tier"] == "confirmed"
+    assert features["dex_flow_quality_supports"] == ["liquidity_depth", "buy_sell_constructive"]
+    assert features["dex_flow_failure_shape"] is False
     assert features["candidate_admission_watch_bypass"] == [
         "dex_gate:vol5m<5000.0",
         "confirmation_signals<2",

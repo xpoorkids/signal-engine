@@ -280,6 +280,7 @@ from worker.signal_policy import (
     candidate_lifecycle_policy,
     candidate_send_reasons,
     candidate_signal_policy,
+    dex_flow_quality_profile,
     promotion_confirmation_target,
     classify_route_signal,
     route_signal_policy,
@@ -966,6 +967,11 @@ def _record_decision(
         "single_scan_chart_spike": attention_metrics.get("single_scan_chart_spike"),
         "buy_sell_ratio_5m": attention_metrics.get("buy_sell_ratio_5m"),
         "volume_liquidity_ratio_5m": attention_metrics.get("volume_liquidity_ratio_5m"),
+        "dex_flow_quality_score": attention_metrics.get("dex_flow_quality_score"),
+        "dex_flow_quality_tier": attention_metrics.get("dex_flow_quality_tier"),
+        "dex_flow_quality_supports": attention_metrics.get("dex_flow_quality_supports") or [],
+        "dex_flow_failure_reasons": attention_metrics.get("dex_flow_failure_reasons") or [],
+        "dex_flow_failure_shape": attention_metrics.get("dex_flow_failure_shape"),
         "sells_5m": attention_metrics.get("sells_5m"),
         "sell_ratio_5m": attention_metrics.get("sell_ratio_5m"),
         "x_query_attempted": attention_metrics.get("x_query_attempted"),
@@ -1324,6 +1330,17 @@ async def process_event(state: EngineState, e: Event) -> list[Event]:
                 dex_summary = None
             if dex_summary:
                 extra["dex_summary"] = dex_summary
+                flow_quality = dex_flow_quality_profile(metrics=attn_metrics, dex_summary=dex_summary)
+                attn_metrics.update(
+                    {
+                        "dex_flow_quality_score": flow_quality.get("score"),
+                        "dex_flow_quality_tier": flow_quality.get("tier"),
+                        "dex_flow_quality_supports": flow_quality.get("supports") or [],
+                        "dex_flow_failure_reasons": flow_quality.get("failure_reasons") or [],
+                        "dex_flow_failure_shape": flow_quality.get("failure_shape"),
+                    }
+                )
+                extra["attention_metrics"] = attn_metrics
             if extra.get("dex", {}).get("ok"):
                 e.confidence = bump(
                     e.confidence, CONF_WEIGHTS["dex_pair_found"], CAPS["heating"]

@@ -230,9 +230,9 @@ def test_score_pairs_marks_j7tracker_as_non_x_discovery_support():
                 "symbol": "SOL",
             },
             "liquidity": {"usd": 150_000},
-            "volume": {"m5": 1_400},
+            "volume": {"m5": 7_400},
             "priceChange": {"m5": 2.5},
-            "txns": {"m5": {"buys": 11, "sells": 5}},
+            "txns": {"m5": {"buys": 28, "sells": 8}},
             "marketCap": 2_000_000,
             "pairCreatedAt": now_ms - 2 * 24 * 60 * 60_000,
         }
@@ -243,6 +243,8 @@ def test_score_pairs_marks_j7tracker_as_non_x_discovery_support():
     assert scored[0]["reason"] == "curated_discovery_watch"
     assert scored[0]["metrics"]["j7tracker_watch"] is True
     assert scored[0]["metrics"]["non_x_discovery_support"] is True
+    assert scored[0]["metrics"]["dex_flow_quality_tier"] == "confirmed"
+    assert scored[0]["metrics"]["dex_flow_quality_score"] >= 75
 
 
 def test_score_pairs_returns_dormant_revival_watch_after_two_days():

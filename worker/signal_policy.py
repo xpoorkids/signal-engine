@@ -24,6 +24,91 @@ def _has_non_x_discovery_support(payload: dict[str, Any]) -> bool:
     )
 
 
+def dex_flow_quality_profile(
+    *,
+    metrics: dict[str, Any] | None,
+    dex_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload = metrics if isinstance(metrics, dict) else {}
+    summary = dex_summary if isinstance(dex_summary, dict) else {}
+    liq = _first_positive_float(summary, payload, keys=("liquidity_usd", "liquidity"))
+    vol5m = _first_positive_float(summary, payload, keys=("volume_m5", "volume_m5_usd", "volume_5m"))
+    try:
+        chg5m = float(summary.get("price_change_m5") or summary.get("price_change_5m") or payload.get("price_change_m5") or payload.get("price_change_5m") or 0.0)
+    except Exception:
+        chg5m = 0.0
+    try:
+        buys5m = int(summary.get("txns_m5_buys") or summary.get("buys_5m") or payload.get("txns_m5_buys") or payload.get("buys_5m") or 0)
+    except Exception:
+        buys5m = 0
+    try:
+        sells5m = int(summary.get("txns_m5_sells") or summary.get("sells_5m") or payload.get("txns_m5_sells") or payload.get("sells_5m") or 0)
+    except Exception:
+        sells5m = 0
+    buy_sell_ratio = float(buys5m) / float(max(sells5m, 1)) if buys5m > 0 else 0.0
+    sell_buy_ratio = float(sells5m) / float(max(buys5m, 1)) if buys5m > 0 else 0.0
+    vol_liq_ratio = float(vol5m or 0.0) / float(liq) if vol5m is not None and liq is not None and liq > 0.0 else None
+
+    score = 0
+    supports: list[str] = []
+    failures: list[str] = []
+    if liq is not None and liq >= 50_000.0:
+        score += 18
+        supports.append("liquidity_depth")
+    elif liq is not None and liq >= 25_000.0:
+        score += 10
+    else:
+        failures.append("dex_flow_thin_liquidity")
+    if vol5m is not None and vol5m >= 5_000.0:
+        score += 14
+        supports.append("volume_floor")
+    else:
+        failures.append("dex_flow_low_volume")
+    if buys5m >= 25:
+        score += 18
+        supports.append("buy_count_depth")
+    elif buys5m >= 12:
+        score += 10
+    else:
+        failures.append("dex_flow_buy_pressure_weak")
+    if buy_sell_ratio >= 1.8 and sell_buy_ratio <= 0.85:
+        score += 22
+        supports.append("buy_sell_constructive")
+    elif sell_buy_ratio > 1.0:
+        failures.append("dex_flow_sell_pressure")
+    if vol_liq_ratio is not None and vol_liq_ratio <= 1.2:
+        score += 14
+        supports.append("volume_liquidity_sane")
+    elif vol_liq_ratio is not None and vol_liq_ratio > 2.0:
+        failures.append("dex_flow_overheated_vol_liq")
+    if -5.0 <= chg5m <= 35.0:
+        score += 14
+        supports.append("price_change_sane")
+    elif chg5m < -12.0:
+        failures.append("dex_flow_hard_price_drop")
+    elif chg5m > 55.0:
+        failures.append("dex_flow_overextended_price")
+
+    tier = "confirmed" if score >= 75 else "developing" if score >= 55 else "weak"
+    return {
+        "tier": tier,
+        "score": score,
+        "supports": supports,
+        "failure_reasons": failures,
+        "failure_shape": bool(tier == "weak" and failures),
+        "metrics": {
+            "liquidity_usd": liq,
+            "volume_m5": vol5m,
+            "price_change_m5": round(chg5m, 3),
+            "txns_m5_buys": buys5m,
+            "txns_m5_sells": sells5m,
+            "buy_sell_ratio": round(buy_sell_ratio, 3),
+            "sell_buy_ratio": round(sell_buy_ratio, 3),
+            "volume_liquidity_ratio": round(vol_liq_ratio, 3) if vol_liq_ratio is not None else None,
+        },
+    }
+
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, str(default)))
@@ -820,6 +905,7 @@ def candidate_confirmation_signals(
         volume_pace_ratio = 0.0
     top_wallet_share = float(metrics.get("top_wallet_share_30s") or 0.0)
     unique_wallets_30s = int(metrics.get("unique_wallets_30s") or 0)
+    dex_flow_quality = dex_flow_quality_profile(metrics=metrics, dex_summary=dex_summary)
 
     if buyers_5m >= policy.min_unique_buyers_5m:
         confirmations.append("buyer_breadth")
@@ -947,6 +1033,10 @@ def candidate_confirmation_signals(
         and vol5m >= 5_000
     ):
         confirmations.append("entry_buy_pressure")
+    dex_flow_quality_tier = str(metrics.get("dex_flow_quality_tier") or dex_flow_quality.get("tier") or "")
+    dex_flow_quality_score = int(metrics.get("dex_flow_quality_score") or dex_flow_quality.get("score") or 0)
+    if (dex_flow_quality_tier == "confirmed" or dex_flow_quality_score >= 75) and 50_000 <= market_cap <= 10_000_000:
+        confirmations.append("healthy_dex_flow")
     high_conviction_dex_breadth_proxy = (
         buyers_5m <= 0
         and buys5m >= max(policy.entry_confirm_buys5m_min * 12, 180)
@@ -1222,6 +1312,22 @@ def adversarial_signal_flags(
     credible_social_support = credible_social_support or viral_x_support
     realish_chart_continuity = bool(payload.get("realish_chart_continuity"))
     single_scan_chart_spike = bool(payload.get("single_scan_chart_spike"))
+    dex_flow_quality = dex_flow_quality_profile(metrics=payload, dex_summary=summary)
+    dex_flow_tier = str(payload.get("dex_flow_quality_tier") or dex_flow_quality.get("tier") or "")
+    dex_flow_score = int(payload.get("dex_flow_quality_score") or dex_flow_quality.get("score") or 0)
+    dex_flow_failure_shape = bool(payload.get("dex_flow_failure_shape") or dex_flow_quality.get("failure_shape"))
+    dex_flow_failures = (
+        payload.get("dex_flow_failure_reasons")
+        if isinstance(payload.get("dex_flow_failure_reasons"), list)
+        else dex_flow_quality.get("failure_reasons")
+    )
+    dex_flow_failure_set = {str(item) for item in dex_flow_failures or []}
+    critical_dex_flow_failures = {
+        "dex_flow_sell_pressure",
+        "dex_flow_hard_price_drop",
+        "dex_flow_overheated_vol_liq",
+        "dex_flow_overextended_price",
+    }
     synthetic_churn_shape = (
         buys5m >= 25
         and sells5m >= 20
@@ -1271,6 +1377,18 @@ def adversarial_signal_flags(
         and not has_current_flow_support
     ):
         flags.append("liquidity_volume_spike")
+    if (
+        dex_flow_failure_shape
+        and dex_flow_tier == "weak"
+        and dex_flow_score < 45
+        and bool(critical_dex_flow_failures & dex_flow_failure_set)
+        and not any_wallet_support
+        and not credible_source
+        and not credible_social_support
+    ):
+        flags.append("dex_flow_failure_shape")
+        for failure in sorted(critical_dex_flow_failures & dex_flow_failure_set):
+            flags.append(failure)
     if (
         float(price_change_m5 or 0.0) >= 20.0
         and buys5m < max(12, min_burst_count_60s * 2)
@@ -1538,6 +1656,7 @@ def candidate_send_reasons(
         "liquidity_volume_spike",
         "one_sided_chart_risk",
         "single_scan_chart_spike",
+        "dex_flow_failure_shape",
     }
     has_severe_adversarial_flag = bool(severe_adversarial_flags & set(adversarial_flags))
     if adversarial_flags and not route_fast_lane and (not hard_quality_confirmed or has_severe_adversarial_flag):
@@ -1646,6 +1765,7 @@ def promotion_confirmation_target(
             "entry_extended_without_breadth",
             "entry_extended_buy_pressure_missing",
             "entry_hype_volume_liquidity",
+            "dex_flow_failure_shape",
         }
         has_severe_adversarial_flag = bool(severe_adversarial_flags & set(adversarial_flags))
         if adversarial_flags and (tracked_hits <= 0 or has_severe_adversarial_flag):
