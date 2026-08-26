@@ -52,6 +52,47 @@ def test_candidate_dex_gate_accepts_scanner_metric_aliases():
     assert reasons == []
 
 
+def test_candidate_dex_gate_bypasses_age_for_high_conviction_breadth_proxy():
+    extra = {
+        "metrics": {
+            "age_minutes": 0.05,
+            "unique_buyers_5m": 0,
+            "burst_count_60s": 0,
+            "tracked_wallet_hits": 0,
+            "kol_wallet_hits": 0,
+        }
+    }
+    ok, reasons, lifecycle = admission_check_candidate(
+        attention_score=0.20,
+        risk_score=0.0,
+        extra=extra,
+        dex_summary={
+            "age_minutes": 0.05,
+            "liquidity_usd": 831_000.0,
+            "volume_m5": 5_350.0,
+            "txns_m5_buys": 298,
+            "txns_m5_sells": 5,
+            "price_change_m5": 1.06,
+            "market_cap_usd": 925_000.0,
+        },
+        attention_unavailable=False,
+        gate_config={
+            "candidate_gate_attention_min": 0.14,
+            "candidate_gate_min_age_sec": 15,
+        },
+    )
+
+    assert lifecycle == "dex"
+    assert ok is True
+    assert reasons == []
+    assert extra["candidate_age_bypass_reason"] == "winner_breadth_proxy"
+    assert extra["candidate_admission_proxy_bypass"] == [
+        "age<15s",
+        "dex_gate:vol5m<12000.0",
+    ]
+    assert "winner_breadth_proxy" in extra["candidate_confirmation_signals"]
+
+
 def test_candidate_dex_gate_allows_repeated_accumulation_watch():
     extra = {
         "metrics": {

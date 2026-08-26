@@ -858,6 +858,17 @@ def candidate_confirmation_signals(
         and vol5m >= 5_000
     ):
         confirmations.append("entry_buy_pressure")
+    high_conviction_dex_breadth_proxy = (
+        buyers_5m <= 0
+        and buys5m >= max(policy.entry_confirm_buys5m_min * 12, 180)
+        and buy_sell_ratio >= 20.0
+        and sell_buy_ratio <= 0.08
+        and 0.0 <= price_change_m5 <= 18.0
+        and vol5m >= 5_000
+        and liq >= max(policy.entry_chase_min_liq_usd * 4, 100_000.0)
+        and (vol5m / max(liq, 1.0)) <= 0.20
+        and 50_000 <= market_cap <= 5_000_000
+    )
     if (
         buyers_5m <= 0
         and buys5m >= max(policy.entry_confirm_buys5m_min * 6, 90)
@@ -867,7 +878,7 @@ def candidate_confirmation_signals(
         and vol5m >= 10_000
         and liq >= max(policy.entry_chase_min_liq_usd, 25_000.0)
         and (vol5m / max(liq, 1.0)) <= 3.0
-    ):
+    ) or high_conviction_dex_breadth_proxy:
         confirmations.append("winner_breadth_proxy")
     if dex_accumulation_watch_signal(metrics, dex_summary):
         confirmations.append("dex_accumulation_watch")

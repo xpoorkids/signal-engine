@@ -272,6 +272,18 @@ def admission_check_candidate(
     if confirmations:
         if isinstance(extra, dict):
             extra["candidate_confirmation_signals"] = confirmations
+    if lifecycle == "dex" and "winner_breadth_proxy" in confirmations:
+        age_reason = f"age<{int(min_age_sec)}s"
+        bypassed_reasons = [
+            reason
+            for reason in reasons
+            if reason == age_reason or reason.startswith("dex_gate:vol5m<")
+        ]
+        if bypassed_reasons:
+            reasons = [reason for reason in reasons if reason not in bypassed_reasons]
+            if isinstance(extra, dict):
+                extra["candidate_age_bypass_reason"] = "winner_breadth_proxy"
+                extra["candidate_admission_proxy_bypass"] = bypassed_reasons
     if lifecycle == "dex" and dex_summary and _dex_accumulation_watch(extra, dex_summary):
         soft_watch_reasons = {
             "dex_gate:vol5m<5000.0",
