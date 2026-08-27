@@ -33,6 +33,31 @@ EXECUTION_QUALITY = {
     "insufficient_data",
 }
 
+RESEARCH_MODES = {"source", "fixture", "hybrid"}
+SOURCE_STATUSES = {
+    "success",
+    "partial",
+    "empty",
+    "not_configured",
+    "unauthorized",
+    "plan_restricted",
+    "rate_limited",
+    "outside_retention",
+    "invalid_request",
+    "source_unavailable",
+    "malformed_response",
+    "failed",
+}
+EVIDENCE_QUALITY = {
+    "direct",
+    "parsed_direct",
+    "reconstructed",
+    "inferred",
+    "current_only",
+    "reference_only",
+    "unavailable",
+}
+
 
 @dataclass(frozen=True)
 class FieldValue:
@@ -69,10 +94,64 @@ class SourceCapability:
 
 
 @dataclass(frozen=True)
+class SourceResult:
+    source: str
+    operation: str
+    status: str
+    requested_start_ts: int | None = None
+    requested_end_ts: int | None = None
+    returned_start_ts: int | None = None
+    returned_end_ts: int | None = None
+    records: list[dict[str, Any]] = field(default_factory=list)
+    next_cursor: str | None = None
+    has_more: bool = False
+    completeness: str = "unavailable"
+    retention_status: str = "unknown"
+    evidence_quality: str = "unavailable"
+    fetched_at: int | None = None
+    request_hash: str | None = None
+    response_hash: str | None = None
+    parser_version: str = "source-result-v1"
+    retry_count: int = 0
+    rate_limit: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def record_count(self) -> int:
+        return len(self.records)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "operation": self.operation,
+            "status": self.status,
+            "requested_start_ts": self.requested_start_ts,
+            "requested_end_ts": self.requested_end_ts,
+            "returned_start_ts": self.returned_start_ts,
+            "returned_end_ts": self.returned_end_ts,
+            "records": self.records,
+            "record_count": self.record_count,
+            "next_cursor": self.next_cursor,
+            "has_more": self.has_more,
+            "completeness": self.completeness,
+            "retention_status": self.retention_status,
+            "evidence_quality": self.evidence_quality,
+            "fetched_at": self.fetched_at,
+            "request_hash": self.request_hash,
+            "response_hash": self.response_hash,
+            "parser_version": self.parser_version,
+            "retry_count": self.retry_count,
+            "rate_limit": self.rate_limit,
+            "warnings": self.warnings,
+            "errors": self.errors,
+        }
+
+
+@dataclass(frozen=True)
 class ResearchSnapshot:
     token_id: str
     snapshot_ts: int
     label: str
     features: dict[str, FieldValue]
     source_hashes: list[str]
-

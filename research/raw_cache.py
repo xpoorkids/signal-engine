@@ -34,6 +34,7 @@ def store_raw_response(
     token_id: str | None = None,
     requested_start_ts: int | None = None,
     requested_end_ts: int | None = None,
+    data_mode: str = "source",
 ) -> dict[str, Any]:
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     key = cache_key(source, endpoint, params)
@@ -52,9 +53,9 @@ def store_raw_response(
             INSERT INTO research_raw_fetches (
                 fetch_id, source, endpoint, request_json, token_id, requested_start_ts,
                 requested_end_ts, fetched_ts, status, response_hash, parser_version,
-                completeness_status, cache_key
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                completeness_status, cache_key, data_mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (f"{key}:{digest}:{fetched}", source, endpoint, json.dumps(params, sort_keys=True), token_id, requested_start_ts, requested_end_ts, fetched, status, digest, PARSER_VERSION, completeness_status, key),
+            (f"{key}:{digest}:{fetched}", source, endpoint, json.dumps(params, sort_keys=True), token_id, requested_start_ts, requested_end_ts, fetched, status, digest, PARSER_VERSION, completeness_status, key, data_mode),
         )
     return {"cache_key": key, "response_hash": digest, "path": str(path), "fetched_ts": fetched}

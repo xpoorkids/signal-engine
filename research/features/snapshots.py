@@ -47,6 +47,7 @@ def build_fixture_snapshots(config: ResearchConfig, *, winners: int = 12, contro
                     now + offset,
                 )
                 features["fixture_only"] = True
+                features["data_mode"] = "fixture"
                 sid = uuid.uuid5(uuid.NAMESPACE_URL, f"{winner_id}:{offset}").hex
                 conn.execute(
                     """
@@ -56,6 +57,7 @@ def build_fixture_snapshots(config: ResearchConfig, *, winners: int = 12, contro
                     """,
                     (sid, winner_id, now + offset, f"t+{offset}s", json.dumps(features, sort_keys=True), json.dumps({"overall": "weak", "fixture_only": True}), "[]"),
                 )
+                conn.execute("UPDATE research_snapshots SET data_mode='fixture' WHERE snapshot_id=?", (sid,))
                 snapshot_count += 1
         for i in range(winners * controls_per_winner):
             control_id = f"fixture-control-{i:03d}"
@@ -68,6 +70,6 @@ def build_fixture_snapshots(config: ResearchConfig, *, winners: int = 12, contro
                 """,
                 (sid, control_id, now, json.dumps({"fixture_only": True, "missing_is_not_zero": True}, sort_keys=True), json.dumps({"overall": "weak", "fixture_only": True})),
             )
+            conn.execute("UPDATE research_snapshots SET data_mode='fixture' WHERE snapshot_id=?", (sid,))
             snapshot_count += 1
     return {"winners": winners, "controls": winners * controls_per_winner, "snapshots": snapshot_count, "quality": "fixture_only_not_threshold_tuning"}
-

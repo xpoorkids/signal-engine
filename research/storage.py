@@ -135,4 +135,32 @@ class ResearchStore:
                 CREATE INDEX IF NOT EXISTS idx_research_replays_token ON research_action_replays(token_id, profile);
                 """
             )
+            self._ensure_column(conn, "research_tokens", "data_mode", "TEXT NOT NULL DEFAULT 'source'")
+            self._ensure_column(conn, "research_raw_fetches", "data_mode", "TEXT NOT NULL DEFAULT 'source'")
+            self._ensure_column(conn, "research_jobs", "data_mode", "TEXT NOT NULL DEFAULT 'source'")
+            self._ensure_column(conn, "research_snapshots", "data_mode", "TEXT NOT NULL DEFAULT 'source'")
+            self._ensure_column(conn, "research_outcomes", "data_mode", "TEXT NOT NULL DEFAULT 'source'")
+            self._ensure_column(conn, "research_matches", "data_mode", "TEXT NOT NULL DEFAULT 'source'")
+            self._ensure_column(conn, "research_action_replays", "data_mode", "TEXT NOT NULL DEFAULT 'source'")
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS research_parquet_files (
+                    file_id TEXT PRIMARY KEY,
+                    table_name TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    row_count INTEGER NOT NULL,
+                    chain TEXT,
+                    token TEXT,
+                    data_mode TEXT NOT NULL,
+                    schema_json TEXT NOT NULL,
+                    created_ts INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_research_parquet_table ON research_parquet_files(table_name, data_mode);
+                """
+            )
 
+    @staticmethod
+    def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")

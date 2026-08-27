@@ -148,6 +148,7 @@ def run_fixture_action_replay(config: ResearchConfig, *, limit: int | None = Non
                             created,
                         ),
                     )
+                    conn.execute("UPDATE research_action_replays SET data_mode='fixture' WHERE replay_id=?", (replay_id,))
                     replay_count += 1
     return {
         "tokens": len(token_ids),

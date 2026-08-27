@@ -145,6 +145,7 @@ def build_fixture_controls(config: ResearchConfig, *, winners: int = 12, control
                         json.dumps(rejected[:20], sort_keys=True),
                     ),
                 )
+                conn.execute("UPDATE research_matches SET data_mode='fixture' WHERE match_id=?", (match_id,))
                 match_count += 1
     expected = winners * controls_per_winner
     return {
@@ -155,4 +156,3 @@ def build_fixture_controls(config: ResearchConfig, *, winners: int = 12, control
         "quality": "fixture_only_not_model_training",
         "complete": match_count >= expected,
     }
-

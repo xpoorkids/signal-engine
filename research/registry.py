@@ -87,8 +87,8 @@ def validate_operator_seeds(config: ResearchConfig) -> dict[str, Any]:
                 INSERT INTO research_tokens (
                     token_id, supplied_address, canonical_chain, canonical_address, symbol, name,
                     source_label, operator_outcome_label, verification_status, validation_status,
-                    creation_ts, launchpad, traded_status, metadata_json, created_ts, updated_ts
-                ) VALUES (?, ?, ?, ?, NULL, NULL, 'operator_supplied', 'recent_winner', 'pending', ?, NULL, NULL, NULL, ?, ?, ?)
+                    creation_ts, launchpad, traded_status, metadata_json, created_ts, updated_ts, data_mode
+                ) VALUES (?, ?, ?, ?, NULL, NULL, 'operator_supplied', 'recent_winner', 'pending', ?, NULL, NULL, NULL, ?, ?, ?, ?)
                 ON CONFLICT(canonical_chain, canonical_address) DO UPDATE SET
                     supplied_address=excluded.supplied_address,
                     source_label=excluded.source_label,
@@ -96,9 +96,10 @@ def validate_operator_seeds(config: ResearchConfig) -> dict[str, Any]:
                     verification_status='pending',
                     validation_status=excluded.validation_status,
                     metadata_json=excluded.metadata_json,
-                    updated_ts=excluded.updated_ts
+                    updated_ts=excluded.updated_ts,
+                    data_mode=excluded.data_mode
                 """,
-                (tid, address, chain, address, status, json.dumps(metadata, sort_keys=True), now, now),
+                (tid, address, chain, address, status, json.dumps(metadata, sort_keys=True), now, now, config.mode),
             )
             results.append(
                 {
@@ -137,4 +138,3 @@ def register_benchmark_names(config: ResearchConfig) -> dict[str, Any]:
         "identity_status": "candidate_names_only_not_token_identity",
         "names": names,
     }
-

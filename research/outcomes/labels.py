@@ -72,5 +72,5 @@ def build_fixture_outcomes(config: ResearchConfig) -> dict[str, Any]:
                 """,
                 (uuid.uuid5(uuid.NAMESPACE_URL, token_id).hex, token_id, json.dumps(labels, sort_keys=True), json.dumps(metrics, sort_keys=True), "fixture_only", OUTCOME_VERSION),
             )
+            conn.execute("UPDATE research_outcomes SET data_mode='fixture' WHERE outcome_id=?", (uuid.uuid5(uuid.NAMESPACE_URL, token_id).hex,))
     return {"outcomes": len(snapshots), "quality": "fixture_only_not_verified"}
-

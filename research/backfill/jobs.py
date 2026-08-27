@@ -31,6 +31,7 @@ def create_or_resume_job(
     stage: str,
     requested_start_ts: int | None = None,
     requested_end_ts: int | None = None,
+    data_mode: str = "source",
 ) -> str:
     store = ResearchStore(config)
     store.init_schema()
@@ -41,10 +42,10 @@ def create_or_resume_job(
             """
             INSERT OR IGNORE INTO research_jobs (
                 job_id, cohort, token_id, source, stage, requested_start_ts,
-                requested_end_ts, status, updated_ts
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                requested_end_ts, status, updated_ts, data_mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
             """,
-            (job_id, cohort, token_id, source, stage, requested_start_ts, requested_end_ts, now),
+            (job_id, cohort, token_id, source, stage, requested_start_ts, requested_end_ts, now, data_mode),
         )
     return job_id
 
@@ -91,7 +92,7 @@ def run_fixture_backfill(config: ResearchConfig, *, cohort: str = "operator_seed
     completed = partial = failed = unavailable = 0
     for row in rows:
         token_id = row["token_id"]
-        job_id = create_or_resume_job(config, cohort=cohort, token_id=token_id, source="capability_probe", stage="identity_backfill")
+        job_id = create_or_resume_job(config, cohort=cohort, token_id=token_id, source="capability_probe", stage="identity_backfill", data_mode="fixture")
         if dry_run:
             partial += 1
             continue
@@ -104,6 +105,7 @@ def run_fixture_backfill(config: ResearchConfig, *, cohort: str = "operator_seed
             status="source_unavailable",
             completeness_status="unavailable",
             token_id=token_id,
+            data_mode="fixture",
         )
         update_job(
             config,
@@ -120,4 +122,3 @@ def run_fixture_backfill(config: ResearchConfig, *, cohort: str = "operator_seed
 def bounded_retry_delays(max_attempts: int, *, base: float = 0.5, seed: int = 1337) -> list[float]:
     rng = random.Random(seed)
     return [min(60.0, base * (2 ** i)) + rng.uniform(0, base) for i in range(max(0, max_attempts))]
-
