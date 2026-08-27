@@ -61,10 +61,6 @@ def log_storage_configuration() -> None:
         logger.warning(
             "[startup] SIGNAL_ENGINE_DB_PATH is unset; engine may use a local SQLite file that is not shared with worker."
         )
-
-
-@app.on_event("startup")
-def initialize_x_identity_blocklist() -> None:
     try:
         result = XIdentityService().ensure_seeded_once()
         logger.warning("[startup] x_identity_seed status=%s", result.get("status"))
