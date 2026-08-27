@@ -7,6 +7,11 @@ PARSER_VERSION = "solana-fee-normalizer-v1"
 
 
 def normalize_fee(tx: dict[str, Any]) -> dict[str, Any]:
+    lamports = tx.get("total_network_fee_lamports")
+    try:
+        total_sol = None if lamports is None else float(lamports) / 1_000_000_000
+    except (TypeError, ValueError):
+        total_sol = None
     return {
         "row_id": f"fee:{tx.get('signature')}",
         "chain": "solana",
@@ -18,7 +23,8 @@ def normalize_fee(tx: dict[str, Any]) -> dict[str, Any]:
         "buyer": None,
         "seller": None,
         "signers": tx.get("signers"),
-        "total_network_fee_lamports": tx.get("total_network_fee_lamports"),
+        "total_network_fee_lamports": lamports,
+        "total_network_fee_sol": total_sol,
         "base_fee_lamports": tx.get("base_fee_lamports"),
         "priority_fee_lamports": tx.get("priority_fee_lamports"),
         "fee_split_status": tx.get("fee_split_status", "unavailable"),
@@ -36,4 +42,3 @@ def normalize_fee(tx: dict[str, Any]) -> dict[str, Any]:
         "completeness": "usable" if tx.get("total_network_fee_lamports") is not None else "partial",
         "warnings": [] if tx.get("total_network_fee_lamports") is not None else ["fee_unavailable"],
     }
-

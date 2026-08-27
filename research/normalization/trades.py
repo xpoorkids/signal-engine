@@ -16,10 +16,23 @@ def classify_trade(tx: dict[str, Any], *, token: str) -> dict[str, Any]:
     post = tx.get("post_token_balances") or []
     token_delta = _owner_delta(pre, post, token)
     quote_delta = _owner_delta(pre, post, WSOL_MINT)
+    stable_delta: dict[str, float] = {}
+    stable_mint = None
+    for mint in STABLE_MINTS:
+        candidate = _owner_delta(pre, post, mint)
+        if candidate:
+            stable_delta = candidate
+            stable_mint = mint
+            break
+    if not quote_delta and stable_delta:
+        quote_delta = stable_delta
     side = "unknown"
     reasons: list[str] = []
+    warnings: list[str] = []
     confidence = 0.2
     trader = None
+    pool = _detect_pool(tx)
+    venue = _detect_venue(tx)
     if token_delta:
         owner, delta = max(token_delta.items(), key=lambda item: abs(item[1]))
         trader = owner
@@ -38,23 +51,44 @@ def classify_trade(tx: dict[str, Any], *, token: str) -> dict[str, Any]:
         elif delta < 0:
             side = "transfer"
             reasons.append("token_decrease_without_quote_match")
+        if len([v for v in token_delta.values() if abs(v) > 0]) > 2:
+            side = "routing" if side in {"buy", "sell"} else side
+            confidence = min(confidence, 0.55)
+            warnings.append("multiple_token_balance_changes")
     else:
         reasons.append("no_token_balance_delta")
+        if _instruction_type_seen(tx, "mintTo"):
+            side = "mint"
+            confidence = 0.6
+            reasons.append("mint_instruction_seen")
+        elif _instruction_type_seen(tx, "burn"):
+            side = "burn"
+            confidence = 0.6
+            reasons.append("burn_instruction_seen")
+        elif _instruction_type_seen(tx, "initializeMint") or _instruction_type_seen(tx, "initializeMint2"):
+            side = "pool_initialization" if pool else "mint"
+            confidence = 0.5
+            reasons.append("initialization_instruction_seen")
+        elif _liquidity_log_seen(tx):
+            side = "liquidity_add"
+            confidence = 0.45
+            reasons.append("liquidity_log_seen")
     return {
-        "row_id": f"trade:{tx.get('signature')}:{token}:{side}",
+        "row_id": f"trade:{tx.get('signature')}:{token}:{side}:{trader or 'unknown'}",
         "chain": "solana",
         "token": token,
         "signature": tx.get("signature"),
         "slot": tx.get("slot"),
         "block_time": tx.get("block_time"),
         "token_mint": token,
-        "quote_mint": WSOL_MINT if quote_delta else None,
+        "quote_mint": stable_mint or (WSOL_MINT if quote_delta else None),
         "side": side,
         "trader": trader,
         "fee_payer": tx.get("fee_payer"),
         "signer": (tx.get("signers") or [None])[0],
-        "pool": None,
-        "dex_program": None,
+        "pool": pool,
+        "venue": venue,
+        "dex_program": venue,
         "token_amount": abs(token_delta.get(trader, 0.0)) if trader else None,
         "quote_amount": abs(quote_delta.get(trader, 0.0)) if trader else None,
         "sol_equivalent": abs(quote_delta.get(trader, 0.0)) if trader else None,
@@ -64,7 +98,7 @@ def classify_trade(tx: dict[str, Any], *, token: str) -> dict[str, Any]:
         "success": tx.get("success"),
         "classification_confidence": confidence,
         "classification_reasons": reasons,
-        "classification_warnings": [] if confidence >= 0.7 else ["ambiguous_trade_classification"],
+        "classification_warnings": warnings if warnings else ([] if confidence >= 0.7 else ["ambiguous_trade_classification"]),
         "parser_method": PARSER_VERSION,
         "source": tx.get("source"),
         "source_operation": tx.get("source_operation"),
@@ -77,7 +111,7 @@ def classify_trade(tx: dict[str, Any], *, token: str) -> dict[str, Any]:
         "response_hash": tx.get("response_hash"),
         "data_mode": tx.get("data_mode", "source"),
         "completeness": "usable" if side in {"buy", "sell"} else "partial",
-        "warnings": [] if side in {"buy", "sell"} else ["not_a_clear_swap"],
+        "warnings": warnings if warnings else ([] if side in {"buy", "sell"} else ["not_a_clear_swap"]),
     }
 
 
@@ -106,3 +140,41 @@ def _price(token_delta: float, quote_delta: float) -> float | None:
         return None
     return abs(quote_delta / token_delta)
 
+
+def _detect_pool(tx: dict[str, Any]) -> str | None:
+    keys = tx.get("account_keys") or []
+    programs = set(tx.get("program_ids") or [])
+    for key in keys:
+        text = str(key)
+        if "pool" in text.lower() or text in programs:
+            return text
+    return None
+
+
+def _detect_venue(tx: dict[str, Any]) -> str | None:
+    programs = set(tx.get("program_ids") or [])
+    known = {
+        "6EF8rrecthR5DkJdS7rxBejfsBjgY6T5QYq6LL9pump": "pump_fun",
+        "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA": "pumpswap",
+        "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4": "jupiter",
+        "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB": "jupiter",
+        "whirLbMiicVdio4qvUfM5KAg6CtQ5dqZFn1U74KjY8i": "orca",
+        "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo": "meteora",
+        "CPMMoo8L3F4NbTegBCKVNdioR1P6ZMXmG8t4P5zXQf6": "raydium_cpmm",
+    }
+    for program, venue in known.items():
+        if program in programs:
+            return venue
+    return None
+
+
+def _instruction_type_seen(tx: dict[str, Any], ix_type: str) -> bool:
+    haystack = []
+    for group in [tx.get("inner_instructions") or [], tx.get("log_messages") or []]:
+        haystack.append(str(group))
+    return ix_type.lower() in " ".join(haystack).lower()
+
+
+def _liquidity_log_seen(tx: dict[str, Any]) -> bool:
+    text = " ".join(str(item) for item in (tx.get("log_messages") or []))
+    return "liquidity" in text.lower() or "initialize" in text.lower()
