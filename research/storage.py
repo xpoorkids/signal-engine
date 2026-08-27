@@ -133,6 +133,33 @@ class ResearchStore:
                     created_ts INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_research_replays_token ON research_action_replays(token_id, profile);
+
+                CREATE TABLE IF NOT EXISTS research_x_identity_token_links (
+                    link_id TEXT PRIMARY KEY,
+                    token_id TEXT NOT NULL,
+                    chain TEXT NOT NULL,
+                    contract_address TEXT NOT NULL,
+                    identity_id TEXT,
+                    stable_x_user_id TEXT,
+                    linked_handle TEXT,
+                    normalized_handle TEXT,
+                    linked_handle_at_launch TEXT,
+                    link_type TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    evidence_ts INTEGER NOT NULL,
+                    launch_ts INTEGER,
+                    creator_wallet TEXT,
+                    funding_cluster TEXT,
+                    identity_confidence TEXT NOT NULL,
+                    point_in_time_alias_json TEXT NOT NULL,
+                    outcome_summary_json TEXT NOT NULL,
+                    action_replay_summary_json TEXT NOT NULL,
+                    data_mode TEXT NOT NULL DEFAULT 'source',
+                    created_ts INTEGER NOT NULL,
+                    updated_ts INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_research_x_identity_links_token ON research_x_identity_token_links(token_id, evidence_ts);
+                CREATE INDEX IF NOT EXISTS idx_research_x_identity_links_identity ON research_x_identity_token_links(identity_id, evidence_ts);
                 """
             )
             self._ensure_column(conn, "research_tokens", "data_mode", "TEXT NOT NULL DEFAULT 'source'")

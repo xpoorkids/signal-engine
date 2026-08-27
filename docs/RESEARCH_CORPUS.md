@@ -25,4 +25,16 @@ Large raw responses, research databases, Parquet exports, and cache files are gi
 ## Current Pilot
 
 The first implementation includes an offline fixture pilot so the pipeline can be tested without paid historical APIs. Fixture outputs are labeled `fixture_only` and must not be used for threshold tuning or profitability claims.
+# X Identity Lineage Research
+
+The research corpus stores point-in-time X identity token links in
+`research_x_identity_token_links`. Records include the token contract, linked
+handle at launch, stable X ID when available, creator/funding fields when known,
+outcome summary, action-replay summary, source, evidence timestamp, and data
+mode.
+
+Historical replay must use the alias evidence available at or before the replay
+timestamp. Current X profile data cannot be backfilled into earlier snapshots
+unless the corpus has direct point-in-time evidence or a verified rename-history
+record with an evidence timestamp.
 

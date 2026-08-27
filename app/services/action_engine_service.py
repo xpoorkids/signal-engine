@@ -12,6 +12,7 @@ from typing import Any
 from app.models.position import EXIT_STYLE_CATALYST_RUNNER, RISK_PROFILE_AGGRESSIVE
 from app.services.db_service import connect_sqlite, resolve_engine_db_path
 from app.services.manual_position_service import ManualPositionService
+from app.services.x_identity_service import XIdentityService
 
 
 FEATURE_VERSION = "action-engine-features-v1"
@@ -32,6 +33,16 @@ HARD_SAFETY_BLOCKERS = {
     "invalid_execution_data",
     "impossible_price_impact",
     "hard_contract_safety_failure",
+    "operator_blocked_x_identity",
+    "blocked_x_rename_lineage",
+}
+
+X_IDENTITY_BLOCKERS = {
+    "operator_blocked_x_identity",
+    "blocked_x_rename_lineage",
+    "blocked_x_handle_match_unresolved",
+    "stable_x_identity_unresolved",
+    "high_risk_x_dev_identity",
 }
 
 ACTION_LABELS = [
@@ -214,9 +225,10 @@ def estimate_entry_features(market: dict[str, Any] | None = None, *, assessment:
 
 
 class ActionEngineService:
-    def __init__(self, db_path: Path | str | None = None, *, positions: ManualPositionService | None = None):
+    def __init__(self, db_path: Path | str | None = None, *, positions: ManualPositionService | None = None, x_identities: XIdentityService | None = None):
         self.db_path = Path(db_path) if db_path is not None else resolve_engine_db_path()
         self.positions = positions or ManualPositionService(self.db_path)
+        self.x_identities = x_identities or XIdentityService(self.db_path)
         self.policy = AggressiveRunnerPolicy(risk_profile=default_risk_profile(), exit_style=default_exit_style())
 
     def _connect(self) -> sqlite3.Connection:
@@ -224,6 +236,8 @@ class ActionEngineService:
 
     def init_schema(self) -> None:
         self.positions.init_schema()
+        self.x_identities.init_schema()
+        self.x_identities.initialize_seed_blocklist()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -275,6 +289,7 @@ class ActionEngineService:
             catalyst=catalyst or self.positions.get_latest_catalyst_for_token(token),
             intended_size_usd=intended_size_usd,
         )
+        self._apply_x_identity_pre_entry_guard(rec, market=market or {}, assessment=assessment or {}, catalyst=catalyst)
         if persist:
             self.persist_recommendation(rec)
         return rec
@@ -294,9 +309,86 @@ class ActionEngineService:
             raise KeyError(position_id)
         catalyst = catalyst or (self.positions.get_catalyst(position["catalyst_id"]) if position.get("catalyst_id") else self.positions.get_latest_catalyst_for_token(position["token"]))
         rec = self._position_recommendation(position, market=market or {}, catalyst=catalyst, intended_size_usd=intended_size_usd)
+        self._apply_x_identity_position_guard(rec, market=market or {}, catalyst=catalyst)
         if persist:
             self.persist_recommendation(rec)
         return rec
+
+    def _x_identity_links(self, *, market: dict[str, Any] | None = None, assessment: dict[str, Any] | None = None, catalyst: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        links: list[dict[str, Any]] = []
+        for source in (market, assessment, catalyst):
+            if not isinstance(source, dict):
+                continue
+            raw = source.get("x_identity_links") or source.get("x_links") or source.get("x_profiles")
+            if isinstance(raw, list):
+                links.extend(item for item in raw if isinstance(item, dict))
+            social = source.get("x_profile") or source.get("twitter_profile") or source.get("x_url") or source.get("twitter_url")
+            if social:
+                links.append({"profile_url": social, "link_type": source.get("x_link_type") or "metadata_social", "source": "action_context"})
+            handle = source.get("x_handle") or source.get("twitter_handle")
+            if handle:
+                links.append({"handle": handle, "link_type": source.get("x_link_type") or "metadata_social", "source": "action_context"})
+        return links
+
+    def _apply_x_identity_pre_entry_guard(self, rec: dict[str, Any], *, market: dict[str, Any], assessment: dict[str, Any], catalyst: dict[str, Any] | None) -> None:
+        decision = self.x_identities.evaluate_token(rec["token"], links=self._x_identity_links(market=market, assessment=assessment, catalyst=catalyst))
+        payload = decision.to_dict()
+        rec["x_identity_risk"] = payload
+        if decision.warnings:
+            rec.setdefault("warnings", []).extend(warning for warning in decision.warnings if warning not in rec.setdefault("warnings", []))
+        if decision.review_flags:
+            rec.setdefault("warnings", []).extend(flag for flag in decision.review_flags if flag not in rec.setdefault("warnings", []))
+        if not decision.action:
+            return
+        rec["blockers"] = list(dict.fromkeys([*rec.get("blockers", []), *decision.blockers]))
+        rec["positive_reasons"] = []
+        rec["recommended_initial_size_pct"] = 0.0
+        rec["display_action"] = decision.action
+        rec["action"] = decision.action
+        rec["x_identity_block_applied"] = True
+        if decision.action == "HARD FAIL":
+            rec["display_action"] = "HARD FAIL"
+            rec["reason"] = decision.reason
+            rec["why_now"] = [
+                f"{decision.reason}: {decision.current_handle or 'X identity'} matches an operator-blocked developer identity lineage",
+                "positive flow, catalyst, SOL fees, KOL support, wallet score, and momentum were ignored because an operator identity block is active",
+            ]
+        elif decision.action == "AVOID":
+            rec["display_action"] = "AVOID"
+            rec["reason"] = decision.reason
+            rec["why_now"] = [
+                f"{decision.reason}: exact X handle match requires manual identity review",
+            ]
+        rec["why_not_more"] = ["operator X identity risk blocks positive buy recommendations"]
+        rec["what_changes_action"] = ["manual operator review clears the unresolved identity match", "operator disables or removes the block"]
+
+    def _apply_x_identity_position_guard(self, rec: dict[str, Any], *, market: dict[str, Any], catalyst: dict[str, Any] | None) -> None:
+        decision = self.x_identities.evaluate_token(rec["token"], links=self._x_identity_links(market=market, catalyst=catalyst))
+        payload = decision.to_dict()
+        rec["x_identity_risk"] = payload
+        if decision.warnings:
+            rec.setdefault("warnings", []).extend(warning for warning in decision.warnings if warning not in rec.setdefault("warnings", []))
+        if decision.review_flags:
+            rec.setdefault("warnings", []).extend(flag for flag in decision.review_flags if flag not in rec.setdefault("warnings", []))
+        if not decision.action:
+            return
+        rec["blockers"] = list(dict.fromkeys([*rec.get("blockers", []), *decision.blockers]))
+        if decision.action == "HARD FAIL":
+            rec["action"] = "SELL NOW"
+            rec["display_action"] = "SELL NOW"
+            rec["reason"] = decision.reason
+            rec["recommended_sell_pct"] = 100.0
+            rec["recommended_sell_tokens"] = rec.get("remaining_tokens") or 0.0
+            rec["why_now"] = [f"{decision.reason}: operator-blocked X developer identity is linked to this token"]
+            rec["why_not_more"] = ["operator identity block overrides catalyst-runner and aggressive risk preferences"]
+            rec["x_identity_block_applied"] = True
+        elif decision.action == "AVOID" and rec.get("action") == "ADD SMALL ON CONFIRMATION":
+            rec["action"] = "HOLD"
+            rec["display_action"] = "HOLD"
+            rec["recommended_sell_pct"] = 0.0
+            rec["recommended_sell_tokens"] = 0.0
+            rec["why_now"] = ["unresolved exact X identity alias match blocks adding until manual review"]
+            rec["why_not_more"] = ["operator X identity risk blocks positive add recommendations"]
 
     def persist_recommendation(self, recommendation: dict[str, Any]) -> str:
         self.init_schema()

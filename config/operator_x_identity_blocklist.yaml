@@ -1,0 +1,44 @@
+{
+  "version": "operator-x-identity-blocklist-v1",
+  "identities": [
+    {
+      "identity_id": "operator_blocked_repeated_coin_rebrands_1",
+      "operator_label": "operator_blocked_repeated_coin_rebrands_1",
+      "current_handle": "@Datboicoincto",
+      "stable_x_user_id": null,
+      "identity_confidence": "operator_supplied_alias_lineage",
+      "operator_block_status": "active",
+      "operator_block_reason": "Operator blocked repeated coin/project rebrand lineage.",
+      "notes": "Operator-supplied X account lineage. Stable numeric X ID unresolved until API or manual evidence is added.",
+      "historical_aliases": [
+        "@Trotcatcoin",
+        "@GunnersArtcoin",
+        "@Meowcoinmovie",
+        "@Toshbasecoin",
+        "@shitcoin30_",
+        "@Lennyctocoin",
+        "@ThomaDeseur",
+        "@Cheemscoincto",
+        "@PumpStarss",
+        "@Rigbzsol"
+      ]
+    },
+    {
+      "identity_id": "operator_blocked_repeated_coin_rebrands_2",
+      "operator_label": "operator_blocked_repeated_coin_rebrands_2",
+      "current_handle": "@imthedevvor",
+      "stable_x_user_id": null,
+      "identity_confidence": "operator_supplied_alias_lineage",
+      "operator_block_status": "active",
+      "operator_block_reason": "Operator blocked repeated coin/project rebrand lineage.",
+      "notes": "Operator-supplied X account lineage. Stable numeric X ID unresolved until API or manual evidence is added.",
+      "historical_aliases": [
+        "@dogerepublic0",
+        "@glone_sol",
+        "@jalen352562",
+        "@glarp_sol",
+        "@frank2341235"
+      ]
+    }
+  ]
+}

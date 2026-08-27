@@ -26,6 +26,7 @@ from worker.events import Event
 from worker.metadata import fetch_token_metadata
 from worker.x_signal import fetch_x_signal
 from app.services.action_engine_service import ActionEngineService, action_engine_enabled
+from app.services.x_identity_service import XIdentityService
 
 
 _CA_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,48}$")
@@ -374,6 +375,48 @@ def _manual_buy_assessment(
     }
 
 
+def _review_x_identity_links(result: dict[str, Any]) -> list[dict[str, Any]]:
+    links: list[dict[str, Any]] = []
+    link_payload = result.get("links") if isinstance(result.get("links"), dict) else {}
+    for key, link_type in (
+        ("twitter_url", "DexScreener_social"),
+        ("website_url", "website_social"),
+    ):
+        value = link_payload.get(key)
+        if value:
+            links.append({"profile_url": value, "link_type": link_type, "source": "review_service"})
+    metadata_links = result.get("metadata_socials") if isinstance(result.get("metadata_socials"), list) else []
+    for item in metadata_links:
+        if isinstance(item, dict):
+            links.append({**item, "link_type": item.get("link_type") or "metadata_social", "source": item.get("source") or "review_service"})
+    return links
+
+
+def _apply_review_x_identity_guard(token: str, result: dict[str, Any]) -> None:
+    links = _review_x_identity_links(result)
+    result["x_identity_links"] = links
+    x_service = XIdentityService()
+    x_service.initialize_seed_blocklist()
+    decision = x_service.evaluate_token(token, links)
+    result["x_identity_risk"] = decision.to_dict()
+    manual = result.get("manual_buy_assessment") if isinstance(result.get("manual_buy_assessment"), dict) else {}
+    if decision.warnings:
+        manual.setdefault("warnings", [])
+        manual["warnings"] = list(dict.fromkeys([*manual["warnings"], *decision.warnings]))
+    if decision.review_flags:
+        manual.setdefault("warnings", [])
+        manual["warnings"] = list(dict.fromkeys([*manual["warnings"], *decision.review_flags]))
+    if decision.action == "HARD FAIL":
+        manual["action"] = "HARD_FAIL"
+        manual["blockers"] = list(dict.fromkeys([*manual.get("blockers", []), *decision.blockers]))
+        manual["explanation"] = "Operator-blocked X developer identity hard-fails this manual review. Positive flow and catalyst signals are ignored while the block is active."
+    elif decision.action == "AVOID":
+        manual["action"] = "AVOID"
+        manual["blockers"] = list(dict.fromkeys([*manual.get("blockers", []), *decision.blockers]))
+        manual["explanation"] = "Possible blocked X developer identity requires manual identity review before any positive buy recommendation."
+    result["manual_buy_assessment"] = manual
+
+
 async def review_contract(token: str) -> dict[str, Any]:
     token = (token or "").strip()
     if not _CA_RE.match(token):
@@ -534,6 +577,7 @@ async def review_contract(token: str) -> dict[str, Any]:
         "discord_preview": format_discord(event),
         "metric_states": event.extra.get("metric_states"),
     }
+    _apply_review_x_identity_guard(token, result)
     if action_engine_enabled():
         result["action_recommendation"] = ActionEngineService().recommend_for_token(
             token,

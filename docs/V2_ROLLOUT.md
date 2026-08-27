@@ -41,3 +41,18 @@ This rollout does not deploy or merge by itself.
 # Offline Research Corpus
 
 `signal-engine-v2-research-corpus` is a child branch for offline historical research. It must not deploy, merge to `main`, alter live thresholds, or enable live execution. Outputs are used to audit and validate current V2 metrics and action recommendations before any later policy proposal.
+# Operator X Identity Blocklist
+
+The operator X blocklist is safe to roll out as manual decision support. It does
+not execute trades, alter execution mode, loosen gates, or change scoring
+thresholds.
+
+Before using it operationally:
+
+- seed `config/operator_x_identity_blocklist.yaml` through
+  `POST /x-identities/seed`;
+- add stable numeric X IDs when reliable evidence is available;
+- link token socials only when the association type is authoritative;
+- treat unresolved exact alias matches as manual-review `AVOID`;
+- keep repost-only and mention-only exposure out of deterministic hard-fail
+  routing.

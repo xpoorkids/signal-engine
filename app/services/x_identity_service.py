@@ -1,0 +1,652 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+from app.services.db_service import connect_sqlite, resolve_engine_db_path
+
+
+SEED_PATH = Path("config/operator_x_identity_blocklist.yaml")
+PARSER_VERSION = "x-identity-risk-v1"
+
+AUTHORITATIVE_LINK_TYPES = {
+    "official_token_social",
+    "developer_profile",
+    "creator_profile",
+    "CTO_profile",
+    "metadata_social",
+    "DexScreener_social",
+    "launchpad_social",
+    "website_social",
+    "Telegram_shared_profile",
+    "profile_promoted_token",
+    "operator_supplied",
+}
+EXPOSURE_ONLY_LINK_TYPES = {"repost_only", "mention_only"}
+VERIFIED_LINEAGE_METHODS = {
+    "stable_id_verified",
+    "verified_rename_history",
+    "operator_verified_alias_lineage",
+    "manual_verified_alias_lineage",
+}
+
+
+def _now() -> int:
+    return int(time.time())
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _load_json(value: str | None, default: Any) -> Any:
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except Exception:
+        return default
+
+
+def normalize_x_handle(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("http://") or raw.startswith("https://") or "x.com/" in raw.lower() or "twitter.com/" in raw.lower():
+        raw = normalize_x_profile_url(raw) or raw
+    raw = raw.strip().lstrip("@").split("/")[0].split("?")[0].strip()
+    if not raw:
+        return None
+    return raw.lower()
+
+
+def display_handle(value: str | None) -> str | None:
+    normalized = normalize_x_handle(value)
+    return f"@{normalized}" if normalized else None
+
+
+def normalize_x_profile_url(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if not raw.startswith(("http://", "https://")):
+        return normalize_x_handle(raw)
+    parsed = urlparse(raw)
+    host = parsed.netloc.lower().removeprefix("www.")
+    if host not in {"x.com", "twitter.com"}:
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if not parts:
+        return None
+    if parts[0].lower() in {"i", "intent", "share", "home", "search"}:
+        return None
+    return normalize_x_handle(parts[0])
+
+
+@dataclass(frozen=True)
+class XIdentityDecision:
+    action: str | None
+    reason: str | None
+    blockers: list[str]
+    warnings: list[str]
+    review_flags: list[str]
+    matched_identity_id: str | None = None
+    matched_lineage: str | None = None
+    current_handle: str | None = None
+    stable_x_user_id: str | None = None
+    match_method: str | None = None
+    link_type: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "reason": self.reason,
+            "blockers": self.blockers,
+            "warnings": self.warnings,
+            "review_flags": self.review_flags,
+            "matched_identity_id": self.matched_identity_id,
+            "matched_lineage": self.matched_lineage,
+            "current_x_handle": self.current_handle,
+            "stable_x_user_id": self.stable_x_user_id,
+            "match_method": self.match_method,
+            "link_type": self.link_type,
+            "parser_version": PARSER_VERSION,
+        }
+
+
+class XIdentityService:
+    def __init__(self, db_path: Path | str | None = None, *, seed_path: Path | str | None = None):
+        self.db_path = Path(db_path) if db_path is not None else resolve_engine_db_path()
+        self.seed_path = Path(seed_path) if seed_path is not None else SEED_PATH
+
+    def _connect(self):
+        return connect_sqlite(self.db_path)
+
+    def init_schema(self) -> None:
+        with self._connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS x_identities (
+                    identity_id TEXT PRIMARY KEY,
+                    stable_x_user_id TEXT,
+                    current_handle TEXT,
+                    normalized_current_handle TEXT,
+                    identity_confidence TEXT NOT NULL,
+                    notes TEXT,
+                    created_ts INTEGER NOT NULL,
+                    updated_ts INTEGER NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_x_identities_stable_id ON x_identities(stable_x_user_id) WHERE stable_x_user_id IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_x_identities_handle ON x_identities(normalized_current_handle);
+
+                CREATE TABLE IF NOT EXISTS x_identity_aliases (
+                    alias_id TEXT PRIMARY KEY,
+                    identity_id TEXT NOT NULL,
+                    handle TEXT NOT NULL,
+                    normalized_handle TEXT NOT NULL,
+                    first_observed_ts INTEGER,
+                    last_observed_ts INTEGER,
+                    source TEXT NOT NULL,
+                    evidence_ts INTEGER,
+                    evidence_json TEXT NOT NULL,
+                    created_ts INTEGER NOT NULL,
+                    updated_ts INTEGER NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_x_identity_alias_unique ON x_identity_aliases(identity_id, normalized_handle);
+                CREATE INDEX IF NOT EXISTS idx_x_identity_alias_handle ON x_identity_aliases(normalized_handle);
+
+                CREATE TABLE IF NOT EXISTS x_identity_blocks (
+                    block_id TEXT PRIMARY KEY,
+                    identity_id TEXT NOT NULL UNIQUE,
+                    operator_block_status TEXT NOT NULL,
+                    operator_block_reason TEXT NOT NULL,
+                    disabled_ts INTEGER,
+                    restored_ts INTEGER,
+                    notes TEXT,
+                    created_ts INTEGER NOT NULL,
+                    updated_ts INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_x_identity_blocks_status ON x_identity_blocks(operator_block_status);
+
+                CREATE TABLE IF NOT EXISTS x_identity_token_links (
+                    link_id TEXT PRIMARY KEY,
+                    token TEXT NOT NULL,
+                    identity_id TEXT,
+                    stable_x_user_id TEXT,
+                    handle TEXT,
+                    normalized_handle TEXT,
+                    profile_url TEXT,
+                    link_type TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    evidence_ts INTEGER,
+                    identity_confidence TEXT NOT NULL,
+                    match_method TEXT,
+                    notes TEXT,
+                    metadata_json TEXT NOT NULL,
+                    created_ts INTEGER NOT NULL,
+                    updated_ts INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_x_identity_token_links_token ON x_identity_token_links(token);
+                CREATE INDEX IF NOT EXISTS idx_x_identity_token_links_identity ON x_identity_token_links(identity_id);
+                CREATE INDEX IF NOT EXISTS idx_x_identity_token_links_handle ON x_identity_token_links(normalized_handle);
+
+                CREATE TABLE IF NOT EXISTS x_identity_observations (
+                    observation_id TEXT PRIMARY KEY,
+                    identity_id TEXT,
+                    token TEXT,
+                    evidence_type TEXT NOT NULL,
+                    observed_current_handle TEXT,
+                    observed_aliases_json TEXT NOT NULL,
+                    observed_rename_intervals_json TEXT NOT NULL,
+                    evidence_ts INTEGER,
+                    source TEXT NOT NULL,
+                    operator_notes TEXT,
+                    stable_x_user_id_status TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    created_ts INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_x_identity_observations_identity ON x_identity_observations(identity_id, evidence_ts);
+                """
+            )
+
+    def initialize_seed_blocklist(self) -> dict[str, Any]:
+        self.init_schema()
+        if not self.seed_path.exists():
+            return {"seed_path": str(self.seed_path), "identities": 0, "status": "missing_seed"}
+        payload = json.loads(self.seed_path.read_text(encoding="utf-8"))
+        count = 0
+        for item in payload.get("identities", []):
+            identity = self.add_blocked_identity(
+                identity_id=item["identity_id"],
+                current_handle=item.get("current_handle"),
+                stable_x_user_id=item.get("stable_x_user_id"),
+                identity_confidence=item.get("identity_confidence") or "operator_supplied",
+                operator_block_reason=item.get("operator_block_reason") or item.get("operator_label") or "operator_blocked",
+                notes=item.get("notes"),
+            )
+            for alias in item.get("historical_aliases", []):
+                self.add_historical_alias(
+                    identity["identity_id"],
+                    alias,
+                    source="operator_seed",
+                    evidence_ts=_now(),
+                    evidence={"seed_version": payload.get("version"), "operator_label": item.get("operator_label")},
+                )
+            count += 1
+        return {"seed_path": str(self.seed_path), "identities": count, "status": "initialized"}
+
+    def add_blocked_identity(
+        self,
+        *,
+        identity_id: str | None = None,
+        current_handle: str | None = None,
+        stable_x_user_id: str | None = None,
+        identity_confidence: str = "operator_supplied",
+        operator_block_reason: str = "operator_blocked",
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        self.init_schema()
+        now = _now()
+        normalized = normalize_x_handle(current_handle)
+        identity_id = identity_id or self._identity_id(stable_x_user_id, normalized)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO x_identities (
+                    identity_id, stable_x_user_id, current_handle, normalized_current_handle,
+                    identity_confidence, notes, created_ts, updated_ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(identity_id) DO UPDATE SET
+                    stable_x_user_id=COALESCE(excluded.stable_x_user_id, x_identities.stable_x_user_id),
+                    current_handle=COALESCE(excluded.current_handle, x_identities.current_handle),
+                    normalized_current_handle=COALESCE(excluded.normalized_current_handle, x_identities.normalized_current_handle),
+                    identity_confidence=excluded.identity_confidence,
+                    notes=COALESCE(excluded.notes, x_identities.notes),
+                    updated_ts=excluded.updated_ts
+                """,
+                (identity_id, stable_x_user_id, display_handle(current_handle), normalized, identity_confidence, notes, now, now),
+            )
+            block_id = f"block:{identity_id}"
+            conn.execute(
+                """
+                INSERT INTO x_identity_blocks (
+                    block_id, identity_id, operator_block_status, operator_block_reason,
+                    disabled_ts, restored_ts, notes, created_ts, updated_ts
+                ) VALUES (?, ?, 'active', ?, NULL, ?, ?, ?, ?)
+                ON CONFLICT(identity_id) DO UPDATE SET
+                    operator_block_status='active',
+                    operator_block_reason=excluded.operator_block_reason,
+                    restored_ts=excluded.restored_ts,
+                    notes=COALESCE(excluded.notes, x_identity_blocks.notes),
+                    updated_ts=excluded.updated_ts
+                """,
+                (block_id, identity_id, operator_block_reason, now, notes, now, now),
+            )
+            if normalized:
+                self._upsert_alias_in_tx(conn, identity_id, display_handle(current_handle) or f"@{normalized}", normalized, "current_handle", now, {"kind": "current_handle"})
+            conn.commit()
+        return self.get_identity(identity_id) or {"identity_id": identity_id}
+
+    def add_current_handle(self, identity_id: str, handle: str, *, source: str = "operator_manual", evidence_ts: int | None = None) -> dict[str, Any]:
+        self.init_schema()
+        normalized = normalize_x_handle(handle)
+        if not normalized:
+            raise ValueError("valid_x_handle_required")
+        now = _now()
+        with self._connect() as conn:
+            cur = conn.execute("UPDATE x_identities SET current_handle=?, normalized_current_handle=?, updated_ts=? WHERE identity_id=?", (f"@{normalized}", normalized, now, identity_id))
+            if cur.rowcount == 0:
+                raise KeyError(identity_id)
+            self._upsert_alias_in_tx(conn, identity_id, f"@{normalized}", normalized, source, evidence_ts or now, {"kind": "current_handle"})
+        return self.get_identity(identity_id) or {"identity_id": identity_id}
+
+    def add_stable_x_user_id(self, identity_id: str, stable_x_user_id: str) -> dict[str, Any]:
+        self.init_schema()
+        stable = str(stable_x_user_id or "").strip()
+        if not stable:
+            raise ValueError("stable_x_user_id_required")
+        with self._connect() as conn:
+            cur = conn.execute("UPDATE x_identities SET stable_x_user_id=?, identity_confidence='stable_id_verified', updated_ts=? WHERE identity_id=?", (stable, _now(), identity_id))
+            if cur.rowcount == 0:
+                raise KeyError(identity_id)
+        return self.get_identity(identity_id) or {"identity_id": identity_id}
+
+    def add_historical_alias(
+        self,
+        identity_id: str,
+        handle: str,
+        *,
+        first_observed_ts: int | None = None,
+        last_observed_ts: int | None = None,
+        source: str = "operator_manual",
+        evidence_ts: int | None = None,
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.init_schema()
+        normalized = normalize_x_handle(handle)
+        if not normalized:
+            raise ValueError("valid_x_handle_required")
+        now = _now()
+        with self._connect() as conn:
+            exists = conn.execute("SELECT 1 FROM x_identities WHERE identity_id=?", (identity_id,)).fetchone()
+            if not exists:
+                raise KeyError(identity_id)
+            self._upsert_alias_in_tx(
+                conn,
+                identity_id,
+                f"@{normalized}",
+                normalized,
+                source,
+                evidence_ts or now,
+                evidence or {},
+                first_observed_ts=first_observed_ts,
+                last_observed_ts=last_observed_ts,
+            )
+        return self.get_identity(identity_id) or {"identity_id": identity_id}
+
+    def disable_block(self, identity_id: str, *, notes: str | None = None) -> dict[str, Any]:
+        return self._set_block(identity_id, "disabled", notes=notes)
+
+    def restore_block(self, identity_id: str, *, notes: str | None = None) -> dict[str, Any]:
+        return self._set_block(identity_id, "active", notes=notes)
+
+    def list_blocked_identities(self, *, include_disabled: bool = False) -> list[dict[str, Any]]:
+        self.init_schema()
+        where = "" if include_disabled else "WHERE b.operator_block_status='active'"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT i.*, b.operator_block_status, b.operator_block_reason
+                FROM x_identities i JOIN x_identity_blocks b ON b.identity_id=i.identity_id
+                {where}
+                ORDER BY i.identity_id
+                """
+            ).fetchall()
+        return [self._row_to_identity(row) for row in rows]
+
+    def get_identity(self, identity_id: str) -> dict[str, Any] | None:
+        self.init_schema()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT i.*, b.operator_block_status, b.operator_block_reason
+                FROM x_identities i LEFT JOIN x_identity_blocks b ON b.identity_id=i.identity_id
+                WHERE i.identity_id=?
+                """,
+                (identity_id,),
+            ).fetchone()
+        return self._row_to_identity(row) if row else None
+
+    def link_token_identity(self, token: str, *, link_type: str, source: str, **kwargs: Any) -> dict[str, Any]:
+        self.init_schema()
+        token = str(token or "").strip()
+        if not token:
+            raise ValueError("token_required")
+        handle = kwargs.get("handle") or kwargs.get("current_handle") or kwargs.get("x_handle")
+        profile_url = kwargs.get("profile_url")
+        normalized = normalize_x_handle(handle) or normalize_x_profile_url(profile_url)
+        stable = str(kwargs.get("stable_x_user_id") or "").strip() or None
+        identity_id = kwargs.get("identity_id")
+        if not identity_id:
+            identity_id = self._resolve_identity_id(stable, normalized)
+        now = _now()
+        link_id = kwargs.get("link_id") or self._link_id(token, link_type, stable, normalized, kwargs.get("evidence_ts"))
+        metadata = dict(kwargs.get("metadata") or {})
+        metadata["secrets_redacted"] = True
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO x_identity_token_links (
+                    link_id, token, identity_id, stable_x_user_id, handle, normalized_handle,
+                    profile_url, link_type, source, evidence_ts, identity_confidence, match_method,
+                    notes, metadata_json, created_ts, updated_ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    link_id,
+                    token,
+                    identity_id,
+                    stable,
+                    f"@{normalized}" if normalized else None,
+                    normalized,
+                    self._safe_profile_url(profile_url),
+                    link_type,
+                    source,
+                    kwargs.get("evidence_ts"),
+                    kwargs.get("identity_confidence") or "unresolved",
+                    kwargs.get("match_method"),
+                    kwargs.get("notes"),
+                    _json(metadata),
+                    now,
+                    now,
+                ),
+            )
+        return self.get_token_link(link_id) or {"link_id": link_id}
+
+    def get_token_link(self, link_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM x_identity_token_links WHERE link_id=?", (link_id,)).fetchone()
+        return self._row_to_link(row) if row else None
+
+    def list_token_links_for_identity(self, identity_id: str) -> list[dict[str, Any]]:
+        self.init_schema()
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM x_identity_token_links WHERE identity_id=? ORDER BY COALESCE(evidence_ts, created_ts)", (identity_id,)).fetchall()
+        return [self._row_to_link(row) for row in rows]
+
+    def add_observation(self, *, evidence_type: str, source: str, identity_id: str | None = None, token: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        self.init_schema()
+        now = _now()
+        observation_id = kwargs.get("observation_id") or uuid.uuid4().hex
+        observed_aliases = [display_handle(item) for item in kwargs.get("observed_aliases", []) if normalize_x_handle(item)]
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO x_identity_observations (
+                    observation_id, identity_id, token, evidence_type, observed_current_handle,
+                    observed_aliases_json, observed_rename_intervals_json, evidence_ts, source,
+                    operator_notes, stable_x_user_id_status, metadata_json, created_ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    observation_id,
+                    identity_id,
+                    token,
+                    evidence_type,
+                    display_handle(kwargs.get("observed_current_handle")),
+                    _json(observed_aliases),
+                    _json(kwargs.get("observed_rename_intervals") or []),
+                    kwargs.get("evidence_ts") or now,
+                    source,
+                    kwargs.get("operator_notes"),
+                    kwargs.get("stable_x_user_id_status") or "unresolved",
+                    _json(kwargs.get("metadata") or {}),
+                    now,
+                ),
+            )
+        return {"observation_id": observation_id, "identity_id": identity_id, "evidence_type": evidence_type, "stable_x_user_id_status": kwargs.get("stable_x_user_id_status") or "unresolved"}
+
+    def evaluate_token(self, token: str, links: list[dict[str, Any]] | None = None) -> XIdentityDecision:
+        self.init_schema()
+        candidate_links = list(links or [])
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM x_identity_token_links WHERE token=?", (token,)).fetchall()
+        candidate_links.extend(self._row_to_link(row) for row in rows)
+        if not candidate_links:
+            return XIdentityDecision(None, None, [], [], [])
+        best_review: XIdentityDecision | None = None
+        for link in candidate_links:
+            link_type = str(link.get("link_type") or "unknown")
+            stable = str(link.get("stable_x_user_id") or "").strip() or None
+            normalized = normalize_x_handle(link.get("handle") or link.get("current_handle") or link.get("x_handle")) or normalize_x_profile_url(link.get("profile_url"))
+            match_method = str(link.get("match_method") or "").strip()
+            if link.get("fuzzy_match") or link.get("display_name_match") or link.get("avatar_match"):
+                best_review = best_review or XIdentityDecision(None, None, [], [], ["X IDENTITY REVIEW REQUIRED"], current_handle=display_handle(normalized), stable_x_user_id=stable, match_method="weak_similarity", link_type=link_type)
+                continue
+            if link_type in EXPOSURE_ONLY_LINK_TYPES:
+                match = self._find_active_block(stable=stable, normalized_handle=normalized)
+                if match:
+                    best_review = best_review or XIdentityDecision(None, "BLOCKED IDENTITY PROMOTION EXPOSURE", [], ["BLOCKED IDENTITY PROMOTION EXPOSURE"], ["X IDENTITY REVIEW REQUIRED"], match["identity_id"], match["operator_block_reason"], display_handle(normalized), stable, "promotion_exposure", link_type)
+                continue
+            if link_type not in AUTHORITATIVE_LINK_TYPES:
+                continue
+            match = self._find_active_block(stable=stable, normalized_handle=normalized)
+            if not match:
+                continue
+            if stable and match.get("stable_x_user_id") and stable != match.get("stable_x_user_id"):
+                best_review = best_review or XIdentityDecision(None, None, [], [], ["X IDENTITY REVIEW REQUIRED"], match["identity_id"], match["operator_block_reason"], display_handle(normalized), stable, "handle_reuse_stable_id_conflict", link_type)
+                continue
+            current_handle = display_handle(normalized) or match.get("current_handle")
+            if stable and stable == match.get("stable_x_user_id"):
+                return XIdentityDecision("HARD FAIL", "OPERATOR-BLOCKED X DEV IDENTITY", ["operator_blocked_x_identity"], [], [], match["identity_id"], match["operator_block_reason"], current_handle, stable, "stable_x_user_id", link_type)
+            if match_method in VERIFIED_LINEAGE_METHODS:
+                return XIdentityDecision("HARD FAIL", "BLOCKED DEV IDENTITY LINEAGE", ["operator_blocked_x_identity", "blocked_x_rename_lineage"], [], [], match["identity_id"], match["operator_block_reason"], current_handle, stable, "verified_rename_history", link_type)
+            return XIdentityDecision("AVOID", "POSSIBLE BLOCKED DEV IDENTITY", ["blocked_x_handle_match_unresolved", "stable_x_identity_unresolved"], [], ["manual_identity_review_required"], match["identity_id"], match["operator_block_reason"], current_handle, stable, "exact_handle_unresolved", link_type)
+        return best_review or XIdentityDecision(None, None, [], [], [])
+
+    def risk_summary(self, identity_id: str) -> dict[str, Any]:
+        identity = self.get_identity(identity_id)
+        if not identity:
+            raise KeyError(identity_id)
+        links = self.list_token_links_for_identity(identity_id)
+        alias_count = len(identity.get("historical_aliases", []))
+        labels = ["OPERATOR BLOCKED"] if identity.get("operator_block_status") == "active" else []
+        coin_handles = [h for h in [identity.get("current_handle"), *identity.get("historical_aliases", [])] if h and any(term in h.lower() for term in ("coin", "cto", "pump"))]
+        if alias_count >= 5:
+            labels.append("RAPID HANDLE ROTATION")
+            labels.append("REBRAND RISK")
+        if len(links) >= 2:
+            labels.append("MULTI-LAUNCH DEV")
+        if len(coin_handles) >= 3:
+            labels.append("REPEATED PROJECT HOPPER")
+        if not labels:
+            labels.append("INSUFFICIENT EVIDENCE")
+        return {
+            "identity_id": identity_id,
+            "labels": labels,
+            "handle_rename_count": alias_count,
+            "project_themed_rename_count": len(coin_handles),
+            "coin_themed_rename_count": len(coin_handles),
+            "tokens_connected": len({link["token"] for link in links}),
+            "launches_connected": len(links),
+            "creator_wallets_connected": 0,
+            "previous_token_outcomes": "unavailable_until_research_backfill",
+            "percentage_connected_tokens_faded": None,
+            "percentage_liquidity_failure": None,
+            "percentage_creator_selling": None,
+            "median_mfe": None,
+            "median_mae": None,
+            "median_token_lifetime": None,
+            "notes": "Repeated renaming is a risk feature, not universal proof of fraud.",
+        }
+
+    def _set_block(self, identity_id: str, status: str, *, notes: str | None = None) -> dict[str, Any]:
+        self.init_schema()
+        now = _now()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE x_identity_blocks
+                SET operator_block_status=?, disabled_ts=CASE WHEN ?='disabled' THEN ? ELSE disabled_ts END,
+                    restored_ts=CASE WHEN ?='active' THEN ? ELSE restored_ts END,
+                    notes=COALESCE(?, notes), updated_ts=?
+                WHERE identity_id=?
+                """,
+                (status, status, now, status, now, notes, now, identity_id),
+            )
+        if cur.rowcount == 0:
+            raise KeyError(identity_id)
+        return self.get_identity(identity_id) or {"identity_id": identity_id}
+
+    def _find_active_block(self, *, stable: str | None, normalized_handle: str | None) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            if stable:
+                row = conn.execute(
+                    """
+                    SELECT i.*, b.operator_block_status, b.operator_block_reason
+                    FROM x_identities i JOIN x_identity_blocks b ON b.identity_id=i.identity_id
+                    WHERE i.stable_x_user_id=? AND b.operator_block_status='active'
+                    """,
+                    (stable,),
+                ).fetchone()
+                if row:
+                    return self._row_to_identity(row)
+            if normalized_handle:
+                row = conn.execute(
+                    """
+                    SELECT i.*, b.operator_block_status, b.operator_block_reason
+                    FROM x_identities i JOIN x_identity_blocks b ON b.identity_id=i.identity_id
+                    WHERE b.operator_block_status='active'
+                      AND (
+                        i.normalized_current_handle=?
+                        OR EXISTS (
+                            SELECT 1 FROM x_identity_aliases a
+                            WHERE a.identity_id=i.identity_id AND a.normalized_handle=?
+                        )
+                      )
+                    """,
+                    (normalized_handle, normalized_handle),
+                ).fetchone()
+                if row:
+                    return self._row_to_identity(row)
+        return None
+
+    def _resolve_identity_id(self, stable: str | None, normalized: str | None) -> str | None:
+        match = self._find_active_block(stable=stable, normalized_handle=normalized)
+        return match.get("identity_id") if match else None
+
+    def _upsert_alias_in_tx(self, conn, identity_id: str, handle: str, normalized: str, source: str, evidence_ts: int | None, evidence: dict[str, Any], *, first_observed_ts: int | None = None, last_observed_ts: int | None = None) -> None:
+        now = _now()
+        alias_id = hashlib.sha256(f"{identity_id}:{normalized}".encode("utf-8")).hexdigest()[:32]
+        conn.execute(
+            """
+            INSERT INTO x_identity_aliases (
+                alias_id, identity_id, handle, normalized_handle, first_observed_ts,
+                last_observed_ts, source, evidence_ts, evidence_json, created_ts, updated_ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(identity_id, normalized_handle) DO UPDATE SET
+                handle=excluded.handle,
+                first_observed_ts=COALESCE(x_identity_aliases.first_observed_ts, excluded.first_observed_ts),
+                last_observed_ts=COALESCE(excluded.last_observed_ts, x_identity_aliases.last_observed_ts),
+                source=excluded.source,
+                evidence_ts=excluded.evidence_ts,
+                evidence_json=excluded.evidence_json,
+                updated_ts=excluded.updated_ts
+            """,
+            (alias_id, identity_id, handle, normalized, first_observed_ts, last_observed_ts, source, evidence_ts, _json(evidence), now, now),
+        )
+
+    def _row_to_identity(self, row) -> dict[str, Any]:
+        item = dict(row)
+        with self._connect() as conn:
+            aliases = conn.execute("SELECT * FROM x_identity_aliases WHERE identity_id=? ORDER BY COALESCE(first_observed_ts, created_ts), normalized_handle", (item["identity_id"],)).fetchall()
+        item["historical_aliases"] = [dict(alias)["handle"] for alias in aliases if dict(alias)["normalized_handle"] != item.get("normalized_current_handle")]
+        item["aliases"] = [dict(alias) for alias in aliases]
+        return item
+
+    def _row_to_link(self, row) -> dict[str, Any]:
+        item = dict(row)
+        item["metadata"] = _load_json(item.pop("metadata_json", None), {})
+        return item
+
+    @staticmethod
+    def _identity_id(stable: str | None, normalized: str | None) -> str:
+        raw = stable or normalized or uuid.uuid4().hex
+        return "xid_" + hashlib.sha256(str(raw).encode("utf-8")).hexdigest()[:24]
+
+    @staticmethod
+    def _link_id(token: str, link_type: str, stable: str | None, normalized: str | None, evidence_ts: Any) -> str:
+        raw = f"{token}:{link_type}:{stable or normalized}:{evidence_ts or ''}"
+        return "xlink_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+    @staticmethod
+    def _safe_profile_url(value: str | None) -> str | None:
+        normalized = normalize_x_profile_url(value)
+        return f"https://x.com/{normalized}" if normalized else None

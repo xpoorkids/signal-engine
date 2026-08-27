@@ -117,4 +117,22 @@ return, not by one fixed chart rule alone.
 Every recommendation is persisted in `action_recommendations` with policy,
 feature, model, calibration, payload, and optional outcome data. This is shadow
 learning evidence, not proof of profitability.
+# Operator X Identity Guard
+
+The action engine now consults the operator-managed X identity blocklist before
+allowing positive pre-entry or add-on recommendations.
+
+- Stable numeric X ID matches on authoritative token/developer/creator links
+  return `HARD FAIL` with blocker `operator_blocked_x_identity`.
+- Verified rename-history matches return `HARD FAIL` with blockers
+  `operator_blocked_x_identity` and `blocked_x_rename_lineage`.
+- Exact current-handle or historical-alias matches without stable-ID proof return
+  `AVOID` with blockers `blocked_x_handle_match_unresolved` and
+  `stable_x_identity_unresolved`.
+- Reposts and incidental mentions create review exposure, not automatic hard
+  failure.
+
+This guard does not alter buy thresholds, catalyst policy, Discord routing, or
+execution mode. It only prevents positive manual buy/add recommendations where
+the operator has explicitly blocked a public project identity lineage.
 
