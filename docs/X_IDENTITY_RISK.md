@@ -37,6 +37,15 @@ Exact handle or alias matches without stable-ID verification return:
 The unresolved state blocks positive buy and add recommendations until manual
 operator review clears the identity.
 
+When an open manual position is linked to a confirmed stable blocked identity or
+verified blocked rename lineage, the action engine returns `SELL NOW` with a
+100% recommended sale. This remains manual decision support; no transaction is
+constructed or submitted.
+
+Disabled operator blocks are ignored by enforcement. They may remain visible as
+historical context, but they do not produce `HARD FAIL`, `AVOID`, or positive
+recommendation suppression.
+
 ## Link Types
 
 Authoritative links include official token socials, developer profiles, creator
@@ -47,6 +56,23 @@ operator-supplied links.
 `repost_only` and `mention_only` are exposure links. They create
 `BLOCKED IDENTITY PROMOTION EXPOSURE` for review but do not automatically
 hard-fail the token.
+
+Official X links are ingested automatically from DEX/metadata/action/review
+context before evaluation. Supported URL forms include `x.com`, `twitter.com`,
+and `mobile.twitter.com`; query strings and fragments are stripped.
+
+## Seed and Management Safety
+
+The seed blocklist is versioned in `x_identity_seed_migrations`. Normal startup
+and ordinary recommendations use a non-destructive seed check. A manually
+disabled block cannot be reactivated by restart, schema initialization, or
+same-version seed reapplication. Explicit force restore is available only
+through the authenticated operator route.
+
+Management routes are disabled by default and require
+`SIGNAL_ENGINE_X_IDENTITY_MANAGEMENT_ENABLED=1` plus
+`Authorization: Bearer <SIGNAL_ENGINE_OPERATOR_API_TOKEN>`. Sensitive reads are
+operator-only unless `SIGNAL_ENGINE_X_IDENTITY_READ_PUBLIC=1`.
 
 ## Current Limitations
 

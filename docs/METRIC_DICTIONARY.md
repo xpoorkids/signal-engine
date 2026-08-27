@@ -97,6 +97,10 @@ operator-controlled X identity service.
   verified.
 - `high_risk_x_dev_identity`: reserved for future severe historical behavior
   once source-backed evidence is available.
+- `handle_reuse_stable_id_conflict`: review-only state when a blocked
+  historical handle is presented with a different verified stable X user ID.
+- `x_identity_official_source_disagreement`: review-only state when
+  authoritative token-social sources disagree.
 
 Display-name, avatar, biography, and fuzzy-handle similarity are review flags,
 not hard-block metrics.

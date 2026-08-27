@@ -131,8 +131,13 @@ allowing positive pre-entry or add-on recommendations.
   `stable_x_identity_unresolved`.
 - Reposts and incidental mentions create review exposure, not automatic hard
   failure.
+- Disabled operator blocks do not affect action decisions.
+- Official X links extracted from DEX Screener, token metadata, manual review,
+  market context, and catalyst context are persisted before evaluation.
+- Conflicting authoritative X profiles create `X IDENTITY REVIEW REQUIRED` and
+  `x_identity_official_source_disagreement`; a confirmed stable blocked ID still
+  hard-fails.
 
 This guard does not alter buy thresholds, catalyst policy, Discord routing, or
 execution mode. It only prevents positive manual buy/add recommendations where
 the operator has explicitly blocked a public project identity lineage.
-

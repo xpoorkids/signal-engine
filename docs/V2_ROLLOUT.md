@@ -55,4 +55,15 @@ Before using it operationally:
 - link token socials only when the association type is authoritative;
 - treat unresolved exact alias matches as manual-review `AVOID`;
 - keep repost-only and mention-only exposure out of deterministic hard-fail
-  routing.
+  routing;
+- keep `SIGNAL_ENGINE_X_IDENTITY_MANAGEMENT_ENABLED=0` unless operator mutation
+  routes must be used;
+- set `SIGNAL_ENGINE_OPERATOR_API_TOKEN` only in secret stores when management is
+  enabled;
+- keep `SIGNAL_ENGINE_X_IDENTITY_READ_PUBLIC=0` unless exposing blocklist reads
+  is intentional.
+
+Seed application is non-destructive and tracked in
+`x_identity_seed_migrations`. A disabled seeded block remains disabled across
+service restarts and same-version seed checks. Force restore requires an
+authenticated explicit seed request.

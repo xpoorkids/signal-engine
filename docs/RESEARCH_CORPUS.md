@@ -38,3 +38,7 @@ timestamp. Current X profile data cannot be backfilled into earlier snapshots
 unless the corpus has direct point-in-time evidence or a verified rename-history
 record with an evidence timestamp.
 
+Operator-blocked X identity lineages are preserved as operator risk preferences.
+Research may study associated token outcomes, rename histories, creator wallets,
+and action replay results, but a favorable historical example does not remove an
+operator block.
