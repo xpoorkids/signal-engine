@@ -1,0 +1,81 @@
+{
+  "coverage": [
+    {
+      "api_key_configured": false,
+      "data_kind": "direct_when_plan_permits",
+      "earliest_historical_time": "plan_and_endpoint_retention_probe_required",
+      "enabled": false,
+      "endpoint_available": false,
+      "fallback_source": "dexscreener,helius,solana_rpc",
+      "finest_available_interval": "endpoint_dependent",
+      "last_successful_request": null,
+      "plan_permits_endpoint": false,
+      "rate_limit": null,
+      "source": "birdeye",
+      "unavailable_reason": "missing_env:BIRDEYE_API_KEY"
+    },
+    {
+      "api_key_configured": true,
+      "data_kind": "direct_current_and_limited_historical",
+      "earliest_historical_time": "source_retention_probe_required",
+      "enabled": true,
+      "endpoint_available": true,
+      "fallback_source": "birdeye",
+      "finest_available_interval": "current_pair_snapshot_or_documented_history",
+      "last_successful_request": null,
+      "plan_permits_endpoint": true,
+      "rate_limit": "public_rate_limit_unknown_probe_before_bulk",
+      "source": "dexscreener",
+      "unavailable_reason": null
+    },
+    {
+      "api_key_configured": false,
+      "data_kind": "direct",
+      "earliest_historical_time": "address_history_retention_probe_required",
+      "enabled": false,
+      "endpoint_available": false,
+      "fallback_source": "solana_rpc",
+      "finest_available_interval": "transaction_or_slot",
+      "last_successful_request": null,
+      "plan_permits_endpoint": false,
+      "rate_limit": null,
+      "source": "helius",
+      "unavailable_reason": "missing_env:HELIUS_API_KEY"
+    },
+    {
+      "api_key_configured": false,
+      "data_kind": "current_only_guarded",
+      "earliest_historical_time": "current_only_not_historical",
+      "enabled": false,
+      "endpoint_available": false,
+      "fallback_source": null,
+      "finest_available_interval": "current_quote",
+      "last_successful_request": null,
+      "plan_permits_endpoint": false,
+      "rate_limit": null,
+      "source": "jupiter",
+      "unavailable_reason": "missing_env:JUPITER_API_KEY"
+    },
+    {
+      "api_key_configured": false,
+      "data_kind": "direct_fallback",
+      "earliest_historical_time": "rpc_archive_availability_dependent",
+      "enabled": false,
+      "endpoint_available": false,
+      "fallback_source": null,
+      "finest_available_interval": "slot",
+      "last_successful_request": null,
+      "plan_permits_endpoint": true,
+      "rate_limit": null,
+      "source": "solana_rpc",
+      "unavailable_reason": "missing_env:HELIUS_RPC_URL"
+    }
+  ],
+  "questions": [
+    "organic fee SOL versus total fee SOL",
+    "independent fee-payer clusters",
+    "failed-transaction fee spam",
+    "fee-to-holder and fee-to-liquidity conversion"
+  ],
+  "status": "pending_real_backfill"
+}

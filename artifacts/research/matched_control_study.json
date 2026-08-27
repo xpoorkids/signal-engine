@@ -1,0 +1,6 @@
+{
+  "matches": 60,
+  "method": "pre-outcome deterministic nearest bucket",
+  "no_future_matching_variables": true,
+  "status": "fixture_pilot_complete"
+}

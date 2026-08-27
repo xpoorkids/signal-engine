@@ -1,0 +1,20 @@
+{
+  "action_counts": {
+    "AVOID": 468,
+    "BUY SMALL": 576,
+    "HARD FAIL": 540,
+    "WAIT": 252
+  },
+  "limitations": [
+    "fixture-only pilot does not validate profitability",
+    "historical execution remains unavailable until source backfill completes",
+    "operator seeds are evaluation examples, not threshold tuning data"
+  ],
+  "profile_counts": {
+    "AGGRESSIVE": 216,
+    "AGGRESSIVE_CATALYST_RUNNER": 216,
+    "BALANCED": 216
+  },
+  "replay_rows": 648,
+  "replay_version": "current-action-engine-replay-v1"
+}

@@ -56,3 +56,6 @@ executable P&L under each exit policy.
 Compare balanced, aggressive, and aggressive catalyst-runner profiles in shadow
 before any production behavior changes. Operator approval is required before
 profile or threshold changes become production behavior.
+# Research-Only Historical Validation
+
+The memecoin research corpus can produce descriptive statistics, matched-control comparisons, transparent baselines, and chronological action-engine replay. Any baseline model remains `RESEARCH_ONLY` and cannot feed production decisions until leakage checks, matched controls, execution-quality checks, calibration checks, and explicit approval are complete.

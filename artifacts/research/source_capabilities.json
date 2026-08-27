@@ -1,0 +1,75 @@
+{
+  "checked_ts": 1787805518,
+  "sources": [
+    {
+      "source": "birdeye",
+      "enabled": false,
+      "api_key_configured": false,
+      "endpoint_available": false,
+      "plan_permits_endpoint": false,
+      "earliest_historical_time": "plan_and_endpoint_retention_probe_required",
+      "finest_available_interval": "endpoint_dependent",
+      "rate_limit": null,
+      "last_successful_request": null,
+      "unavailable_reason": "missing_env:BIRDEYE_API_KEY",
+      "fallback_source": "dexscreener,helius,solana_rpc",
+      "data_kind": "direct_when_plan_permits"
+    },
+    {
+      "source": "helius",
+      "enabled": false,
+      "api_key_configured": false,
+      "endpoint_available": false,
+      "plan_permits_endpoint": false,
+      "earliest_historical_time": "address_history_retention_probe_required",
+      "finest_available_interval": "transaction_or_slot",
+      "rate_limit": null,
+      "last_successful_request": null,
+      "unavailable_reason": "missing_env:HELIUS_API_KEY",
+      "fallback_source": "solana_rpc",
+      "data_kind": "direct"
+    },
+    {
+      "source": "dexscreener",
+      "enabled": true,
+      "api_key_configured": true,
+      "endpoint_available": true,
+      "plan_permits_endpoint": true,
+      "earliest_historical_time": "source_retention_probe_required",
+      "finest_available_interval": "current_pair_snapshot_or_documented_history",
+      "rate_limit": "public_rate_limit_unknown_probe_before_bulk",
+      "last_successful_request": null,
+      "unavailable_reason": null,
+      "fallback_source": "birdeye",
+      "data_kind": "direct_current_and_limited_historical"
+    },
+    {
+      "source": "jupiter",
+      "enabled": false,
+      "api_key_configured": false,
+      "endpoint_available": false,
+      "plan_permits_endpoint": false,
+      "earliest_historical_time": "current_only_not_historical",
+      "finest_available_interval": "current_quote",
+      "rate_limit": null,
+      "last_successful_request": null,
+      "unavailable_reason": "missing_env:JUPITER_API_KEY",
+      "fallback_source": null,
+      "data_kind": "current_only_guarded"
+    },
+    {
+      "source": "solana_rpc",
+      "enabled": false,
+      "api_key_configured": false,
+      "endpoint_available": false,
+      "plan_permits_endpoint": true,
+      "earliest_historical_time": "rpc_archive_availability_dependent",
+      "finest_available_interval": "slot",
+      "rate_limit": null,
+      "last_successful_request": null,
+      "unavailable_reason": "missing_env:HELIUS_RPC_URL",
+      "fallback_source": null,
+      "data_kind": "direct_fallback"
+    }
+  ]
+}

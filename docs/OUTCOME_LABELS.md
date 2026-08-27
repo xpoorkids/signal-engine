@@ -30,3 +30,6 @@ Outcome labels must be produced from immutable feature snapshots containing only
 - `explicit_negative_event`
 
 Reference-price-only results must not be mixed with executable P&L.
+# Research Outcome Labels
+
+Historical research extends the outcome framework with versioned memecoin labels such as `runner_3x`, `major_runner_10x`, `elite_runner_25x`, `sustained_winner`, `chart_only_winner`, and `execution_failed_winner`. Right-censored observations remain unresolved rather than being counted as failed trades.

@@ -79,3 +79,6 @@ heuristic and uncalibrated until strict walk-forward validation proves otherwise
   remaining principal from executable net sell value.
 - `drawdown_from_executable_peak_pct`: executable value drawdown from executable
   peak, not chart high.
+# Research Corpus Metrics
+
+The offline research corpus records missing states explicitly and separates opportunity, safety, execution, confidence, fee authenticity, wallet independence, holder structure, catalyst, and narrative lineage metrics. Research-only metrics must not be promoted into production policy without walk-forward validation and operator approval.

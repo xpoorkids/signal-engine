@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Signal Engine Research Corpus</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 32px; color: #17202a; background: #f7f8fa; }
+    main { max-width: 1120px; margin: 0 auto; }
+    section { background: #fff; border: 1px solid #d9dee7; border-radius: 6px; padding: 18px; margin: 14px 0; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid #e6e9ef; text-align: left; padding: 7px; }
+    .warn { color: #8a4b00; font-weight: 700; }
+    code { background: #eef1f5; padding: 2px 4px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Solana Memecoin Research Corpus V1</h1>
+  <section>
+    <h2>Status</h2>
+    <p class="warn">This artifact is an offline fixture pilot until real historical sources are configured and backfilled. Missing fields are not treated as zero.</p>
+    <p>Operator seeds: 11. Snapshots: 204. Outcomes: 72. Matched controls: 60. Action replays: 648.</p>
+  </section>
+  <section>
+    <h2>Operator Seed Validation</h2>
+    <table><thead><tr><th>Address</th><th>Chain</th><th>Symbol</th><th>Name</th><th>Status</th></tr></thead><tbody>
+    <tr><td><code>0xb75d5ee14708e7efbea939311090061d72265608</code></td><td>evm</td><td>unavailable</td><td>unavailable</td><td>pending</td></tr><tr><td><code>0xddfed493a114d610c5709fefd22baef40dc23428</code></td><td>evm</td><td>unavailable</td><td>unavailable</td><td>pending</td></tr><tr><td><code>6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx</code></td><td>solana</td><td>unavailable</td><td>unavailable</td><td>pending</td></tr><tr><td><code>9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump</code></td><td>solana</td><td>unavailable</td><td>unavailable</td><td>pending</td></tr><tr><td><code>A13oRB9FFaiUjfi6LdCg6p9ka1u8SfGkUFs4SKvPpump</code></td><td>solana</td><td>unavailable</td><td>unavailable</td><td>pending</td></tr><tr><td><code>Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump</code></td><td>solana</td><td>unavailable</td><td>unavailable</td><td>pending</td></tr><tr><td><code>CTPoyCwkjMvoJwU4xvZZqoD8tiYk6yDchySiN5gGpump</code></td><td>solana</td><td>unavailable</td><td>unavailable</td><td>pending</td></tr><tr><td><code>FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2</code></td><td>solana</td><td>unavailable</td><td>unavailable</td><td>pending</td></tr><tr><td><code>GUmbtfjSZkybSFgPibBcvwExEBdXwewJHR5PkTjzpump</code></td><td>solana</td><td>unavailable</td><td>unavailable</td><td>pending</td></tr><tr><td><code>Ge87EtsjwRQbHaqQmKRno69RFTwh9bfSsm99XNxTpump</code></td><td>solana</td><td>unavailable</td><td>unavailable</td><td>pending</td></tr><tr><td><code>zj1jpp7QMveWHLs61vL9KMZf254KvW7j4AAmBF8ry2k</code></td><td>solana</td><td>unavailable</td><td>unavailable</td><td>pending</td></tr>
+    </tbody></table>
+  </section>
+  <section>
+    <h2>Source Capabilities</h2>
+    <pre>[
+  {
+    "api_key_configured": false,
+    "data_kind": "direct_when_plan_permits",
+    "earliest_historical_time": "plan_and_endpoint_retention_probe_required",
+    "enabled": false,
+    "endpoint_available": false,
+    "fallback_source": "dexscreener,helius,solana_rpc",
+    "finest_available_interval": "endpoint_dependent",
+    "last_successful_request": null,
+    "plan_permits_endpoint": false,
+    "rate_limit": null,
+    "source": "birdeye",
+    "unavailable_reason": "missing_env:BIRDEYE_API_KEY"
+  },
+  {
+    "api_key_configured": true,
+    "data_kind": "direct_current_and_limited_historical",
+    "earliest_historical_time": "source_retention_probe_required",
+    "enabled": true,
+    "endpoint_available": true,
+    "fallback_source": "birdeye",
+    "finest_available_interval": "current_pair_snapshot_or_documented_history",
+    "last_successful_request": null,
+    "plan_permits_endpoint": true,
+    "rate_limit": "public_rate_limit_unknown_probe_before_bulk",
+    "source": "dexscreener",
+    "unavailable_reason": null
+  },
+  {
+    "api_key_configured": false,
+    "data_kind": "direct",
+    "earliest_historical_time": "address_history_retention_probe_required",
+    "enabled": false,
+    "endpoint_available": false,
+    "fallback_source": "solana_rpc",
+    "finest_available_interval": "transaction_or_slot",
+    "last_successful_request": null,
+    "plan_permits_endpoint": false,
+    "rate_limit": null,
+    "source": "helius",
+    "unavailable_reason": "missing_env:HELIUS_API_KEY"
+  },
+  {
+    "api_key_configured": false,
+    "data_kind": "current_only_guarded",
+    "earliest_historical_time": "current_only_not_historical",
+    "enabled": false,
+    "endpoint_available": false,
+    "fallback_source": null,
+    "finest_available_interval": "current_quote",
+    "last_successful_request": null,
+    "plan_permits_endpoint": false,
+    "rate_limit": null,
+    "source": "jupiter",
+    "unavailable_reason": "missing_env:JUPITER_API_KEY"
+  },
+  {
+    "api_key_configured": false,
+    "data_kind": "direct_fallback",
+    "earliest_historical_time": "rpc_archive_availability_dependent",
+    "enabled": false,
+    "endpoint_available": false,
+    "fallback_source": null,
+    "finest_available_interval": "slot",
+    "last_successful_request": null,
+    "plan_permits_endpoint": true,
+    "rate_limit": null,
+    "source": "solana_rpc",
+    "unavailable_reason": "missing_env:HELIUS_RPC_URL"
+  }
+]</pre>
+  </section>
+  <section>
+    <h2>Replay Summary</h2>
+    <pre>{
+  "replay_version": "current-action-engine-replay-v1",
+  "replay_rows": 648,
+  "action_counts": {
+    "HARD FAIL": 540,
+    "AVOID": 468,
+    "BUY SMALL": 576,
+    "WAIT": 252
+  },
+  "profile_counts": {
+    "BALANCED": 216,
+    "AGGRESSIVE": 216,
+    "AGGRESSIVE_CATALYST_RUNNER": 216
+  },
+  "limitations": [
+    "fixture-only pilot does not validate profitability",
+    "historical execution remains unavailable until source backfill completes",
+    "operator seeds are evaluation examples, not threshold tuning data"
+  ]
+}</pre>
+  </section>
+</main>
+</body>
+</html>

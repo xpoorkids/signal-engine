@@ -38,3 +38,6 @@ Rollout requires:
 6. compare shadow outcomes before changing any production behavior
 
 This rollout does not deploy or merge by itself.
+# Offline Research Corpus
+
+`signal-engine-v2-research-corpus` is a child branch for offline historical research. It must not deploy, merge to `main`, alter live thresholds, or enable live execution. Outputs are used to audit and validate current V2 metrics and action recommendations before any later policy proposal.

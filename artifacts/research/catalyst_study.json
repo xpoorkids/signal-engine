@@ -1,0 +1,17 @@
+{
+  "fixture_only": true,
+  "states": [
+    "RUMOR",
+    "UNVERIFIED",
+    "VERIFIED",
+    "ACTIVE",
+    "FLOW_CONFIRMED",
+    "HIGH_CONVICTION",
+    "PRICED_IN",
+    "WEAKENING",
+    "INVALIDATED",
+    "EXPIRED",
+    "FALSE_OR_RETRACTED"
+  ],
+  "status": "pending_real_backfill"
+}

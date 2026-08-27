@@ -1,0 +1,137 @@
+{
+  "chain_counts": {
+    "evm": 2,
+    "solana": 9
+  },
+  "fixture_pilot": {
+    "action_replays": 648,
+    "matches": 60,
+    "outcomes": 72,
+    "quality": "fixture_only_until historical sources are configured and backfilled",
+    "snapshots": 204
+  },
+  "operator_seed_count": 11,
+  "tokens": [
+    {
+      "canonical_address": "0xb75d5ee14708e7efbea939311090061d72265608",
+      "chain": "evm",
+      "creation_ts": null,
+      "launchpad": null,
+      "name": null,
+      "supplied_address": "0xb75d5ee14708e7efbea939311090061d72265608",
+      "symbol": null,
+      "validation_status": "valid_format",
+      "verification_status": "pending"
+    },
+    {
+      "canonical_address": "0xddfed493a114d610c5709fefd22baef40dc23428",
+      "chain": "evm",
+      "creation_ts": null,
+      "launchpad": null,
+      "name": null,
+      "supplied_address": "0xddfed493a114d610c5709fefd22baef40dc23428",
+      "symbol": null,
+      "validation_status": "valid_format",
+      "verification_status": "pending"
+    },
+    {
+      "canonical_address": "6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx",
+      "chain": "solana",
+      "creation_ts": null,
+      "launchpad": null,
+      "name": null,
+      "supplied_address": "6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx",
+      "symbol": null,
+      "validation_status": "valid_format",
+      "verification_status": "pending"
+    },
+    {
+      "canonical_address": "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump",
+      "chain": "solana",
+      "creation_ts": null,
+      "launchpad": null,
+      "name": null,
+      "supplied_address": "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump",
+      "symbol": null,
+      "validation_status": "valid_format",
+      "verification_status": "pending"
+    },
+    {
+      "canonical_address": "A13oRB9FFaiUjfi6LdCg6p9ka1u8SfGkUFs4SKvPpump",
+      "chain": "solana",
+      "creation_ts": null,
+      "launchpad": null,
+      "name": null,
+      "supplied_address": "A13oRB9FFaiUjfi6LdCg6p9ka1u8SfGkUFs4SKvPpump",
+      "symbol": null,
+      "validation_status": "valid_format",
+      "verification_status": "pending"
+    },
+    {
+      "canonical_address": "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump",
+      "chain": "solana",
+      "creation_ts": null,
+      "launchpad": null,
+      "name": null,
+      "supplied_address": "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump",
+      "symbol": null,
+      "validation_status": "valid_format",
+      "verification_status": "pending"
+    },
+    {
+      "canonical_address": "CTPoyCwkjMvoJwU4xvZZqoD8tiYk6yDchySiN5gGpump",
+      "chain": "solana",
+      "creation_ts": null,
+      "launchpad": null,
+      "name": null,
+      "supplied_address": "CTPoyCwkjMvoJwU4xvZZqoD8tiYk6yDchySiN5gGpump",
+      "symbol": null,
+      "validation_status": "valid_format",
+      "verification_status": "pending"
+    },
+    {
+      "canonical_address": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2",
+      "chain": "solana",
+      "creation_ts": null,
+      "launchpad": null,
+      "name": null,
+      "supplied_address": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2",
+      "symbol": null,
+      "validation_status": "valid_format",
+      "verification_status": "pending"
+    },
+    {
+      "canonical_address": "GUmbtfjSZkybSFgPibBcvwExEBdXwewJHR5PkTjzpump",
+      "chain": "solana",
+      "creation_ts": null,
+      "launchpad": null,
+      "name": null,
+      "supplied_address": "GUmbtfjSZkybSFgPibBcvwExEBdXwewJHR5PkTjzpump",
+      "symbol": null,
+      "validation_status": "valid_format",
+      "verification_status": "pending"
+    },
+    {
+      "canonical_address": "Ge87EtsjwRQbHaqQmKRno69RFTwh9bfSsm99XNxTpump",
+      "chain": "solana",
+      "creation_ts": null,
+      "launchpad": null,
+      "name": null,
+      "supplied_address": "Ge87EtsjwRQbHaqQmKRno69RFTwh9bfSsm99XNxTpump",
+      "symbol": null,
+      "validation_status": "valid_format",
+      "verification_status": "pending"
+    },
+    {
+      "canonical_address": "zj1jpp7QMveWHLs61vL9KMZf254KvW7j4AAmBF8ry2k",
+      "chain": "solana",
+      "creation_ts": null,
+      "launchpad": null,
+      "name": null,
+      "supplied_address": "zj1jpp7QMveWHLs61vL9KMZf254KvW7j4AAmBF8ry2k",
+      "symbol": null,
+      "validation_status": "valid_format",
+      "verification_status": "pending"
+    }
+  ]
+}
