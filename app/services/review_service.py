@@ -26,7 +26,7 @@ from worker.events import Event
 from worker.metadata import fetch_token_metadata
 from worker.x_signal import fetch_x_signal
 from app.services.action_engine_service import ActionEngineService, action_engine_enabled
-from app.services.x_identity_service import XIdentityService
+from app.services.x_identity_service import XIdentityService, extract_official_x_identity_links
 
 
 _CA_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,48}$")
@@ -389,6 +389,12 @@ def _review_x_identity_links(result: dict[str, Any]) -> list[dict[str, Any]]:
     for item in metadata_links:
         if isinstance(item, dict):
             links.append({**item, "link_type": item.get("link_type") or "metadata_social", "source": item.get("source") or "review_service"})
+    links.extend(
+        extract_official_x_identity_links(
+            {"links": link_payload, "source": "review_service", "x_link_type": "DexScreener_social"},
+            {"socials": metadata_links, "source": "review_service", "x_link_type": "metadata_social"},
+        )
+    )
     return links
 
 
@@ -396,7 +402,27 @@ def _apply_review_x_identity_guard(token: str, result: dict[str, Any]) -> None:
     links = _review_x_identity_links(result)
     result["x_identity_links"] = links
     x_service = XIdentityService()
-    x_service.initialize_seed_blocklist()
+    x_service.ensure_seeded_once()
+    for link in links:
+        if str(link.get("link_type") or "") in {"repost_only", "mention_only"}:
+            continue
+        try:
+            x_service.link_token_identity(
+                token,
+                link_type=str(link.get("link_type") or "metadata_social"),
+                source=str(link.get("source") or "review_service"),
+                handle=link.get("handle") or link.get("current_handle") or link.get("x_handle"),
+                profile_url=link.get("profile_url"),
+                stable_x_user_id=link.get("stable_x_user_id"),
+                identity_id=link.get("identity_id"),
+                evidence_ts=link.get("evidence_ts"),
+                identity_confidence=link.get("identity_confidence") or "unresolved",
+                match_method=link.get("match_method"),
+                notes=link.get("notes"),
+                metadata=link.get("metadata") or {},
+            )
+        except ValueError:
+            pass
     decision = x_service.evaluate_token(token, links)
     result["x_identity_risk"] = decision.to_dict()
     manual = result.get("manual_buy_assessment") if isinstance(result.get("manual_buy_assessment"), dict) else {}

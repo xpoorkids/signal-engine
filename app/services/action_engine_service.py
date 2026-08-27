@@ -12,7 +12,7 @@ from typing import Any
 from app.models.position import EXIT_STYLE_CATALYST_RUNNER, RISK_PROFILE_AGGRESSIVE
 from app.services.db_service import connect_sqlite, resolve_engine_db_path
 from app.services.manual_position_service import ManualPositionService
-from app.services.x_identity_service import XIdentityService
+from app.services.x_identity_service import XIdentityService, extract_official_x_identity_links, normalize_x_handle, normalize_x_profile_url
 
 
 FEATURE_VERSION = "action-engine-features-v1"
@@ -237,7 +237,6 @@ class ActionEngineService:
     def init_schema(self) -> None:
         self.positions.init_schema()
         self.x_identities.init_schema()
-        self.x_identities.initialize_seed_blocklist()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -328,12 +327,50 @@ class ActionEngineService:
             handle = source.get("x_handle") or source.get("twitter_handle")
             if handle:
                 links.append({"handle": handle, "link_type": source.get("x_link_type") or "metadata_social", "source": "action_context"})
+        links.extend(extract_official_x_identity_links(market, assessment, catalyst))
         return links
 
+    def _persist_x_identity_links(self, token: str, links: list[dict[str, Any]]) -> list[str]:
+        warnings: list[str] = []
+        authoritative_handles: dict[str, set[str]] = {}
+        for link in links:
+            link_type = str(link.get("link_type") or "")
+            if link_type in {"repost_only", "mention_only"}:
+                continue
+            normalized = normalize_x_handle(link.get("handle") or link.get("current_handle") or link.get("x_handle")) or normalize_x_profile_url(link.get("profile_url"))
+            if normalized:
+                authoritative_handles.setdefault(normalized, set()).add(str(link.get("source") or "unknown"))
+            try:
+                self.x_identities.link_token_identity(
+                    token,
+                    link_type=link_type or "metadata_social",
+                    source=str(link.get("source") or "action_context"),
+                    handle=link.get("handle") or link.get("current_handle") or link.get("x_handle"),
+                    profile_url=link.get("profile_url"),
+                    stable_x_user_id=link.get("stable_x_user_id"),
+                    identity_id=link.get("identity_id"),
+                    evidence_ts=link.get("evidence_ts"),
+                    identity_confidence=link.get("identity_confidence") or "unresolved",
+                    match_method=link.get("match_method"),
+                    notes=link.get("notes"),
+                    metadata=link.get("metadata") or {},
+                )
+            except ValueError:
+                warnings.append("X IDENTITY REVIEW REQUIRED")
+        if len(authoritative_handles) > 1:
+            warnings.append("X IDENTITY REVIEW REQUIRED")
+            warnings.append("x_identity_official_source_disagreement")
+        return list(dict.fromkeys(warnings))
+
     def _apply_x_identity_pre_entry_guard(self, rec: dict[str, Any], *, market: dict[str, Any], assessment: dict[str, Any], catalyst: dict[str, Any] | None) -> None:
-        decision = self.x_identities.evaluate_token(rec["token"], links=self._x_identity_links(market=market, assessment=assessment, catalyst=catalyst))
+        self.x_identities.ensure_seeded_once()
+        links = self._x_identity_links(market=market, assessment=assessment, catalyst=catalyst)
+        ingestion_warnings = self._persist_x_identity_links(rec["token"], links)
+        decision = self.x_identities.evaluate_token(rec["token"], links=links)
         payload = decision.to_dict()
         rec["x_identity_risk"] = payload
+        if ingestion_warnings:
+            rec.setdefault("warnings", []).extend(warning for warning in ingestion_warnings if warning not in rec.setdefault("warnings", []))
         if decision.warnings:
             rec.setdefault("warnings", []).extend(warning for warning in decision.warnings if warning not in rec.setdefault("warnings", []))
         if decision.review_flags:
@@ -363,9 +400,14 @@ class ActionEngineService:
         rec["what_changes_action"] = ["manual operator review clears the unresolved identity match", "operator disables or removes the block"]
 
     def _apply_x_identity_position_guard(self, rec: dict[str, Any], *, market: dict[str, Any], catalyst: dict[str, Any] | None) -> None:
-        decision = self.x_identities.evaluate_token(rec["token"], links=self._x_identity_links(market=market, catalyst=catalyst))
+        self.x_identities.ensure_seeded_once()
+        links = self._x_identity_links(market=market, catalyst=catalyst)
+        ingestion_warnings = self._persist_x_identity_links(rec["token"], links)
+        decision = self.x_identities.evaluate_token(rec["token"], links=links)
         payload = decision.to_dict()
         rec["x_identity_risk"] = payload
+        if ingestion_warnings:
+            rec.setdefault("warnings", []).extend(warning for warning in ingestion_warnings if warning not in rec.setdefault("warnings", []))
         if decision.warnings:
             rec.setdefault("warnings", []).extend(warning for warning in decision.warnings if warning not in rec.setdefault("warnings", []))
         if decision.review_flags:
