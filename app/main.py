@@ -7,7 +7,7 @@ import time
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.routes import health, scan, score, packet, watch, review, learning
+from app.routes import health, scan, score, packet, watch, review, learning, positions
 
 from app.services.db_service import resolve_engine_db_path
 from app.services.signal_learning_service import daily_report_worker, observe_recheck_worker, policy_automation_worker, snapshot_worker
@@ -25,6 +25,7 @@ app.include_router(packet.router)
 app.include_router(watch.router)
 app.include_router(review.router)
 app.include_router(learning.router)
+app.include_router(positions.router)
 
 
 @app.exception_handler(sqlite3.Error)

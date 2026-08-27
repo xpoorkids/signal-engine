@@ -25,6 +25,7 @@ from worker.elite import ELITE
 from worker.events import Event
 from worker.metadata import fetch_token_metadata
 from worker.x_signal import fetch_x_signal
+from app.services.action_engine_service import ActionEngineService, action_engine_enabled
 
 
 _CA_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,48}$")
@@ -490,7 +491,7 @@ async def review_contract(token: str) -> dict[str, Any]:
         rug_check=rug_check,
     )
 
-    return {
+    result = {
         "token": token,
         "name": metadata.get("name") or metadata.get("symbol") or "UNK",
         "symbol": metadata.get("symbol") or "UNK",
@@ -533,6 +534,14 @@ async def review_contract(token: str) -> dict[str, Any]:
         "discord_preview": format_discord(event),
         "metric_states": event.extra.get("metric_states"),
     }
+    if action_engine_enabled():
+        result["action_recommendation"] = ActionEngineService().recommend_for_token(
+            token,
+            market=result["market"],
+            assessment=result,
+            intended_size_usd=250.0,
+        )
+    return result
 
 
 def render_review_html(review: dict[str, Any]) -> str:
