@@ -25,3 +25,4 @@ Per-token coverage uses:
 
 Tokens with materially different evidence quality must remain distinguishable in reports.
 
+Source-mode reports also distinguish real source-backed, reconstructed, current-only, reference-only, missing, and fixture data. Fixture rows are excluded from source-pilot totals.
