@@ -205,6 +205,7 @@ import sqlite3
 import time
 import traceback
 import logging
+import random
 from pathlib import Path
 from typing import Any
 
@@ -236,11 +237,14 @@ from worker.config import (
     JUPITER_API_KEY,
     TRADE_VALIDATION_ENABLED,
     EARLY_WATCH_RATE_LIMIT_PER_HOUR,
+    SIGNAL_ENGINE_WORKER_V2_ENABLED,
+    SIGNAL_ENGINE_WORKER_V2_MAX_EVENT_ATTEMPTS,
+    SIGNAL_ENGINE_WORKER_V2_EVENT_LEASE_SECONDS,
 )
 from worker.state import EngineState, is_sig_new, can_alert
-from worker.events import Event
+from worker.events import Event, as_dict
 from worker.promote import process_event
-from worker.discord import send_discord, send_candidate_discord, get_discord_delivery_health
+from worker.discord import send_discord, send_discord_result, send_candidate_discord, get_discord_delivery_health
 from worker.helius_listener import start_helius_listeners
 import worker.helius_listener as helius_listener
 from worker.shadow_executor import maybe_open_shadow_position, shadow_monitor_worker
@@ -261,10 +265,20 @@ from app.services.signal_learning_service import (
 from app.services.tuning_service import ops_digest_worker, rollout_verification_worker
 from app.services.structured_logging import log_event
 from worker.x_signal import get_x_signal_health
+from app.services.worker_runtime_service import (
+    WorkerRuntimeRepository,
+    build_event_identity,
+    build_worker_instance_id,
+    sanitize_error_message,
+    worker_v2_enabled,
+)
 
 _TASKS: dict[str, asyncio.Task] = {}
 _QUEUE: asyncio.Queue | None = None
 _DEX_SCAN_LAST_EMIT: dict[str, float] = {}
+_WORKER_INSTANCE_ID = build_worker_instance_id()
+_WORKER_V2_FATAL_HEALTH: dict[str, Any] = {"healthy": True, "failed_task": None, "error": None}
+_OPTIONAL_TASK_RESTART_COUNTS: dict[str, int] = {}
 DEX_SCAN_EMIT_COOLDOWN_SEC = int(os.getenv("DEX_SCAN_EMIT_COOLDOWN_SEC", "300"))
 
 
@@ -371,6 +385,25 @@ def _worker_health_metadata() -> dict[str, Any]:
             "discord_delivery_health": get_discord_delivery_health(),
         },
     }
+    if worker_v2_enabled():
+        repo = WorkerRuntimeRepository()
+        try:
+            repo.init_schema()
+            metadata["worker_v2"] = repo.health_summary(
+                worker_v2_enabled=True,
+                worker_instance_id=_WORKER_INSTANCE_ID,
+                critical_task_health=_WORKER_V2_FATAL_HEALTH,
+                optional_task_restart_counts=_OPTIONAL_TASK_RESTART_COUNTS,
+            )
+        except Exception as exc:
+            metadata["worker_v2"] = {
+                "enabled": True,
+                "worker_instance_id": _WORKER_INSTANCE_ID,
+                "health_error_type": type(exc).__name__,
+                "health_error": sanitize_error_message(exc),
+            }
+    else:
+        metadata["worker_v2"] = {"enabled": False}
     return metadata
 
 
@@ -477,6 +510,262 @@ def _persist_candidate_delivery(de: Event, *, delivered: bool, message_id: str |
         mark_candidate_alert_sent(de.token)
 
 
+def _route_tier(de: Event) -> str | None:
+    extra = de.extra if isinstance(de.extra, dict) else {}
+    route = extra.get("route_decision") if isinstance(extra.get("route_decision"), dict) else {}
+    tier = route.get("tier")
+    return str(tier) if tier is not None else None
+
+
+def _event_payload(de: Event) -> dict[str, Any]:
+    payload = as_dict(de)
+    payload.pop("id", None)
+    return payload
+
+
+def _delivery_result_disposition(result: Any) -> tuple[str, str]:
+    if getattr(result, "success", False):
+        return "delivery_sent", "sent"
+    reason = str(getattr(result, "reason", "") or "delivery_failed")
+    if reason == "dry_run":
+        return "dry_run_suppressed", reason
+    if reason in {"delivery_disabled", "missing_webhook", "not_candidate_event"}:
+        return "delivery_disabled", reason
+    if getattr(result, "ambiguous", False):
+        return "delivery_uncertain", reason
+    return "delivery_failed", reason
+
+
+def _delivery_suppression_reason(channel: str) -> str | None:
+    if not ENABLE_DISCORD:
+        return "delivery_disabled"
+    if DRY_RUN:
+        return "dry_run"
+    if channel == "candidate" and not DISCORD_CANDIDATE_WEBHOOK:
+        return "missing_candidate_webhook"
+    if channel == "main" and not DISCORD_WEBHOOK_URL:
+        return "missing_webhook_url"
+    return None
+
+
+async def _handle_derived_event_v2(repo: WorkerRuntimeRepository, source_event: Event, event_id: str, de: Event) -> None:
+    tier = _route_tier(de)
+    base_payload = {"event": _event_payload(de), "source_event_id": event_id}
+    if de.type in ("heating_up", "promoted"):
+        cooldown_key, cooldown_sec = _non_candidate_cooldown_key(de)
+        decision_id = repo.record_decision(
+            event_id=event_id,
+            derived_event_type=de.type,
+            token=de.token,
+            route_tier=tier,
+            disposition="derived",
+            reason="derived_event",
+            payload=base_payload,
+        )
+        if de.type == "heating_up" and not _should_send_heating_up(de):
+            repo.update_decision(decision_id, disposition="quality_suppressed", reason="heating_quality_suppressed")
+            return
+        suppression = _delivery_suppression_reason("main")
+        if suppression:
+            disposition = "dry_run_suppressed" if suppression == "dry_run" else "delivery_disabled"
+            repo.update_decision(decision_id, disposition=disposition, reason=suppression)
+            repo.create_outbox(
+                decision_id=decision_id,
+                event_id=event_id,
+                channel="main",
+                operation="post",
+                destination_key="main",
+                token=de.token,
+                event_type=de.type,
+                payload=base_payload,
+                status="suppressed",
+            )
+            return
+        reservation_id = decision_id
+        if de.token and cooldown_key:
+            cooldown = repo.reserve_cooldown(
+                cooldown_key,
+                cooldown_sec,
+                reservation_id,
+                metadata={"event_id": event_id, "decision_id": decision_id, "event_type": de.type},
+            )
+            if not cooldown.allowed:
+                repo.update_decision(decision_id, disposition="cooldown_suppressed", reason=cooldown.reason)
+                return
+        delivery_id = repo.create_outbox(
+            decision_id=decision_id,
+            event_id=event_id,
+            channel="main",
+            operation="post",
+            destination_key="main",
+            token=de.token,
+            event_type=de.type,
+            payload=base_payload,
+        )
+        repo.update_decision(decision_id, disposition="delivery_pending", delivery_id=delivery_id)
+        repo.mark_outbox_attempting(delivery_id)
+        result = send_discord_result(de)
+        repo.update_outbox_result(delivery_id, result=result)
+        disposition, reason = _delivery_result_disposition(result)
+        delivered_ts = int(time.time()) if result.success else None
+        if result.success:
+            if de.token and cooldown_key:
+                repo.commit_cooldown(cooldown_key, reservation_id, delivered_ts=delivered_ts)
+            buyer = de.extra.get("buyer") if isinstance(de.extra, dict) else None
+            if isinstance(buyer, str) and buyer:
+                record_wallet_signal(buyer, de.token or "", de.type)
+            signal_id = _persist_non_candidate_delivery(de, True)
+            repo.update_decision(decision_id, disposition=disposition, reason=reason, delivered_ts=delivered_ts, legacy_signal_id=signal_id)
+            if signal_id:
+                maybe_open_shadow_position(de)
+        else:
+            if de.token and cooldown_key and not getattr(result, "ambiguous", False):
+                repo.release_cooldown(cooldown_key, reservation_id, reason=reason)
+            repo.update_decision(decision_id, disposition=disposition, reason=reason)
+            log_event(logger, logging.WARNING, "dispatch-skip-persist", type=de.type, token=de.token, reason=reason, event_id=event_id)
+        return
+
+    if de.type == "candidate":
+        decision_id = repo.record_decision(
+            event_id=event_id,
+            derived_event_type=de.type,
+            token=de.token,
+            route_tier=tier,
+            disposition="derived",
+            reason="derived_event",
+            payload=base_payload,
+        )
+        if isinstance(de.extra, dict) and de.extra.get("candidate_send") is False:
+            repo.update_decision(decision_id, disposition="candidate_send_suppressed", reason="candidate_send_false")
+            return
+        suppression = _delivery_suppression_reason("candidate")
+        if suppression:
+            disposition = "dry_run_suppressed" if suppression == "dry_run" else "delivery_disabled"
+            repo.update_decision(decision_id, disposition=disposition, reason=suppression)
+            repo.create_outbox(
+                decision_id=decision_id,
+                event_id=event_id,
+                channel="candidate",
+                operation="edit" if isinstance(de.extra, dict) and de.extra.get("candidate_edit") else "post",
+                destination_key="candidate",
+                token=de.token,
+                event_type=de.type,
+                payload=base_payload,
+                edit_message_id=str(de.extra.get("candidate_message_id")) if isinstance(de.extra, dict) and de.extra.get("candidate_message_id") else None,
+                status="suppressed",
+            )
+            return
+        cooldown_key = f"candidate:{de.token}" if de.token else None
+        if de.token and cooldown_key:
+            cooldown = repo.reserve_cooldown(
+                cooldown_key,
+                CANDIDATE_ALERT_COOLDOWN_SEC,
+                decision_id,
+                metadata={"event_id": event_id, "decision_id": decision_id, "event_type": de.type},
+            )
+            if not cooldown.allowed:
+                repo.update_decision(decision_id, disposition="cooldown_suppressed", reason=cooldown.reason)
+                return
+        message_id = None
+        if isinstance(de.extra, dict) and de.extra.get("candidate_edit") and de.extra.get("candidate_message_id"):
+            message_id = de.extra.get("candidate_message_id")
+        delivery_id = repo.create_outbox(
+            decision_id=decision_id,
+            event_id=event_id,
+            channel="candidate",
+            operation="edit" if message_id else "post",
+            destination_key="candidate",
+            token=de.token,
+            event_type=de.type,
+            payload=base_payload,
+            edit_message_id=message_id,
+        )
+        repo.update_decision(decision_id, disposition="delivery_pending", delivery_id=delivery_id)
+        repo.mark_outbox_attempting(delivery_id)
+        result = send_candidate_discord(de, message_id=message_id)
+        repo.update_outbox_result(delivery_id, result=result)
+        disposition, reason = _delivery_result_disposition(result)
+        delivered_ts = int(time.time()) if result.success else None
+        if result.success:
+            if de.token and cooldown_key:
+                repo.commit_cooldown(cooldown_key, decision_id, delivered_ts=delivered_ts)
+            _persist_candidate_delivery(de, delivered=True, message_id=result.message_id, edited=bool(message_id))
+            repo.update_decision(decision_id, disposition=disposition, reason=reason, delivered_ts=delivered_ts)
+            maybe_open_shadow_position(de)
+        else:
+            if de.token and cooldown_key and not getattr(result, "ambiguous", False):
+                repo.release_cooldown(cooldown_key, decision_id, reason=reason)
+            repo.update_decision(decision_id, disposition=disposition, reason=reason)
+            log_event(logger, logging.WARNING, "dispatch-skip-persist", type="candidate", token=de.token, reason=reason, event_id=event_id)
+
+
+async def _process_event_v2(repo: WorkerRuntimeRepository, state: EngineState, e: Event) -> None:
+    event_id = build_event_identity(e)
+    claim = repo.claim_event(
+        e,
+        worker_id=_WORKER_INSTANCE_ID,
+        lease_seconds=SIGNAL_ENGINE_WORKER_V2_EVENT_LEASE_SECONDS,
+        max_attempts=SIGNAL_ENGINE_WORKER_V2_MAX_EVENT_ATTEMPTS,
+    )
+    if not claim.claimed:
+        log_event(
+            logger,
+            logging.INFO,
+            "event-loop-skip",
+            reason=claim.reason,
+            type=e.type,
+            token=e.token,
+            sig=e.signature,
+            event_id=event_id,
+            status=claim.status,
+        )
+        return
+    try:
+        derived = sorted(await process_event(state, e), key=_derived_event_priority, reverse=True)
+        for de in derived:
+            await _handle_derived_event_v2(repo, e, event_id, de)
+        repo.complete_event(event_id)
+        repo.advance_checkpoint(
+            f"source:{e.source}:completed",
+            source=e.source,
+            stage="completed",
+            slot=e.slot,
+            signature=e.signature,
+            event_id=event_id,
+            observed_ts=e.ts,
+            metadata={"event_type": e.type},
+        )
+        repo.advance_checkpoint(
+            "worker:event_loop:completed",
+            source=e.source,
+            stage="event_loop_completed",
+            slot=e.slot,
+            signature=e.signature,
+            event_id=event_id,
+            observed_ts=e.ts,
+            metadata={"event_type": e.type},
+        )
+    except Exception as ex:
+        repo.fail_event(
+            event_id,
+            error=ex,
+            failure_stage="process_event",
+            max_attempts=SIGNAL_ENGINE_WORKER_V2_MAX_EVENT_ATTEMPTS,
+        )
+        log_event(
+            logger,
+            logging.ERROR,
+            "event-loop-error",
+            type=e.type,
+            token=e.token,
+            sig=e.signature,
+            event_id=event_id,
+            error_type=type(ex).__name__,
+            error=sanitize_error_message(ex),
+        )
+        raise
+
+
 async def event_loop(q: asyncio.Queue) -> None:
     """
     Consume queued events, route them through `worker.promote`, and execute the
@@ -485,14 +774,19 @@ async def event_loop(q: asyncio.Queue) -> None:
     state = EngineState()
     state_init()
     learning_init()
+    repo = WorkerRuntimeRepository() if worker_v2_enabled() else None
+    if repo is not None:
+        repo.init_schema()
     while True:
         e: Event = await q.get()
         dedupe_sig = f"{e.signature}:{e.type}:{e.token or ''}" if e.signature else None
         try:
             log_event(logger, logging.INFO, "event-loop", action="recv", type=e.type, token=e.token, sig=e.signature)
+            if repo is not None:
+                await _process_event_v2(repo, state, e)
+                continue
             if not is_sig_new(state, dedupe_sig, EARLY_DEDUPE_TTL_SEC):
                 log_event(logger, logging.INFO, "event-loop-skip", reason="dedupe", type=e.type, token=e.token, sig=e.signature)
-                q.task_done()
                 continue
 
             derived = sorted(await process_event(state, e), key=_derived_event_priority, reverse=True)
@@ -627,6 +921,56 @@ async def dex_scan_loop(q: asyncio.Queue) -> None:
         await asyncio.sleep(max(5, int(getattr(scanner, "SCAN_INTERVAL", 30) or 30)))
 
 
+class WorkerTaskFailure(RuntimeError):
+    pass
+
+
+async def _optional_task_supervisor(name: str, awaitable_factory, *, max_restarts: int = 3, base_delay: float = 0.25) -> None:
+    restarts = 0
+    while True:
+        try:
+            result = await awaitable_factory()
+            raise WorkerTaskFailure(f"optional task {name} returned unexpectedly: {result!r}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            restarts += 1
+            _OPTIONAL_TASK_RESTART_COUNTS[name] = restarts
+            log_event(logger, logging.WARNING, "worker-optional-task-failed", task=name, restart_count=restarts, error_type=type(exc).__name__, error=sanitize_error_message(exc))
+            if restarts > max_restarts:
+                raise WorkerTaskFailure(f"optional task {name} exceeded restart budget") from exc
+            delay = min(30.0, base_delay * (2 ** (restarts - 1))) + random.uniform(0, base_delay)
+            await asyncio.sleep(delay)
+
+
+async def _run_worker_v2_supervised(tasks: list[asyncio.Task], critical_names: set[str]) -> None:
+    try:
+        pending = set(tasks)
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                name = task.get_name()
+                if task.cancelled():
+                    if name in critical_names:
+                        raise WorkerTaskFailure(f"critical task {name} cancelled")
+                    continue
+                exc = task.exception()
+                if exc is not None:
+                    if name in critical_names:
+                        raise WorkerTaskFailure(f"critical task {name} failed") from exc
+                    log_event(logger, logging.ERROR, "worker-optional-task-stopped", task=name, error_type=type(exc).__name__, error=sanitize_error_message(exc))
+                    continue
+                if name in critical_names:
+                    raise WorkerTaskFailure(f"critical task {name} returned unexpectedly")
+    except BaseException as exc:
+        _WORKER_V2_FATAL_HEALTH.update({"healthy": False, "failed_task": getattr(exc, "__context__", None) and type(exc.__context__).__name__, "error": sanitize_error_message(exc)})
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 async def run_worker() -> None:
     """
     Start the full worker runtime: queue consumer, background reporting tasks,
@@ -652,9 +996,11 @@ async def run_worker() -> None:
             logger,
             logging.ERROR,
             "worker",
-            action="storage_unavailable_hold",
+            action="storage_unavailable_fatal" if worker_v2_enabled() else "storage_unavailable_hold",
             db_path=str(db_path),
         )
+        if worker_v2_enabled():
+            raise RuntimeError("worker_v2_storage_unavailable")
         while True:
             await asyncio.sleep(60)
     global _QUEUE
@@ -663,21 +1009,41 @@ async def run_worker() -> None:
     _QUEUE = q
 
     learning_init()
+    if worker_v2_enabled():
+        repo = WorkerRuntimeRepository(db_path)
+        repo.init_schema()
+
+    critical_names = {"event_loop", "heartbeat_loop"} if worker_v2_enabled() else set()
     tasks.append(_create_worker_task("event_loop", event_loop(q)))
     tasks.append(_create_worker_task("heartbeat_loop", heartbeat_loop()))
-    tasks.append(_create_worker_task("snapshot_worker", snapshot_worker()))
-    tasks.append(_create_worker_task("daily_report_worker", daily_report_worker()))
-    if _observe_recheck_worker_enabled():
-        tasks.append(_create_worker_task("observe_recheck_worker", observe_recheck_worker()))
-    tasks.append(_create_worker_task("ops_digest_worker", ops_digest_worker()))
-    tasks.append(_create_worker_task("rollout_verification_worker", rollout_verification_worker()))
-    tasks.append(_create_worker_task("shadow_monitor_worker", shadow_monitor_worker()))
-    if ENABLE_WS:
-        tasks.append(_create_worker_task("helius_listener", start_helius_listeners(q)))
-    if ENABLE_DEX:
-        tasks.append(_create_worker_task("dex_scanner", dex_scan_loop(q)))
 
-    await asyncio.gather(*tasks, return_exceptions=True)
+    if worker_v2_enabled():
+        tasks.append(_create_worker_task("snapshot_worker", _optional_task_supervisor("snapshot_worker", snapshot_worker)))
+        tasks.append(_create_worker_task("daily_report_worker", _optional_task_supervisor("daily_report_worker", daily_report_worker)))
+        if _observe_recheck_worker_enabled():
+            tasks.append(_create_worker_task("observe_recheck_worker", _optional_task_supervisor("observe_recheck_worker", observe_recheck_worker)))
+        tasks.append(_create_worker_task("ops_digest_worker", _optional_task_supervisor("ops_digest_worker", ops_digest_worker)))
+        tasks.append(_create_worker_task("rollout_verification_worker", _optional_task_supervisor("rollout_verification_worker", rollout_verification_worker)))
+        tasks.append(_create_worker_task("shadow_monitor_worker", _optional_task_supervisor("shadow_monitor_worker", shadow_monitor_worker)))
+        if ENABLE_WS:
+            critical_names.add("helius_listener")
+            tasks.append(_create_worker_task("helius_listener", start_helius_listeners(q)))
+        if ENABLE_DEX:
+            tasks.append(_create_worker_task("dex_scanner", _optional_task_supervisor("dex_scanner", lambda: dex_scan_loop(q))))
+        await _run_worker_v2_supervised(tasks, critical_names)
+    else:
+        tasks.append(_create_worker_task("snapshot_worker", snapshot_worker()))
+        tasks.append(_create_worker_task("daily_report_worker", daily_report_worker()))
+        if _observe_recheck_worker_enabled():
+            tasks.append(_create_worker_task("observe_recheck_worker", observe_recheck_worker()))
+        tasks.append(_create_worker_task("ops_digest_worker", ops_digest_worker()))
+        tasks.append(_create_worker_task("rollout_verification_worker", rollout_verification_worker()))
+        tasks.append(_create_worker_task("shadow_monitor_worker", shadow_monitor_worker()))
+        if ENABLE_WS:
+            tasks.append(_create_worker_task("helius_listener", start_helius_listeners(q)))
+        if ENABLE_DEX:
+            tasks.append(_create_worker_task("dex_scanner", dex_scan_loop(q)))
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def main() -> None:
@@ -686,6 +1052,8 @@ def main() -> None:
     except Exception as e:
         log_event(logger, logging.ERROR, "fatal", component="worker", error_type=type(e).__name__, error=str(e))
         traceback.print_exc()
+        if worker_v2_enabled():
+            raise SystemExit(1) from e
 
     # CRITICAL: never exit
     while True:

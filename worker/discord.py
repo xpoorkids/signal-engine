@@ -51,6 +51,13 @@ def _record_delivery_health(channel: str, **values) -> None:
 class DeliveryResult:
     success: bool
     message_id: str | None = None
+    attempted: bool = False
+    status_code: int | None = None
+    reason: str | None = None
+    error_type: str | None = None
+    error_message: str | None = None
+    retryable: bool = False
+    ambiguous: bool = False
 
 
 def _full_addr(addr: str | None) -> str:
@@ -1378,14 +1385,14 @@ def format_discord(e: Event) -> dict:
     return _format_candidate_like(e, "Radar update.")
 
 
-def send_discord(e: Event) -> bool:
+def send_discord_result(e: Event) -> DeliveryResult:
     if not ENABLE_DISCORD:
         _record_delivery_health("main", success=False, reason="disabled", token=e.token, event_type=e.type)
-        return False
+        return DeliveryResult(success=False, attempted=False, reason="delivery_disabled")
     if not DISCORD_WEBHOOK_URL:
         _record_delivery_health("main", success=False, reason="missing_webhook_url", token=e.token, event_type=e.type)
         log_event(logger, logging.WARNING, "discord-send", type=e.type, token=e.token, success=False, reason="missing_webhook_url")
-        return False
+        return DeliveryResult(success=False, attempted=False, reason="missing_webhook")
 
     payload = format_discord(e)
     log_event(logger, logging.INFO, "discord-send-attempt", type=e.type, token=e.token, dry_run=DRY_RUN, webhook_configured=bool(DISCORD_WEBHOOK_URL))
@@ -1393,7 +1400,7 @@ def send_discord(e: Event) -> bool:
     if DRY_RUN:
         _record_delivery_health("main", success=False, reason="dry_run", token=e.token, event_type=e.type)
         log_event(logger, logging.INFO, "discord-send-skip", type=e.type, token=e.token, reason="dry_run", payload_preview=json.dumps(payload)[:400])
-        return False
+        return DeliveryResult(success=False, attempted=False, reason="dry_run")
 
     try:
         r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=8)
@@ -1410,28 +1417,59 @@ def send_discord(e: Event) -> bool:
                 status_code=r.status_code,
                 body=r.text[:200],
             )
-            return False
+            return DeliveryResult(
+                success=False,
+                attempted=True,
+                status_code=r.status_code,
+                reason="http_failure",
+                error_type="HTTPError",
+                error_message=r.text[:300],
+                retryable=r.status_code >= 500 or r.status_code == 429,
+            )
         else:
             _record_delivery_health("main", success=True, status_code=r.status_code, token=e.token, event_type=e.type, error=None)
             log_event(logger, logging.INFO, "discord-send", type=e.type, token=e.token, success=True, status_code=r.status_code)
-            return True
+            return DeliveryResult(success=True, attempted=True, status_code=r.status_code, reason="sent")
+    except (requests.Timeout, requests.ConnectionError) as ex:
+        _record_delivery_health("main", success=False, token=e.token, event_type=e.type, error_type=type(ex).__name__, error=str(ex)[:240])
+        log_event(logger, logging.ERROR, "discord-send", type=e.type, token=e.token, success=False, error_type=type(ex).__name__, error=str(ex))
+        return DeliveryResult(
+            success=False,
+            attempted=True,
+            reason="ambiguous_post_request_failure",
+            error_type=type(ex).__name__,
+            error_message=str(ex)[:300],
+            retryable=False,
+            ambiguous=True,
+        )
     except Exception as ex:
         _record_delivery_health("main", success=False, token=e.token, event_type=e.type, error_type=type(ex).__name__, error=str(ex)[:240])
         log_event(logger, logging.ERROR, "discord-send", type=e.type, token=e.token, success=False, error_type=type(ex).__name__, error=str(ex))
-        return False
+        return DeliveryResult(
+            success=False,
+            attempted=False,
+            reason="request_not_attempted",
+            error_type=type(ex).__name__,
+            error_message=str(ex)[:300],
+            retryable=False,
+        )
+
+
+def send_discord(e: Event) -> bool:
+    return send_discord_result(e).success
 
 
 def send_candidate_discord(e: Event, message_id: str | None = None) -> DeliveryResult:
     if not ENABLE_DISCORD:
         _record_delivery_health("candidate", success=False, reason="disabled", token=e.token, edited=bool(message_id))
-        return DeliveryResult(success=False)
+        return DeliveryResult(success=False, attempted=False, reason="delivery_disabled")
     if not DISCORD_CANDIDATE_WEBHOOK:
         _record_delivery_health("candidate", success=False, reason="missing_candidate_webhook", token=e.token, edited=bool(message_id))
         log_event(logger, logging.WARNING, "discord-candidate-send", token=e.token, success=False, reason="missing_candidate_webhook")
-        return DeliveryResult(success=False)
+        return DeliveryResult(success=False, attempted=False, reason="missing_webhook")
     if e.type != "candidate":
         _record_delivery_health("candidate", success=False, reason="not_candidate_event", token=e.token, event_type=e.type)
-        return DeliveryResult(success=False)
+        return DeliveryResult(success=False, attempted=False, reason="not_candidate_event")
 
     payload = format_discord(e)
     log_event(
@@ -1447,7 +1485,7 @@ def send_candidate_discord(e: Event, message_id: str | None = None) -> DeliveryR
     if DRY_RUN:
         _record_delivery_health("candidate", success=False, reason="dry_run", token=e.token, edited=bool(message_id))
         log_event(logger, logging.INFO, "discord-candidate-send", token=e.token, success=False, reason="dry_run", payload_preview=json.dumps(payload)[:400])
-        return DeliveryResult(success=False)
+        return DeliveryResult(success=False, attempted=False, reason="dry_run")
 
     try:
         if message_id:
@@ -1468,7 +1506,15 @@ def send_candidate_discord(e: Event, message_id: str | None = None) -> DeliveryR
                 edited=bool(message_id),
                 body=r.text[:200],
             )
-            return DeliveryResult(success=False)
+            return DeliveryResult(
+                success=False,
+                attempted=True,
+                status_code=r.status_code,
+                reason="http_failure",
+                error_type="HTTPError",
+                error_message=r.text[:300],
+                retryable=r.status_code >= 500 or r.status_code == 429,
+            )
         else:
             _record_delivery_health("candidate", success=True, status_code=r.status_code, token=e.token, edited=bool(message_id), error=None)
             log_event(
@@ -1481,13 +1527,40 @@ def send_candidate_discord(e: Event, message_id: str | None = None) -> DeliveryR
                 edited=bool(message_id),
             )
             if message_id:
-                return DeliveryResult(success=True, message_id=message_id)
+                return DeliveryResult(success=True, message_id=message_id, attempted=True, status_code=r.status_code, reason="sent")
             if not message_id:
                 try:
                     data = r.json()
-                    return DeliveryResult(success=True, message_id=data.get("id"))
+                    return DeliveryResult(success=True, message_id=data.get("id"), attempted=True, status_code=r.status_code, reason="sent")
                 except Exception:
-                    return DeliveryResult(success=True)
+                    return DeliveryResult(
+                        success=True,
+                        attempted=True,
+                        status_code=r.status_code,
+                        reason="sent_malformed_response",
+                        error_type="MalformedResponse",
+                    )
+    except (requests.Timeout, requests.ConnectionError) as ex:
+        _record_delivery_health("candidate", success=False, token=e.token, edited=bool(message_id), error_type=type(ex).__name__, error=str(ex)[:240])
+        log_event(
+            logger,
+            logging.ERROR,
+            "discord-candidate-send",
+            token=e.token,
+            success=False,
+            edited=bool(message_id),
+            error_type=type(ex).__name__,
+            error=str(ex),
+        )
+        return DeliveryResult(
+            success=False,
+            attempted=True,
+            reason="ambiguous_post_request_failure",
+            error_type=type(ex).__name__,
+            error_message=str(ex)[:300],
+            retryable=False,
+            ambiguous=True,
+        )
     except Exception as ex:
         _record_delivery_health("candidate", success=False, token=e.token, edited=bool(message_id), error_type=type(ex).__name__, error=str(ex)[:240])
         log_event(
@@ -1500,4 +1573,10 @@ def send_candidate_discord(e: Event, message_id: str | None = None) -> DeliveryR
             error_type=type(ex).__name__,
             error=str(ex),
         )
-    return DeliveryResult(success=False)
+    return DeliveryResult(
+        success=False,
+        attempted=False,
+        reason="request_not_attempted",
+        error_type=type(ex).__name__,
+        error_message=str(ex)[:300],
+    )
