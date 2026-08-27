@@ -1,0 +1,8 @@
+{
+  "data_mode": "source",
+  "fixture_controls_used": false,
+  "real_controls_completed": 0,
+  "reason": "real control discovery requires source-backed creation windows or token lists; fixture controls are forbidden in source mode",
+  "required_controls": 5,
+  "status": "blocked_by_source_coverage"
+}

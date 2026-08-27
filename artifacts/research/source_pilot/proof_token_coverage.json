@@ -1,0 +1,267 @@
+{
+  "blocked": 0,
+  "completed": 0,
+  "data_mode": "source",
+  "failed": 0,
+  "fixture_data_used": false,
+  "parquet": [
+    {
+      "data_mode": "source",
+      "path": "research_data\\parquet\\token_identity\\chain=solana\\token_prefix=FZ\\year=2026\\month=08\\ca160c60571d5221a48d4fc111e14ac3.parquet",
+      "row_count": 1,
+      "table": "token_identity"
+    },
+    {
+      "data_mode": "source",
+      "path": "research_data\\parquet\\pair_observations\\chain=solana\\token_prefix=FZ\\year=2026\\month=08\\36f83ccc4bea5abf86b5ffb8aaf9bdac.parquet",
+      "row_count": 1,
+      "table": "pair_observations"
+    }
+  ],
+  "partial": 1,
+  "proof_token_status": {
+    "canonical_mint_verified": true,
+    "fixture_data_used": false,
+    "partial_feature_coverage": false,
+    "status": "blocked_by_missing_credentials_or_source_coverage",
+    "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2",
+    "trade_count": 0,
+    "transaction_count": 0
+  },
+  "raw_responses_cached": 6,
+  "resume_used": true,
+  "source_results": [
+    {
+      "completeness": "complete",
+      "errors": [],
+      "evidence_quality": "current_only",
+      "fetched_at": 1787808412,
+      "has_more": false,
+      "next_cursor": null,
+      "operation": "token_pairs",
+      "parser_version": "source-result-v1",
+      "rate_limit": {
+        "correlation_id": "016dd3dc1eef4ac2823bf30050ed4d0e",
+        "elapsed_ms": 40,
+        "limit": null,
+        "remaining": null,
+        "retry_after": null
+      },
+      "record_count": 1,
+      "records": [
+        {
+          "baseToken": {
+            "address": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2",
+            "name": "Pistacio",
+            "symbol": "Pistacio"
+          },
+          "chainId": "solana",
+          "dexId": "pumpswap",
+          "fdv": 4653492,
+          "info": {
+            "header": "https://cdn.dexscreener.com/cms/images/vYb5t3f8DD-wggz7?width=1500&height=500&quality=95&format=auto",
+            "imageUrl": "https://cdn.dexscreener.com/cms/images/cbCqu5WnLCIo1FXN?width=800&height=800&quality=95&format=auto",
+            "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2?timestamp=1787808300000",
+            "socials": [
+              {
+                "type": "twitter",
+                "url": "https://x.com/Marcello_695"
+              }
+            ],
+            "websites": []
+          },
+          "liquidity": {
+            "base": 29018455,
+            "quote": 1360.1024,
+            "usd": 275753.95
+          },
+          "marketCap": 4653510,
+          "pairAddress": "22CfmLna8Bsh7xrbyvGSs6NdD31iFj1UFVnwB7EberWU",
+          "pairCreatedAt": 1787685741000,
+          "priceChange": {
+            "h1": 4.68,
+            "h24": -54.59,
+            "h6": 5.98,
+            "m5": 5.04
+          },
+          "priceNative": "0.00004722",
+          "priceUsd": "0.004769",
+          "quoteToken": {
+            "address": "So11111111111111111111111111111111111111112",
+            "name": "Wrapped SOL",
+            "symbol": "SOL"
+          },
+          "txns": {
+            "h1": {
+              "buys": 573,
+              "sells": 560
+            },
+            "h24": {
+              "buys": 48933,
+              "sells": 40611
+            },
+            "h6": {
+              "buys": 5454,
+              "sells": 4650
+            },
+            "m5": {
+              "buys": 57,
+              "sells": 65
+            }
+          },
+          "url": "https://dexscreener.com/solana/22cfmlna8bsh7xrbyvgss6ndd31ifj1ufvnwb7eberwu",
+          "volume": {
+            "h1": 125101.08,
+            "h24": 11791724.15,
+            "h6": 1317327.77,
+            "m5": 14163.54
+          }
+        }
+      ],
+      "request_hash": "9802a4fc0170cbb1e78f7eb74a3c2a2bbaaf8f1452ce0b6b30f5e48b55ccb6bc",
+      "requested_end_ts": null,
+      "requested_start_ts": null,
+      "response_hash": "90a025be9f872eae27ab2b6cbc70d13753db0cdb1c9666ca1a552ae817a90a0a",
+      "retention_status": "source_reported_or_unprobed",
+      "retry_count": 0,
+      "returned_end_ts": null,
+      "returned_start_ts": null,
+      "source": "dexscreener",
+      "status": "success",
+      "warnings": []
+    },
+    {
+      "completeness": "unavailable",
+      "errors": [],
+      "evidence_quality": "unavailable",
+      "fetched_at": 1787808412,
+      "has_more": false,
+      "next_cursor": null,
+      "operation": "getTransactionsForAddress",
+      "parser_version": "source-result-v1",
+      "rate_limit": {},
+      "record_count": 0,
+      "records": [],
+      "request_hash": null,
+      "requested_end_ts": null,
+      "requested_start_ts": null,
+      "response_hash": null,
+      "retention_status": "unknown",
+      "retry_count": 0,
+      "returned_end_ts": null,
+      "returned_start_ts": null,
+      "source": "helius",
+      "status": "not_configured",
+      "warnings": [
+        "missing_env:HELIUS_API_KEY"
+      ]
+    },
+    {
+      "completeness": "unavailable",
+      "errors": [],
+      "evidence_quality": "unavailable",
+      "fetched_at": 1787808412,
+      "has_more": false,
+      "next_cursor": null,
+      "operation": "getSignaturesForAddress",
+      "parser_version": "source-result-v1",
+      "rate_limit": {},
+      "record_count": 0,
+      "records": [],
+      "request_hash": null,
+      "requested_end_ts": null,
+      "requested_start_ts": null,
+      "response_hash": null,
+      "retention_status": "unknown",
+      "retry_count": 0,
+      "returned_end_ts": null,
+      "returned_start_ts": null,
+      "source": "solana_rpc",
+      "status": "not_configured",
+      "warnings": [
+        "missing_env:HELIUS_RPC_URL"
+      ]
+    },
+    {
+      "completeness": "unavailable",
+      "errors": [],
+      "evidence_quality": "direct",
+      "fetched_at": 1787808412,
+      "has_more": false,
+      "next_cursor": null,
+      "operation": "creation_info",
+      "parser_version": "source-result-v1",
+      "rate_limit": {},
+      "record_count": 0,
+      "records": [],
+      "request_hash": null,
+      "requested_end_ts": null,
+      "requested_start_ts": null,
+      "response_hash": null,
+      "retention_status": "unknown",
+      "retry_count": 0,
+      "returned_end_ts": null,
+      "returned_start_ts": null,
+      "source": "birdeye",
+      "status": "not_configured",
+      "warnings": [
+        "missing_env:BIRDEYE_API_KEY"
+      ]
+    },
+    {
+      "completeness": "unavailable",
+      "errors": [],
+      "evidence_quality": "current_only",
+      "fetched_at": 1787808412,
+      "has_more": false,
+      "next_cursor": null,
+      "operation": "token_overview",
+      "parser_version": "source-result-v1",
+      "rate_limit": {},
+      "record_count": 0,
+      "records": [],
+      "request_hash": null,
+      "requested_end_ts": null,
+      "requested_start_ts": null,
+      "response_hash": null,
+      "retention_status": "unknown",
+      "retry_count": 0,
+      "returned_end_ts": null,
+      "returned_start_ts": null,
+      "source": "birdeye",
+      "status": "not_configured",
+      "warnings": [
+        "missing_env:BIRDEYE_API_KEY"
+      ]
+    },
+    {
+      "completeness": "unavailable",
+      "errors": [],
+      "evidence_quality": "parsed_direct",
+      "fetched_at": 1787808412,
+      "has_more": false,
+      "next_cursor": null,
+      "operation": "token_trades",
+      "parser_version": "source-result-v1",
+      "rate_limit": {},
+      "record_count": 0,
+      "records": [],
+      "request_hash": null,
+      "requested_end_ts": null,
+      "requested_start_ts": null,
+      "response_hash": null,
+      "retention_status": "unknown",
+      "retry_count": 0,
+      "returned_end_ts": null,
+      "returned_start_ts": null,
+      "source": "birdeye",
+      "status": "not_configured",
+      "warnings": [
+        "missing_env:BIRDEYE_API_KEY"
+      ]
+    }
+  ],
+  "tokens_attempted": [
+    "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+  ]
+}

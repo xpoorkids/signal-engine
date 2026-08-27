@@ -1,0 +1,12 @@
+{
+  "data_mode": "source",
+  "fixture_excluded_from_source_totals": true,
+  "states": [
+    "real source-backed",
+    "reconstructed",
+    "current-only",
+    "reference-only",
+    "missing",
+    "fixture"
+  ]
+}

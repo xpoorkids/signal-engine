@@ -1,0 +1,11 @@
+{
+  "data_mode": "source",
+  "request_budget": 500,
+  "requests_attempted": 6,
+  "sources": {
+    "birdeye": 3,
+    "dexscreener": 1,
+    "helius": 1,
+    "solana_rpc": 1
+  }
+}
