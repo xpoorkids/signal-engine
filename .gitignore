@@ -20,6 +20,12 @@ logs/
 
 # Generated analytics and private model artifacts
 artifacts/*.parquet
+artifacts/research/raw/
+artifacts/research/cache/
+artifacts/research/*.parquet
+research_data/
+state/research.db
+state/research.db-*
 *.parquet
 /models/
 /model_artifacts/
