@@ -7,10 +7,11 @@ import time
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.routes import health, scan, score, packet, watch, review, learning, positions
+from app.routes import health, scan, score, packet, watch, review, learning, positions, x_identities
 
 from app.services.db_service import resolve_engine_db_path
 from app.services.signal_learning_service import daily_report_worker, observe_recheck_worker, policy_automation_worker, snapshot_worker
+from app.services.x_identity_service import XIdentityService
 
 os.environ.setdefault("SIGNAL_ENGINE_PROCESS_ROLE", "engine")
 
@@ -26,6 +27,7 @@ app.include_router(watch.router)
 app.include_router(review.router)
 app.include_router(learning.router)
 app.include_router(positions.router)
+app.include_router(x_identities.router)
 
 
 @app.exception_handler(sqlite3.Error)
@@ -59,6 +61,15 @@ def log_storage_configuration() -> None:
         logger.warning(
             "[startup] SIGNAL_ENGINE_DB_PATH is unset; engine may use a local SQLite file that is not shared with worker."
         )
+
+
+@app.on_event("startup")
+def initialize_x_identity_blocklist() -> None:
+    try:
+        result = XIdentityService().ensure_seeded_once()
+        logger.warning("[startup] x_identity_seed status=%s", result.get("status"))
+    except Exception as exc:
+        logger.warning("[startup] x_identity_seed initialization failed error_type=%s", type(exc).__name__)
 
 
 def _background_workers_enabled() -> bool:

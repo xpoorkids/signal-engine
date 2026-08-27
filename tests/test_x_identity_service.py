@@ -184,26 +184,30 @@ def test_operator_can_disable_and_restore_block(tmp_path):
 
 def test_x_identity_routes_manage_blocks_and_token_links(tmp_path, monkeypatch):
     monkeypatch.setenv("SIGNAL_ENGINE_DB_PATH", str(tmp_path / "routes.db"))
+    monkeypatch.setenv("SIGNAL_ENGINE_X_IDENTITY_MANAGEMENT_ENABLED", "1")
+    monkeypatch.setenv("SIGNAL_ENGINE_OPERATOR_API_TOKEN", "test-operator-token")
     client = TestClient(main.app)
+    headers = {"Authorization": "Bearer test-operator-token"}
 
-    seed = client.post("/x-identities/seed")
+    seed = client.post("/x-identities/seed", headers=headers)
     assert seed.status_code == 200
 
-    listed = client.get("/x-identities/blocked")
+    listed = client.get("/x-identities/blocked", headers=headers)
     assert listed.status_code == 200
     assert len(listed.json()["identities"]) == 2
 
-    stable = client.post("/x-identities/operator_blocked_repeated_coin_rebrands_1/stable-id", json={"stable_x_user_id": "777"})
+    stable = client.post("/x-identities/operator_blocked_repeated_coin_rebrands_1/stable-id", json={"stable_x_user_id": "777"}, headers=headers)
     assert stable.status_code == 200
     assert stable.json()["stable_x_user_id"] == "777"
 
     link = client.post(
         "/x-identities/token-links",
         json={"token": "token-route-x", "stable_x_user_id": "777", "handle": "@Datboicoincto", "link_type": "developer_profile", "source": "operator_manual"},
+        headers=headers,
     )
     assert link.status_code == 200
 
-    history = client.get("/x-identities/operator_blocked_repeated_coin_rebrands_1/history")
+    history = client.get("/x-identities/operator_blocked_repeated_coin_rebrands_1/history", headers=headers)
     assert history.status_code == 200
     assert history.json()["risk_summary"]["handle_rename_count"] >= 10
     assert history.json()["token_links"][0]["token"] == "token-route-x"
