@@ -37,7 +37,7 @@ def _json(payload: dict[str, Any]) -> str:
 def _write_source_pilot_artifact(config: ResearchConfig, name: str, payload: dict[str, Any]) -> None:
     if config.mode != "source":
         return
-    out = config.artifact_dir / "source_pilot"
+    out = config.artifact_dir / "real_historical_pilot"
     out.mkdir(parents=True, exist_ok=True)
     (out / name).write_text(_json(payload), encoding="utf-8")
 

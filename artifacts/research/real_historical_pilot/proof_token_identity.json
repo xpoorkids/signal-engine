@@ -1,0 +1,51 @@
+{
+  "data_mode": "source",
+  "fixture_rows": 0,
+  "identity": [
+    {
+      "canonical_address": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2",
+      "chain": "solana",
+      "creation_confidence": "unavailable",
+      "creation_signature": null,
+      "creation_slot": null,
+      "creation_source": null,
+      "creation_ts": null,
+      "decimals": null,
+      "first_activity_ts": null,
+      "first_pair": "22CfmLna8Bsh7xrbyvGSs6NdD31iFj1UFVnwB7EberWU",
+      "first_pool_ts": 1787685741,
+      "first_trade_ts": null,
+      "identity_version": "source-token-identity-v1",
+      "launchpad": "pumpswap",
+      "name": "Pistacio",
+      "row_id": "identity:solana:FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2",
+      "source_agreement": [
+        "dexscreener:token_pairs:current_context"
+      ],
+      "source_disagreement": [],
+      "status": "partially_verified",
+      "supplied_address": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2",
+      "supply": null,
+      "symbol": "Pistacio",
+      "token_id": "8cc9843880f7b7a532d17d78",
+      "token_program": null,
+      "warnings": []
+    }
+  ],
+  "proof_status": {
+    "action_replay_count": 0,
+    "canonical_mint_verified": false,
+    "fee_count": 0,
+    "fixture_data_used": false,
+    "historical_candle_count": 0,
+    "historical_liquidity_count": 0,
+    "partial_feature_coverage": false,
+    "resolved_outcome_count": 0,
+    "snapshot_count": 0,
+    "status": "blocked_by_missing_credentials",
+    "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2",
+    "trade_count": 0,
+    "transaction_count": 0
+  },
+  "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+}

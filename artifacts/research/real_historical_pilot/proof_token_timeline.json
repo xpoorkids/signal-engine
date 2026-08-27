@@ -1,0 +1,22 @@
+{
+  "data_mode": "source",
+  "fixture_rows": 0,
+  "proof_status": {
+    "action_replay_count": 0,
+    "canonical_mint_verified": false,
+    "fee_count": 0,
+    "fixture_data_used": false,
+    "historical_candle_count": 0,
+    "historical_liquidity_count": 0,
+    "partial_feature_coverage": false,
+    "resolved_outcome_count": 0,
+    "snapshot_count": 0,
+    "status": "blocked_by_missing_credentials",
+    "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2",
+    "trade_count": 0,
+    "transaction_count": 0
+  },
+  "snapshot_count": 0,
+  "snapshots": [],
+  "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+}

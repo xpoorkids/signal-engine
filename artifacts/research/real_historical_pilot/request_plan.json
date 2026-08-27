@@ -1,0 +1,82 @@
+{
+  "blocked_operations": [
+    {
+      "operation": "getTransactionsForAddress",
+      "reason": "missing_env:HELIUS_API_KEY",
+      "source": "helius",
+      "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+    },
+    {
+      "operation": "getAccountInfo",
+      "reason": "missing_env:HELIUS_RPC_URL",
+      "source": "solana_rpc",
+      "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+    },
+    {
+      "operation": "getSignaturesForAddress",
+      "reason": "missing_env:HELIUS_RPC_URL",
+      "source": "solana_rpc",
+      "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+    },
+    {
+      "operation": "getTransaction",
+      "reason": "missing_env:HELIUS_RPC_URL",
+      "source": "solana_rpc",
+      "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+    },
+    {
+      "operation": "getTokenSupply",
+      "reason": "missing_env:HELIUS_RPC_URL",
+      "source": "solana_rpc",
+      "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+    },
+    {
+      "operation": "creation_info",
+      "reason": "missing_env:BIRDEYE_API_KEY",
+      "source": "birdeye",
+      "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+    },
+    {
+      "operation": "ohlcv_v3",
+      "reason": "missing_env:BIRDEYE_API_KEY",
+      "source": "birdeye",
+      "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+    },
+    {
+      "operation": "token_trades",
+      "reason": "missing_env:BIRDEYE_API_KEY",
+      "source": "birdeye",
+      "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+    },
+    {
+      "operation": "holder_distribution",
+      "reason": "missing_env:BIRDEYE_API_KEY",
+      "source": "birdeye",
+      "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+    },
+    {
+      "operation": "token_security",
+      "reason": "missing_env:BIRDEYE_API_KEY",
+      "source": "birdeye",
+      "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+    }
+  ],
+  "cached_requests": 0,
+  "cohort": "operator_seed_cohort_v1",
+  "data_mode": "source",
+  "expected_api_credits": "source_plan_dependent",
+  "expected_output_size": "bounded_by_request_budget_and_max_pages",
+  "likely_pages": 4,
+  "operations": 12,
+  "recommended_pilot_command": "python -m research.cli backfill --mode source --token FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2 --resume --request-budget 500",
+  "source_dependencies": [
+    "helius",
+    "solana_rpc",
+    "birdeye",
+    "dexscreener"
+  ],
+  "tokens": [
+    "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+  ],
+  "uncached_requests": 2
+}

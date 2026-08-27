@@ -1,0 +1,45 @@
+{
+  "data_mode": "source",
+  "fixture_rows": 0,
+  "historical_credentials_required": [
+    "HELIUS_API_KEY",
+    "HELIUS_RPC_URL",
+    "BIRDEYE_API_KEY"
+  ],
+  "proof_token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2",
+  "status": "blocked_by_missing_credentials",
+  "summary": {
+    "data_mode": "source",
+    "fixture_rows_in_source_totals": 0,
+    "fixture_totals_excluded": true,
+    "limitations": [
+      "current-only DEX Screener, holder, and Jupiter data are excluded from historical snapshots",
+      "missing historical price/liquidity remains missing",
+      "real matched controls require source-backed discovery coverage"
+    ],
+    "parquet_row_counts": {
+      "pair_observations": 1,
+      "token_identity": 1
+    },
+    "source_action_replay_count": 0,
+    "source_backed": true,
+    "source_outcome_count": 1,
+    "source_snapshot_count": 0,
+    "tokens": [
+      {
+        "chain": "solana",
+        "creation_ts": null,
+        "launchpad": "pumpswap",
+        "name": "Pistacio",
+        "symbol": "Pistacio",
+        "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2",
+        "verification_status": "partially_verified"
+      }
+    ]
+  },
+  "tokens_attempted": [
+    "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2",
+    "A13oRB9FFaiUjfi6LdCg6p9ka1u8SfGkUFs4SKvPpump",
+    "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump"
+  ]
+}

@@ -1,0 +1,350 @@
+{
+  "blocked": 0,
+  "completed": 0,
+  "data_mode": "source",
+  "failed": 0,
+  "fixture_data_used": false,
+  "parquet": [
+    {
+      "data_mode": "source",
+      "path": "research_data\\parquet\\token_identity\\chain=solana\\token_prefix=FZ\\year=2026\\month=08\\ca160c60571d5221a48d4fc111e14ac3.parquet",
+      "row_count": 1,
+      "table": "token_identity"
+    },
+    {
+      "data_mode": "source",
+      "path": "research_data\\parquet\\pair_observations\\chain=solana\\token_prefix=FZ\\year=2026\\month=08\\36f83ccc4bea5abf86b5ffb8aaf9bdac.parquet",
+      "row_count": 1,
+      "table": "pair_observations"
+    }
+  ],
+  "partial": 1,
+  "proof_token_status": {
+    "action_replay_count": 9,
+    "canonical_mint_verified": false,
+    "fee_count": 0,
+    "fixture_data_used": false,
+    "historical_candle_count": 0,
+    "historical_liquidity_count": 0,
+    "partial_feature_coverage": false,
+    "resolved_outcome_count": 0,
+    "snapshot_count": 0,
+    "status": "blocked_by_missing_credentials",
+    "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2",
+    "trade_count": 0,
+    "transaction_count": 0
+  },
+  "raw_responses_cached": 8,
+  "resume_used": true,
+  "source_results": [
+    {
+      "completeness": "complete",
+      "errors": [],
+      "evidence_quality": "current_only",
+      "fetched_at": 1787811664,
+      "has_more": false,
+      "next_cursor": null,
+      "operation": "token_pairs",
+      "parser_version": "source-result-v1",
+      "rate_limit": {
+        "correlation_id": "e0f1ff31f23b403fab34f8b1fc9b72a6",
+        "elapsed_ms": 35,
+        "limit": null,
+        "remaining": null,
+        "retry_after": null
+      },
+      "record_count": 1,
+      "records": [
+        {
+          "baseToken": {
+            "address": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2",
+            "name": "Pistacio",
+            "symbol": "Pistacio"
+          },
+          "chainId": "solana",
+          "dexId": "pumpswap",
+          "fdv": 5172205,
+          "info": {
+            "header": "https://cdn.dexscreener.com/cms/images/vYb5t3f8DD-wggz7?width=1500&height=500&quality=95&format=auto",
+            "imageUrl": "https://cdn.dexscreener.com/cms/images/cbCqu5WnLCIo1FXN?width=800&height=800&quality=95&format=auto",
+            "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2?timestamp=1787811300000",
+            "socials": [
+              {
+                "type": "twitter",
+                "url": "https://x.com/Marcello_695"
+              }
+            ],
+            "websites": []
+          },
+          "liquidity": {
+            "base": 27600651,
+            "quote": 1432.8467,
+            "usd": 291054.52
+          },
+          "marketCap": 5172225,
+          "pairAddress": "22CfmLna8Bsh7xrbyvGSs6NdD31iFj1UFVnwB7EberWU",
+          "pairCreatedAt": 1787685741000,
+          "priceChange": {
+            "h1": 16.88,
+            "h24": -48.88,
+            "h6": 13.91,
+            "m5": 4.34
+          },
+          "priceNative": "0.00005247",
+          "priceUsd": "0.005300",
+          "quoteToken": {
+            "address": "So11111111111111111111111111111111111111112",
+            "name": "Wrapped SOL",
+            "symbol": "SOL"
+          },
+          "txns": {
+            "h1": {
+              "buys": 482,
+              "sells": 529
+            },
+            "h24": {
+              "buys": 46874,
+              "sells": 39417
+            },
+            "h6": {
+              "buys": 5307,
+              "sells": 4469
+            },
+            "m5": {
+              "buys": 58,
+              "sells": 73
+            }
+          },
+          "url": "https://dexscreener.com/solana/22cfmlna8bsh7xrbyvgss6ndd31ifj1ufvnwb7eberwu",
+          "volume": {
+            "h1": 115403.86,
+            "h24": 11426780.63,
+            "h6": 1281956.26,
+            "m5": 19036.65
+          }
+        }
+      ],
+      "request_hash": "9802a4fc0170cbb1e78f7eb74a3c2a2bbaaf8f1452ce0b6b30f5e48b55ccb6bc",
+      "requested_end_ts": null,
+      "requested_start_ts": null,
+      "response_hash": "36017f61a2fe0659adc82d387f938fac0ae21fb9a09c94179002c67b15b8a086",
+      "retention_status": "source_reported_or_unprobed",
+      "retry_count": 0,
+      "returned_end_ts": null,
+      "returned_start_ts": null,
+      "source": "dexscreener",
+      "status": "success",
+      "warnings": []
+    },
+    {
+      "completeness": "unavailable",
+      "errors": [],
+      "evidence_quality": "parsed_direct",
+      "fetched_at": 1787811664,
+      "has_more": false,
+      "next_cursor": null,
+      "operation": "collect_transactions_for_address",
+      "parser_version": "helius-history-adapter-v1",
+      "rate_limit": {
+        "earliest_slot": null,
+        "latest_slot": null,
+        "pages": 1,
+        "raw_response_hashes": [],
+        "stop_reason": "unavailable"
+      },
+      "record_count": 0,
+      "records": [],
+      "request_hash": null,
+      "requested_end_ts": null,
+      "requested_start_ts": null,
+      "response_hash": null,
+      "retention_status": "mainnet_unlimited_per_helius_docs_or_plan_limited",
+      "retry_count": 0,
+      "returned_end_ts": null,
+      "returned_start_ts": null,
+      "source": "helius",
+      "status": "source_unavailable",
+      "warnings": [
+        "missing_env:HELIUS_API_KEY"
+      ]
+    },
+    {
+      "completeness": "unavailable",
+      "errors": [],
+      "evidence_quality": "direct",
+      "fetched_at": 1787811664,
+      "has_more": false,
+      "next_cursor": null,
+      "operation": "collect_signatures_for_address",
+      "parser_version": "solana-rpc-adapter-v1",
+      "rate_limit": {
+        "pages": 1,
+        "raw_response_hashes": [],
+        "stop_reason": "unavailable"
+      },
+      "record_count": 0,
+      "records": [],
+      "request_hash": null,
+      "requested_end_ts": null,
+      "requested_start_ts": null,
+      "response_hash": null,
+      "retention_status": "rpc_node_archive_availability_dependent",
+      "retry_count": 0,
+      "returned_end_ts": null,
+      "returned_start_ts": null,
+      "source": "solana_rpc",
+      "status": "source_unavailable",
+      "warnings": [
+        "missing_env:HELIUS_RPC_URL"
+      ]
+    },
+    {
+      "completeness": "complete",
+      "errors": [],
+      "evidence_quality": "direct",
+      "fetched_at": 1787811664,
+      "has_more": false,
+      "next_cursor": null,
+      "operation": "hydrate_signatures",
+      "parser_version": "solana-rpc-adapter-v1",
+      "rate_limit": {
+        "hydration_states": {},
+        "raw_response_hashes": [],
+        "requested": 0
+      },
+      "record_count": 0,
+      "records": [],
+      "request_hash": null,
+      "requested_end_ts": null,
+      "requested_start_ts": null,
+      "response_hash": null,
+      "retention_status": "rpc_node_archive_availability_dependent",
+      "retry_count": 0,
+      "returned_end_ts": null,
+      "returned_start_ts": null,
+      "source": "solana_rpc",
+      "status": "empty",
+      "warnings": []
+    },
+    {
+      "completeness": "unavailable",
+      "errors": [],
+      "evidence_quality": "direct",
+      "fetched_at": 1787811665,
+      "has_more": false,
+      "next_cursor": null,
+      "operation": "creation_info",
+      "parser_version": "source-result-v1",
+      "rate_limit": {},
+      "record_count": 0,
+      "records": [],
+      "request_hash": null,
+      "requested_end_ts": null,
+      "requested_start_ts": null,
+      "response_hash": null,
+      "retention_status": "unknown",
+      "retry_count": 0,
+      "returned_end_ts": null,
+      "returned_start_ts": null,
+      "source": "birdeye",
+      "status": "not_configured",
+      "warnings": [
+        "missing_env:BIRDEYE_API_KEY"
+      ]
+    },
+    {
+      "completeness": "unavailable",
+      "errors": [],
+      "evidence_quality": "current_only",
+      "fetched_at": 1787811665,
+      "has_more": false,
+      "next_cursor": null,
+      "operation": "token_overview",
+      "parser_version": "source-result-v1",
+      "rate_limit": {},
+      "record_count": 0,
+      "records": [],
+      "request_hash": null,
+      "requested_end_ts": null,
+      "requested_start_ts": null,
+      "response_hash": null,
+      "retention_status": "unknown",
+      "retry_count": 0,
+      "returned_end_ts": null,
+      "returned_start_ts": null,
+      "source": "birdeye",
+      "status": "not_configured",
+      "warnings": [
+        "missing_env:BIRDEYE_API_KEY"
+      ]
+    },
+    {
+      "completeness": "empty",
+      "errors": [],
+      "evidence_quality": "parsed_direct",
+      "fetched_at": null,
+      "has_more": false,
+      "next_cursor": null,
+      "operation": "collect_token_trades",
+      "parser_version": "birdeye-history-adapter-v1",
+      "rate_limit": {
+        "offset": 0,
+        "pages": 1,
+        "raw_response_hashes": [],
+        "stop_reason": "not_configured"
+      },
+      "record_count": 0,
+      "records": [],
+      "request_hash": null,
+      "requested_end_ts": 1787772141,
+      "requested_start_ts": 1787685741,
+      "response_hash": null,
+      "retention_status": "endpoint_plan_and_retention_dependent",
+      "retry_count": 0,
+      "returned_end_ts": null,
+      "returned_start_ts": null,
+      "source": "birdeye",
+      "status": "not_configured",
+      "warnings": [
+        "missing_env:BIRDEYE_API_KEY"
+      ]
+    },
+    {
+      "completeness": "empty",
+      "errors": [],
+      "evidence_quality": "direct",
+      "fetched_at": null,
+      "has_more": false,
+      "next_cursor": null,
+      "operation": "collect_ohlcv_history",
+      "parser_version": "birdeye-history-adapter-v1",
+      "rate_limit": {
+        "chosen_interval": null,
+        "pages": 1,
+        "raw_response_hashes": [],
+        "stop_reason": "not_configured"
+      },
+      "record_count": 0,
+      "records": [],
+      "request_hash": null,
+      "requested_end_ts": 1787772141,
+      "requested_start_ts": 1787685741,
+      "response_hash": null,
+      "retention_status": "measured_by_interval_downgrade",
+      "retry_count": 0,
+      "returned_end_ts": null,
+      "returned_start_ts": null,
+      "source": "birdeye",
+      "status": "not_configured",
+      "warnings": [
+        "missing_env:BIRDEYE_API_KEY",
+        "outside_retention_or_empty",
+        "interval:1s",
+        "endpoint_version:2026-08-27-birdeye-docs"
+      ]
+    }
+  ],
+  "tokens_attempted": [
+    "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+  ]
+}

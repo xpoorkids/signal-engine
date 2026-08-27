@@ -1,0 +1,15 @@
+{
+  "data_mode": "source",
+  "fixture_rows": 0,
+  "outcomes": [
+    {
+      "metrics_json": "{\"resolution_status\": \"insufficient_data_without_historical_price_path\", \"outcome_quality\": \"insufficient_data\"}",
+      "outcome_id": "7d72de29adcd57b9a341e67dca0a48cf",
+      "resolution_status": "insufficient_data",
+      "snapshot_id": null,
+      "token_id": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+    }
+  ],
+  "row_count": 1,
+  "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+}

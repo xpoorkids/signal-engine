@@ -1,0 +1,29 @@
+{
+  "data_mode": "source",
+  "fixture_rows_in_source_totals": 0,
+  "fixture_totals_excluded": true,
+  "limitations": [
+    "current-only DEX Screener, holder, and Jupiter data are excluded from historical snapshots",
+    "missing historical price/liquidity remains missing",
+    "real matched controls require source-backed discovery coverage"
+  ],
+  "parquet_row_counts": {
+    "pair_observations": 1,
+    "token_identity": 1
+  },
+  "source_action_replay_count": 0,
+  "source_backed": true,
+  "source_outcome_count": 1,
+  "source_snapshot_count": 0,
+  "tokens": [
+    {
+      "chain": "solana",
+      "creation_ts": null,
+      "launchpad": "pumpswap",
+      "name": "Pistacio",
+      "symbol": "Pistacio",
+      "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2",
+      "verification_status": "partially_verified"
+    }
+  ]
+}

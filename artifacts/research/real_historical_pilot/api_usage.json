@@ -1,0 +1,12 @@
+{
+  "data_mode": "source",
+  "fixture_rows": 0,
+  "raw_fetches": 62,
+  "requests_by_source": {
+    "birdeye": 17,
+    "capability_probe": 28,
+    "dexscreener": 5,
+    "helius": 5,
+    "solana_rpc": 7
+  }
+}

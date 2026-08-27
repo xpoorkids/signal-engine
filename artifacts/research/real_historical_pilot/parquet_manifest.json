@@ -1,0 +1,24 @@
+{
+  "data_mode": "source",
+  "fixture_rows": 0,
+  "row_counts": {
+    "pair_observations": 1,
+    "token_identity": 1
+  },
+  "tables": [
+    {
+      "data_mode": "source",
+      "path": "research_data\\parquet\\pair_observations\\chain=solana\\token_prefix=FZ\\year=2026\\month=08\\36f83ccc4bea5abf86b5ffb8aaf9bdac.parquet",
+      "row_count": 1,
+      "table_name": "pair_observations",
+      "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+    },
+    {
+      "data_mode": "source",
+      "path": "research_data\\parquet\\token_identity\\chain=solana\\token_prefix=FZ\\year=2026\\month=08\\ca160c60571d5221a48d4fc111e14ac3.parquet",
+      "row_count": 1,
+      "table_name": "token_identity",
+      "token": "FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2"
+    }
+  ]
+}
