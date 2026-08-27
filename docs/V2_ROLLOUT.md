@@ -24,3 +24,17 @@
 - Do not change production thresholds merely because V2 features exist.
 - Do not enable live trading.
 - Require resolved, out-of-sample, size-aware shadow outcomes before claiming profitability or approving model-led decisions.
+# Manual Action Engine Rollout
+
+The manual action engine is disabled by default and shadow-only when enabled.
+Rollout requires:
+
+1. keep `DRY_RUN=1` and `EXECUTION_MODE=shadow`
+2. enable `SIGNAL_ENGINE_ACTION_ENGINE_ENABLED=1`
+3. keep `SIGNAL_ENGINE_ACTION_ENGINE_SHADOW=1`
+4. verify recommendations persist in `action_recommendations`
+5. verify no wallet secret, private key, seed phrase, transaction construction,
+   signing, or submission path exists
+6. compare shadow outcomes before changing any production behavior
+
+This rollout does not deploy or merge by itself.

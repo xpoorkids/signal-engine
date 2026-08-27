@@ -54,3 +54,28 @@ Classifications emitted by this family are `ORGANIC_FEE_COMMITMENT`, `FEE_ACTIVI
 | `elite_score` | Integer point system over early quality signals. | Use as legacy route feature only. |
 | `dex_flow_quality_score` | Liquidity, volume, buys, buy/sell, volume/liquidity, and price-change points. | Split into organic flow, paid visibility, and manipulation components. |
 | `candidate_ev.net_edge_bps` | `base_upside * (0.70 + attention * 0.60) - slippage - risk_penalty`. | Label as `heuristic_net_edge` until calibrated outcomes exist. |
+# Manual Action Engine Metrics
+
+The manual action engine adds shadow decision-support metrics. These are
+heuristic and uncalibrated until strict walk-forward validation proves otherwise.
+
+- `probability_target_before_invalidation_pct`: shadow estimate that the target
+  is reached before the normal stop or thesis invalidation.
+- `probability_catalyst_target_before_invalidation_pct`: same concept for the
+  catalyst target.
+- `estimated_net_return_pct`: expected net return after execution cost estimate.
+- `probability_rug_like_event_pct`: safety estimate for rug-like failure.
+- `probability_liquidity_failure_pct`: safety estimate for liquidity failure.
+- `probability_sell_route_failure_pct`: safety estimate for sell-route failure.
+- `buy_impact_pct`: intended-size executable buy impact.
+- `sell_impact_pct`: intended-size executable sell impact.
+- `round_trip_cost_pct`: estimated buy plus sell impact, fees, and slippage.
+- `maximum_safe_size_usd`: estimated maximum manual size before impact becomes
+  unacceptable.
+- `data_confidence_pct`: data completeness and freshness estimate.
+- `catalyst_confidence_pct`: catalyst verification quality estimate.
+- `runner_target_pct`: target percentage of original tokens to preserve.
+- `tokens_to_recover_principal`: exact token quantity required to recover
+  remaining principal from executable net sell value.
+- `drawdown_from_executable_peak_pct`: executable value drawdown from executable
+  peak, not chart high.
