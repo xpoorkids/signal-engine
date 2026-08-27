@@ -73,7 +73,7 @@ async def resolve_token_identity_async(config: ResearchConfig, address: str) -> 
             owner = _extract_account_owner(account.records[0])
             resolution.token_program = owner
             if parsed.get("type") == "mint":
-                resolution.status = "partially_verified"
+                resolution.status = "verified"
                 info = parsed.get("info") or {}
                 resolution.decimals = info.get("decimals")
                 resolution.supply = str(info.get("supply")) if info.get("supply") is not None else None

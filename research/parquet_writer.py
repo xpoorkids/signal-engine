@@ -40,10 +40,6 @@ def write_parquet_table(config: ResearchConfig, table_name: str, rows: list[dict
     store.init_schema()
     with store.connect() as conn:
         conn.execute(
-            "DELETE FROM research_parquet_files WHERE table_name=? AND token=? AND data_mode=?",
-            (table_name, token, data_mode),
-        )
-        conn.execute(
             """
             INSERT OR REPLACE INTO research_parquet_files
             (file_id, table_name, path, row_count, chain, token, data_mode, schema_json, created_ts)

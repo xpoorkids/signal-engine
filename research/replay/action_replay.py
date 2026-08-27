@@ -18,11 +18,34 @@ PROFILES = ["BALANCED", "AGGRESSIVE", "AGGRESSIVE_CATALYST_RUNNER"]
 SIZES_USD = [100.0, 250.0, 500.0]
 
 
-def snapshot_market(features: dict[str, Any], *, intended_size_usd: float) -> dict[str, Any]:
+def snapshot_market(features: dict[str, Any], *, intended_size_usd: float, strict_historical_replay: bool = False) -> dict[str, Any]:
     liquidity = features.get("liquidity", {})
     liquidity_value = liquidity.get("value") if isinstance(liquidity, dict) else None
     estimate = reserve_execution_estimate(size_usd=intended_size_usd, liquidity_usd=liquidity_value)
     price = features.get("price", {})
+    if strict_historical_replay:
+        price_value = price.get("value") if isinstance(price, dict) else None
+        has_route = bool(estimate.route_available and liquidity_value and price_value)
+        return {
+            "liquidity_usd": liquidity_value,
+            "price_usd": price_value,
+            "buy_impact_pct": estimate.buy_impact_pct if has_route else None,
+            "sell_impact_pct": estimate.sell_impact_pct if has_route else None,
+            "round_trip_cost_pct": estimate.round_trip_cost_pct if has_route else None,
+            "maximum_safe_size_usd": liquidity_value * 0.015 if liquidity_value else None,
+            "buy_route_ok": has_route,
+            "sell_route_ok": has_route,
+            "quote_fresh": has_route,
+            "txns_m5_buys": features.get("buys", {}).get("value") if isinstance(features.get("buys"), dict) else None,
+            "txns_m5_sells": features.get("sells", {}).get("value") if isinstance(features.get("sells"), dict) else None,
+            "volume_m5": None,
+            "wallet_or_fee_confirmation": None,
+            "organic_flow_windows": None,
+            "execution_quality": estimate.quality if has_route else "insufficient_data",
+            "historical_replay": True,
+            "strict_historical_replay": True,
+            "missing_is_not_zero": features.get("missing_is_not_zero", True),
+        }
     return {
         "liquidity_usd": liquidity_value,
         "price_usd": price.get("value") if isinstance(price, dict) else None,
@@ -49,6 +72,7 @@ def replay_token_snapshots(
     *,
     profile: str,
     intended_size_usd: float,
+    strict_historical_replay: bool = False,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="action-replay-", ignore_cleanup_errors=True) as tmp:
         engine = ActionEngineService(db_path=f"{tmp}/engine.db")
@@ -58,10 +82,21 @@ def replay_token_snapshots(
         realized = 0.0
         for row in sorted(snapshots, key=lambda item: int(item["snapshot_ts"])):
             features = json.loads(row["features_json"])
-            market = snapshot_market(features, intended_size_usd=intended_size_usd)
+            market = snapshot_market(features, intended_size_usd=intended_size_usd, strict_historical_replay=strict_historical_replay)
             token = row["token_id"]
-            recommendation = engine.recommend_for_token(token, market=market, intended_size_usd=intended_size_usd, persist=False)
-            action = recommendation["action"]
+            insufficient = strict_historical_replay and (
+                market.get("price_usd") is None
+                or market.get("liquidity_usd") is None
+                or not market.get("sell_route_ok")
+            )
+            if insufficient:
+                recommendation = {"action": "WAIT", "display_action": "WAIT  INSUFFICIENT HISTORICAL EVIDENCE"}
+                action = "WAIT"
+                replay_status = "insufficient_evidence"
+            else:
+                recommendation = engine.recommend_for_token(token, market=market, intended_size_usd=intended_size_usd, persist=False)
+                action = recommendation["action"]
+                replay_status = "action_engine_reused"
             price = float((features.get("price") or {}).get("value") or 1.0)
             if action in {"BUY NOW", "CATALYST BUY NOW"} and simulated_tokens <= 0:
                 simulated_tokens = intended_size_usd / max(price, 0.000001)
@@ -85,6 +120,7 @@ def replay_token_snapshots(
                     "intended_size_usd": intended_size_usd,
                     "market": market,
                     "no_future_information": True,
+                    "replay_status": replay_status,
                 }
             )
         last_price = 1.0
@@ -105,6 +141,8 @@ def replay_token_snapshots(
                 "unrealized_usd": unrealized,
                 "total_executable_pnl_usd": realized + unrealized - total_cost,
                 "fixture_only": True,
+                "strict_historical_replay": strict_historical_replay,
+                "insufficient_evidence_count": sum(1 for item in actions if item.get("replay_status") == "insufficient_evidence"),
                 "policy_reused": "app.services.action_engine_service.ActionEngineService",
             },
         }

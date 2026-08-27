@@ -24,3 +24,19 @@ python -m research.cli plan-backfill --mode source --token FZqdw6oSDCbHtKYxmhnfb
 ```
 
 Do not commit research databases, raw API caches, large Parquet exports, wallet caches, or API response dumps.
+# Real Historical Pilot Reproduction
+
+For the first real source-backed pilot, use explicit source mode:
+
+```bash
+python -m research.cli doctor --mode source
+python -m research.cli capabilities --mode source
+python -m research.cli plan-backfill --mode source --token FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2 --source helius,solana_rpc,birdeye,dexscreener
+python -m research.cli backfill --mode source --token FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2 --source helius,solana_rpc,birdeye,dexscreener --request-budget 100 --max-pages 3 --max-records 250 --concurrency 2 --resume
+python -m research.cli build-features --mode source --token FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2
+python -m research.cli build-outcomes --mode source --token FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2
+python -m research.cli replay-actions --mode source --token FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2
+python -m research.cli report --mode source --token FZqdw6oSDCbHtKYxmhnfbi97SnyVy8jaYpdCoMrrjKa2
+```
+
+Required historical credentials are `HELIUS_API_KEY`, `HELIUS_RPC_URL`, and `BIRDEYE_API_KEY`. Missing credentials must produce a blocked or partial pilot, never fixture substitution.
