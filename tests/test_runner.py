@@ -81,6 +81,10 @@ def test_persist_candidate_delivery_create_updates_state(monkeypatch):
         "app.services.state_service.mark_candidate_alert_sent",
         lambda token: marked.append(token),
     )
+    monkeypatch.setattr(
+        "app.services.state_service.consume_candidate_rate_limit",
+        lambda _limit: True,
+    )
 
     event = Event(type="candidate", source="test", token="token-3")
     runner._persist_candidate_delivery(
@@ -202,6 +206,11 @@ def test_non_candidate_cooldown_key_separates_sniper_from_heating():
 def test_worker_health_metadata_exposes_discovery_source_health(monkeypatch):
     monkeypatch.setattr(runner, "_QUEUE", None)
     monkeypatch.setattr(runner, "_TASK_PROGRESS", {"event_loop": {"status": "completed", "updated_ts": 1, "completed_count": 3}})
+    monkeypatch.setattr(
+        runner,
+        "get_candidate_rate_limit_state",
+        lambda limit: {"limit_per_hour": limit, "remaining": limit, "allowed": True},
+    )
     metadata = runner._worker_health_metadata()
 
     assert "x_signal_enabled" in metadata
