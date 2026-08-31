@@ -77,6 +77,7 @@ Gotchas
   broader context.
 """
 
+import asyncio
 import os
 import time
 from typing import Any, Optional, Dict
@@ -93,7 +94,7 @@ async def dex_enrich_token(token: str) -> dict:
     present.
     """
     try:
-        r = requests.get(f"{DEX_BASE}/dex/tokens/{token}", timeout=8)
+        r = await asyncio.to_thread(requests.get, f"{DEX_BASE}/dex/tokens/{token}", timeout=8)
         if r.status_code == 200:
             data = r.json()
             if isinstance(data, dict):

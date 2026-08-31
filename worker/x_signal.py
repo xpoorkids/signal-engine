@@ -1,3 +1,4 @@
+import os
 import time
 from typing import Any, Optional
 
@@ -14,6 +15,10 @@ from worker.metadata import fetch_token_metadata
 
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CACHE_TTL_SEC = 1800
+_COOLDOWN_UNTIL_TS = 0.0
+_COOLDOWN_REASON: str | None = None
+_CONSECUTIVE_FAILURES = 0
+_SUPPRESSED_QUERY_COUNT = 0
 _LAST_HEALTH: dict[str, Any] = {
     "last_query_ts": None,
     "last_success_ts": None,
@@ -27,13 +32,54 @@ _LAST_HEALTH: dict[str, Any] = {
 
 
 def get_x_signal_health() -> dict[str, Any]:
+    now = time.time()
     return {
         **_LAST_HEALTH,
         "configured": bool(X_BEARER_TOKEN),
         "heavy_handles_count": len(X_HEAVY_HANDLES),
         "heavy_author_ids_count": len(X_HEAVY_AUTHOR_IDS),
         "cache_size": len(_CACHE),
+        "cooldown_until_ts": _COOLDOWN_UNTIL_TS or None,
+        "cooldown_remaining_seconds": round(max(0.0, _COOLDOWN_UNTIL_TS - now), 1),
+        "cooldown_reason": _COOLDOWN_REASON,
+        "consecutive_failures": _CONSECUTIVE_FAILURES,
+        "suppressed_query_count": _SUPPRESSED_QUERY_COUNT,
     }
+
+
+def _env_seconds(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default)) or default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _retry_after_seconds(response: Any) -> int | None:
+    headers = getattr(response, "headers", None)
+    value = headers.get("Retry-After") if headers is not None else None
+    try:
+        return max(1, int(str(value).strip())) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _activate_cooldown(status_code: int, response: Any, now: float) -> None:
+    global _CONSECUTIVE_FAILURES, _COOLDOWN_REASON, _COOLDOWN_UNTIL_TS
+    _CONSECUTIVE_FAILURES += 1
+    if status_code in {401, 403}:
+        seconds = _env_seconds("SIGNAL_ENGINE_X_AUTH_COOLDOWN_SEC", 3600)
+        reason = f"auth_http_{status_code}"
+    elif status_code == 429:
+        seconds = _retry_after_seconds(response) or min(
+            _env_seconds("SIGNAL_ENGINE_X_RATE_LIMIT_MAX_COOLDOWN_SEC", 1800),
+            _env_seconds("SIGNAL_ENGINE_X_RATE_LIMIT_COOLDOWN_SEC", 300) * (2 ** min(_CONSECUTIVE_FAILURES - 1, 3)),
+        )
+        reason = "rate_limited_http_429"
+    else:
+        seconds = min(900, 30 * (2 ** min(_CONSECUTIVE_FAILURES - 1, 4)))
+        reason = f"http_{status_code}"
+    _COOLDOWN_UNTIL_TS = now + seconds
+    _COOLDOWN_REASON = reason
 
 
 def _build_query(token: str, symbol: str, name: str) -> str:
@@ -67,6 +113,7 @@ def _user_lookup(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def fetch_x_signal(token: str, symbol: str = "", name: str = "") -> Optional[dict[str, Any]]:
+    global _CONSECUTIVE_FAILURES, _COOLDOWN_REASON, _COOLDOWN_UNTIL_TS, _SUPPRESSED_QUERY_COUNT
     if not X_BEARER_TOKEN or not token:
         _LAST_HEALTH.update(
             {
@@ -93,6 +140,18 @@ def fetch_x_signal(token: str, symbol: str = "", name: str = "") -> Optional[dic
             }
         )
         return cached[1]
+
+    if now < _COOLDOWN_UNTIL_TS:
+        _SUPPRESSED_QUERY_COUNT += 1
+        _LAST_HEALTH.update(
+            {
+                "last_query_ts": now,
+                "last_token": token,
+                "last_error": f"cooldown_active:{_COOLDOWN_REASON or 'provider_failure'}",
+                "last_result_count": None,
+            }
+        )
+        return None
 
     if not symbol or not name:
         meta = fetch_token_metadata(token)
@@ -130,14 +189,19 @@ def fetch_x_signal(token: str, symbol: str = "", name: str = "") -> Optional[dic
         )
         _LAST_HEALTH["last_status_code"] = r.status_code
         if r.status_code >= 300:
+            failure_ts = time.time()
+            _activate_cooldown(r.status_code, r, failure_ts)
             _LAST_HEALTH.update(
                 {
-                    "last_error_ts": time.time(),
+                    "last_error_ts": failure_ts,
                     "last_error": f"http_{r.status_code}",
                     "last_result_count": None,
                 }
             )
-            print(f"[x-signal] status={r.status_code} token={token} body={r.text[:160]}", flush=True)
+            print(
+                f"[x-signal] status={r.status_code} token={token} cooldown_reason={_COOLDOWN_REASON}",
+                flush=True,
+            )
             return None
         payload = r.json()
         tweets = payload.get("data") or []
@@ -188,6 +252,9 @@ def fetch_x_signal(token: str, symbol: str = "", name: str = "") -> Optional[dic
             "replies": replies,
         }
         _CACHE[token] = (now, result)
+        _CONSECUTIVE_FAILURES = 0
+        _COOLDOWN_UNTIL_TS = 0.0
+        _COOLDOWN_REASON = None
         _LAST_HEALTH.update(
             {
                 "last_success_ts": time.time(),
@@ -202,10 +269,13 @@ def fetch_x_signal(token: str, symbol: str = "", name: str = "") -> Optional[dic
         )
         return result
     except Exception as ex:
+        failure_ts = time.time()
+        _activate_cooldown(599, None, failure_ts)
         _LAST_HEALTH.update(
             {
-                "last_error_ts": time.time(),
+                "last_error_ts": failure_ts,
                 "last_error": f"{type(ex).__name__}: {ex}"[:240],
+                "last_status_code": None,
                 "last_result_count": None,
             }
         )

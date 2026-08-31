@@ -1,4 +1,6 @@
 import os
+import asyncio
+
 import requests
 
 
@@ -13,7 +15,7 @@ async def score_wallet_risk(wallet: str) -> dict:
     }
 
     try:
-        r = requests.get(f"{RUGCHECK_BASE}/v1/wallet/{wallet}", timeout=6)
+        r = await asyncio.to_thread(requests.get, f"{RUGCHECK_BASE}/v1/wallet/{wallet}", timeout=6)
         if r.status_code == 200:
             data = r.json()
             risk = float(data.get("risk", 0.0)) if isinstance(data, dict) else 0.0

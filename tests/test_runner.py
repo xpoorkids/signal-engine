@@ -201,6 +201,7 @@ def test_non_candidate_cooldown_key_separates_sniper_from_heating():
 
 def test_worker_health_metadata_exposes_discovery_source_health(monkeypatch):
     monkeypatch.setattr(runner, "_QUEUE", None)
+    monkeypatch.setattr(runner, "_TASK_PROGRESS", {"event_loop": {"status": "completed", "updated_ts": 1, "completed_count": 3}})
     metadata = runner._worker_health_metadata()
 
     assert "x_signal_enabled" in metadata
@@ -213,6 +214,8 @@ def test_worker_health_metadata_exposes_discovery_source_health(monkeypatch):
     assert "scanner_current_source" in producer
     assert "x_signal_health" in producer
     assert "discord_delivery_health" in producer
+    assert metadata["task_progress"]["event_loop"]["completed_count"] == 3
+    assert metadata["task_progress"]["event_loop"]["age_seconds"] >= 0
 
 
 def test_apply_route_precedence_drops_candidate_when_sniper_exists():

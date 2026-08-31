@@ -639,6 +639,44 @@ def test_diagnostics_and_health_bootstrap_schema_on_fresh_db(tmp_path, monkeypat
     assert health["storage"]["decision_count"] == 0
 
 
+def test_diagnostics_uses_full_window_counts_when_analysis_is_sampled(tmp_path, monkeypatch):
+    db_path = tmp_path / "engine.db"
+    monkeypatch.setattr(sls, "DB_PATH", db_path)
+    sls.init()
+    now = int(sls.time.time())
+
+    for offset in range(5):
+        sls.record_signal_decision(
+            token=f"emit-{offset}",
+            event_type="candidate",
+            stage="candidate",
+            decision="candidate_ready",
+            action_taken="emit",
+            ts_value=now - 200 + offset,
+            source="test",
+        )
+    for offset in range(100):
+        sls.record_signal_decision(
+            token=f"skip-{offset}",
+            event_type="candidate",
+            stage="candidate",
+            decision="candidate_gate_skip",
+            action_taken="skip",
+            ts_value=now - 100 + offset,
+            source="test",
+        )
+
+    summary = sls.get_diagnostics_summary(hours=1, limit=100)
+    health = sls.get_engine_health_digest(hours=1)
+
+    assert summary["sampled"] is True
+    assert summary["count_scope"] == "full_window"
+    assert summary["counts_by_action"] == {"emit": 5, "skip": 100}
+    assert summary["sampled_counts_by_action"] == {"skip": 100}
+    assert health["sent_count"] == 5
+    assert health["total_decisions"] == 105
+
+
 def test_diagnostics_summary_includes_outcome_analysis(tmp_path, monkeypatch):
     db_path = tmp_path / "engine.db"
     monkeypatch.setattr(sls, "DB_PATH", db_path)

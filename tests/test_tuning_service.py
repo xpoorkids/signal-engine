@@ -456,7 +456,11 @@ def test_ops_digest_uses_fast_center(monkeypatch):
     monkeypatch.setattr(
         sls,
         "get_diagnostics_summary",
-        lambda **kwargs: {"counts_by_decision": {"sent": 1}, "top_skip_reasons": []},
+        lambda **kwargs: {
+            "counts_by_decision": {},
+            "counts_by_action": {"emit": 1},
+            "top_skip_reasons": [],
+        },
     )
     monkeypatch.setattr(ts, "get_tuning_rollout_summary", lambda: {"worker_engine_alignment": [], "recommended_actions": []})
     monkeypatch.setattr(ts, "list_rollout_notifications", lambda **kwargs: [])

@@ -279,6 +279,7 @@ _DEX_SCAN_LAST_EMIT: dict[str, float] = {}
 _WORKER_INSTANCE_ID = build_worker_instance_id()
 _WORKER_V2_FATAL_HEALTH: dict[str, Any] = {"healthy": True, "failed_task": None, "error": None}
 _OPTIONAL_TASK_RESTART_COUNTS: dict[str, int] = {}
+_TASK_PROGRESS: dict[str, dict[str, Any]] = {}
 DEX_SCAN_EMIT_COOLDOWN_SEC = int(os.getenv("DEX_SCAN_EMIT_COOLDOWN_SEC", "300"))
 
 
@@ -339,6 +340,30 @@ def _task_health() -> dict[str, dict[str, Any]]:
     return health
 
 
+def _mark_task_progress(name: str, status: str, **details: Any) -> None:
+    previous = _TASK_PROGRESS.get(name) if isinstance(_TASK_PROGRESS.get(name), dict) else {}
+    completed_count = int(previous.get("completed_count") or 0)
+    if status == "completed":
+        completed_count += 1
+    _TASK_PROGRESS[name] = {
+        "status": status,
+        "updated_ts": time.time(),
+        "completed_count": completed_count,
+        **details,
+    }
+
+
+def _task_progress_health(now: float) -> dict[str, dict[str, Any]]:
+    return {
+        name: {
+            **payload,
+            "age_seconds": round(max(0.0, now - float(payload.get("updated_ts") or now)), 1),
+        }
+        for name, payload in _TASK_PROGRESS.items()
+        if isinstance(payload, dict)
+    }
+
+
 def _worker_health_metadata() -> dict[str, Any]:
     now = time.time()
     ws_last_activity = float(getattr(helius_listener, "LAST_WS_ACTIVITY", 0.0) or 0.0)
@@ -372,6 +397,7 @@ def _worker_health_metadata() -> dict[str, Any]:
         "candidate_rate_limit_effective_per_hour": max(1, EARLY_WATCH_RATE_LIMIT_PER_HOUR),
         "candidate_rate_limit_state": rate_limit_state,
         "tasks": _task_health(),
+        "task_progress": _task_progress_health(now),
         "producer_health": {
             "ws_last_activity_age_seconds": round(now - ws_last_activity, 1) if ws_last_activity else None,
             "scanner_last_scan_age_seconds": round(now - scan_last_ts, 1) if scan_last_ts else None,
@@ -777,9 +803,12 @@ async def event_loop(q: asyncio.Queue) -> None:
     repo = WorkerRuntimeRepository() if worker_v2_enabled() else None
     if repo is not None:
         repo.init_schema()
+    _mark_task_progress("event_loop", "waiting")
     while True:
         e: Event = await q.get()
+        _mark_task_progress("event_loop", "processing", event_type=e.type, token=e.token)
         dedupe_sig = f"{e.signature}:{e.type}:{e.token or ''}" if e.signature else None
+        processing_error_type: str | None = None
         try:
             log_event(logger, logging.INFO, "event-loop", action="recv", type=e.type, token=e.token, sig=e.signature)
             if repo is not None:
@@ -853,6 +882,7 @@ async def event_loop(q: asyncio.Queue) -> None:
                     if delivery.success:
                         maybe_open_shadow_position(de)
         except Exception as ex:
+            processing_error_type = type(ex).__name__
             log_event(
                 logger,
                 logging.ERROR,
@@ -866,23 +896,30 @@ async def event_loop(q: asyncio.Queue) -> None:
             traceback.print_exc()
         finally:
             q.task_done()
+            if processing_error_type:
+                _mark_task_progress("event_loop", "error", event_type=e.type, error_type=processing_error_type)
+            else:
+                _mark_task_progress("event_loop", "completed", event_type=e.type, token=e.token)
 
 
 async def heartbeat_loop() -> None:
     last_heartbeat = 0.0
     while True:
         if time.time() - last_heartbeat > 30:
+            _mark_task_progress("heartbeat_loop", "persisting")
             persisted = record_runtime_heartbeat(
                 service_role="worker",
                 metadata=_worker_health_metadata(),
             )
             logger.info("[heartbeat] worker alive persisted=%s", persisted)
+            _mark_task_progress("heartbeat_loop", "completed", persisted=bool(persisted))
             last_heartbeat = time.time()
         await asyncio.sleep(1)
 
 
 async def dex_scan_loop(q: asyncio.Queue) -> None:
     while True:
+        _mark_task_progress("dex_scanner", "scanning")
         try:
             hits = await asyncio.to_thread(process_scan)
             scanner.LAST_SCAN_TS = time.time()
@@ -915,8 +952,10 @@ async def dex_scan_loop(q: asyncio.Queue) -> None:
                         },
                     )
                 )
+            _mark_task_progress("dex_scanner", "completed", candidates=len(hits))
         except Exception as exc:
             scanner.LAST_SCAN_ERROR = f"{type(exc).__name__}: {exc}"
+            _mark_task_progress("dex_scanner", "error", error_type=type(exc).__name__)
             log_event(logger, logging.ERROR, "dex-scan-error", error_type=type(exc).__name__, error=str(exc))
         await asyncio.sleep(max(5, int(getattr(scanner, "SCAN_INTERVAL", 30) or 30)))
 

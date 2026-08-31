@@ -263,6 +263,23 @@ Use these routes to investigate whether a gate is preventing runners or protecti
 - `SIGNAL_ENGINE_OPS_WEBHOOK_URL`
 - `OPS_WEBHOOK_URL`
 
+### Authentication
+
+- `SIGNAL_ENGINE_OPERATOR_API_TOKEN`
+- `SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN`
+- `SIGNAL_ENGINE_X_IDENTITY_MANAGEMENT_ENABLED`
+- `SIGNAL_ENGINE_X_IDENTITY_READ_PUBLIC`
+
+Operator and internal-write tokens must be separate random secrets. Operator commands use an `Authorization: Bearer` header; worker writes and guarded storage recovery use `X-Signal-Engine-Token`. Both paths fail closed when their token is not configured.
+
+### Provider Backoff
+
+- `SIGNAL_ENGINE_X_AUTH_COOLDOWN_SEC`
+- `SIGNAL_ENGINE_X_RATE_LIMIT_COOLDOWN_SEC`
+- `SIGNAL_ENGINE_X_RATE_LIMIT_MAX_COOLDOWN_SEC`
+- `SIGNAL_ENGINE_DEX_RATE_LIMIT_COOLDOWN_SEC`
+- `SIGNAL_ENGINE_DEX_RATE_LIMIT_MAX_COOLDOWN_SEC`
+
 ### Ops Digest Policy
 
 - `SIGNAL_ENGINE_OPS_DIGEST_COOLDOWN_SEC`

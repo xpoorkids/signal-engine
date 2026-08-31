@@ -25,6 +25,14 @@ LAST_SOURCE_HEALTH: dict[str, object] = {
     "sources": {},
     "errors": {},
 }
+_PROVIDER_COOLDOWN_UNTIL_TS = 0.0
+_PROVIDER_COOLDOWN_REASON: str | None = None
+_PROVIDER_CONSECUTIVE_FAILURES = 0
+_PROVIDER_SUPPRESSED_SCAN_COUNT = 0
+
+
+class DexProviderCooldown(RuntimeError):
+    pass
 
 
 def _search_queries() -> list[str]:
@@ -87,8 +95,31 @@ def _pick_pair_token(pair: dict) -> str | None:
 
 
 def _fetch_json(url: str):
+    global _PROVIDER_CONSECUTIVE_FAILURES, _PROVIDER_COOLDOWN_REASON, _PROVIDER_COOLDOWN_UNTIL_TS
+    now = time.time()
+    if now < _PROVIDER_COOLDOWN_UNTIL_TS:
+        raise DexProviderCooldown(_PROVIDER_COOLDOWN_REASON or "provider_cooldown_active")
     r = requests.get(url, timeout=10)
+    if r.status_code == 429:
+        _PROVIDER_CONSECUTIVE_FAILURES += 1
+        try:
+            retry_after = max(1, int(str(r.headers.get("Retry-After") or "").strip()))
+        except (AttributeError, TypeError, ValueError):
+            retry_after = 0
+        try:
+            default_cooldown = max(1, int(os.getenv("SIGNAL_ENGINE_DEX_RATE_LIMIT_COOLDOWN_SEC", "120") or 120))
+            max_cooldown = max(default_cooldown, int(os.getenv("SIGNAL_ENGINE_DEX_RATE_LIMIT_MAX_COOLDOWN_SEC", "1800") or 1800))
+        except (TypeError, ValueError):
+            default_cooldown = 120
+            max_cooldown = 1800
+        cooldown = retry_after or min(max_cooldown, default_cooldown * (2 ** min(_PROVIDER_CONSECUTIVE_FAILURES - 1, 3)))
+        _PROVIDER_COOLDOWN_UNTIL_TS = now + cooldown
+        _PROVIDER_COOLDOWN_REASON = "rate_limited_http_429"
+        raise DexProviderCooldown(_PROVIDER_COOLDOWN_REASON)
     r.raise_for_status()
+    _PROVIDER_CONSECUTIVE_FAILURES = 0
+    _PROVIDER_COOLDOWN_UNTIL_TS = 0.0
+    _PROVIDER_COOLDOWN_REASON = None
     return r.json()
 
 
@@ -112,6 +143,7 @@ def _source_item(source: str, *, ok: bool, pair_count: int = 0, token_count: int
 
 
 def get_dex_source_health() -> dict[str, object]:
+    now = time.time()
     return {
         "last_started_ts": LAST_SOURCE_HEALTH.get("last_started_ts"),
         "last_finished_ts": LAST_SOURCE_HEALTH.get("last_finished_ts"),
@@ -120,6 +152,11 @@ def get_dex_source_health() -> dict[str, object]:
         "total_pairs": LAST_SOURCE_HEALTH.get("total_pairs", 0),
         "sources": dict(LAST_SOURCE_HEALTH.get("sources") or {}),
         "errors": dict(LAST_SOURCE_HEALTH.get("errors") or {}),
+        "cooldown_until_ts": _PROVIDER_COOLDOWN_UNTIL_TS or None,
+        "cooldown_remaining_seconds": round(max(0.0, _PROVIDER_COOLDOWN_UNTIL_TS - now), 1),
+        "cooldown_reason": _PROVIDER_COOLDOWN_REASON,
+        "consecutive_failures": _PROVIDER_CONSECUTIVE_FAILURES,
+        "suppressed_scan_count": _PROVIDER_SUPPRESSED_SCAN_COUNT,
     }
 
 
@@ -262,8 +299,22 @@ def _fetch_j7tracker_pairs() -> tuple[list[dict], dict[str, dict]]:
 
 
 def fetch_solana_pairs():
+    global _PROVIDER_SUPPRESSED_SCAN_COUNT
     pairs = []
     started = time.time()
+    if started < _PROVIDER_COOLDOWN_UNTIL_TS:
+        _PROVIDER_SUPPRESSED_SCAN_COUNT += 1
+        LAST_SOURCE_HEALTH.update(
+            {
+                "last_started_ts": started,
+                "last_finished_ts": started,
+                "in_progress": False,
+                "current_source": None,
+                "total_pairs": 0,
+                "errors": {"provider": _PROVIDER_COOLDOWN_REASON or "provider_cooldown_active"},
+            }
+        )
+        return []
     LAST_SOURCE_HEALTH.update(
         {
             "last_started_ts": started,

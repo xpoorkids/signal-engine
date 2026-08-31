@@ -5557,7 +5557,8 @@ async def policy_automation_worker() -> None:
     init()
     while True:
         try:
-            result = run_policy_automation_cycle(
+            result = await asyncio.to_thread(
+                run_policy_automation_cycle,
                 hours=max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTOMATION_HOURS", "24"))),
                 replay_limit=max(1, int(os.getenv("SIGNAL_ENGINE_POLICY_AUTOMATION_REPLAY_LIMIT", "20"))),
             )
@@ -5596,6 +5597,15 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
             LIMIT ?
             """,
             (cutoff, sample_limit),
+        ).fetchall()
+        decision_count_rows = c.execute(
+            """
+            SELECT decision, action_taken, stage, COUNT(1)
+            FROM signal_decisions
+            WHERE created_ts >= ?
+            GROUP BY decision, action_taken, stage
+            """,
+            (cutoff,),
         ).fetchall()
         outcome_rows = c.execute(
             """
@@ -6267,15 +6277,34 @@ def get_diagnostics_summary(hours: int = 24, limit: int | None = None) -> dict[s
     overall_negative = sum(int(outcome_counts.get(label) or 0) for label in _NEGATIVE_OUTCOME_LABELS)
     overall_resolved = overall_positive + overall_negative
 
+    sampled_counts_by_decision = counts_by_decision
+    sampled_counts_by_action = counts_by_action
+    sampled_counts_by_stage = stage_counts
+    counts_by_decision = {}
+    counts_by_action = {}
+    stage_counts = {}
+    for decision, action_taken, stage, count in decision_count_rows:
+        count_value = int(count or 0)
+        decision_key = str(decision or "unknown")
+        action_key = _decision_action_bucket(action_taken, decision)
+        stage_key = str(stage or "unknown")
+        counts_by_decision[decision_key] = counts_by_decision.get(decision_key, 0) + count_value
+        counts_by_action[action_key] = counts_by_action.get(action_key, 0) + count_value
+        stage_counts[stage_key] = stage_counts.get(stage_key, 0) + count_value
+
     return {
         "lookback_hours": hours,
         "sample_limit": sample_limit,
         "sampled": len(decision_rows) >= sample_limit or len(outcome_rows) >= sample_limit,
         "decision_sample_size": len(decision_rows),
         "outcome_sample_size": len(outcome_rows),
+        "count_scope": "full_window",
         "counts_by_decision": counts_by_decision,
         "counts_by_action": counts_by_action,
         "counts_by_stage": stage_counts,
+        "sampled_counts_by_decision": sampled_counts_by_decision,
+        "sampled_counts_by_action": sampled_counts_by_action,
+        "sampled_counts_by_stage": sampled_counts_by_stage,
         "feature_coverage_by_group": {
             "by_stage": _format_feature_coverage(feature_coverage_groups["by_stage"]),
             "by_decision": _format_feature_coverage(feature_coverage_groups["by_decision"]),
@@ -6339,12 +6368,8 @@ def get_engine_health_digest(hours: int = 6) -> dict[str, Any]:
         ).fetchone()
 
     counts_by_decision = summary.get("counts_by_decision") if isinstance(summary.get("counts_by_decision"), dict) else {}
-    sessions = summary.get("sessions") if isinstance(summary.get("sessions"), dict) else {}
-    sent_count = sum(
-        int(stats.get("sent") or 0)
-        for stats in sessions.values()
-        if isinstance(stats, dict)
-    )
+    counts_by_action = summary.get("counts_by_action") if isinstance(summary.get("counts_by_action"), dict) else {}
+    sent_count = int(counts_by_action.get("emit") or 0)
     skipped_count = sum(int(value or 0) for key, value in counts_by_decision.items() if "skip" in str(key))
     blocked_count = sum(int(value or 0) for key, value in counts_by_decision.items() if "block" in str(key))
     total_decisions = sum(int(value or 0) for value in counts_by_decision.values())
@@ -6911,7 +6936,12 @@ def get_live_validation_records(
     _ensure_schema()
     cutoff = int(time.time()) - max(1, hours) * 3600
     requested_limit = max(1, int(limit))
-    row_limit = max(requested_limit, min(5000, requested_limit * (20 if sent_only else 5)))
+    if sent_only:
+        row_limit = min(5000, requested_limit * 20)
+    elif route_class:
+        row_limit = min(5000, requested_limit * 5)
+    else:
+        row_limit = requested_limit
     with _connect() as c:
         signal_rows = c.execute(
             """
@@ -8812,11 +8842,15 @@ async def observe_recheck_worker() -> None:
     init()
     while True:
         try:
-            sync = sync_observe_review_queue(
+            sync = await asyncio.to_thread(
+                sync_observe_review_queue,
                 hours=max(1, int(os.getenv("SIGNAL_ENGINE_OBSERVE_SYNC_HOURS", "24"))),
                 limit=max(1, int(os.getenv("SIGNAL_ENGINE_OBSERVE_SYNC_LIMIT", "200"))),
             )
-            recheck = run_observe_rechecks(limit=max(1, int(os.getenv("SIGNAL_ENGINE_OBSERVE_RECHECK_LIMIT", "50"))))
+            recheck = await asyncio.to_thread(
+                run_observe_rechecks,
+                limit=max(1, int(os.getenv("SIGNAL_ENGINE_OBSERVE_RECHECK_LIMIT", "50"))),
+            )
             logger.info(
                 "[observe-recheck] synced created=%s updated=%s processed=%s",
                 sync.get("created"),
@@ -8824,7 +8858,7 @@ async def observe_recheck_worker() -> None:
                 recheck.get("processed"),
             )
             if _watch_override_autopilot_enabled():
-                autopilot = run_watch_override_autopilot()
+                autopilot = await asyncio.to_thread(run_watch_override_autopilot)
                 logger.info(
                     "[watch-override-autopilot] status=%s activated=%s active_after=%s",
                     autopilot.get("status"),
@@ -9054,8 +9088,15 @@ def render_daily_opportunity_html(*, hours: int = 6, limit: int = 25) -> str:
 </html>"""
 
 
-def get_policy_validation_comparison(*, hours: int = 168, limit: int = 12, record_limit: int = 5000) -> dict[str, Any]:
-    records = get_live_validation_records(hours=hours, limit=max(1, record_limit), sent_only=False)
+def get_policy_validation_comparison(
+    *,
+    hours: int = 168,
+    limit: int = 12,
+    record_limit: int = 5000,
+    records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if records is None:
+        records = get_live_validation_records(hours=hours, limit=max(1, record_limit), sent_only=False)
     grouped: dict[str, dict[str, Any]] = {}
     for record in records:
         descriptor = record.get("thresholds_used") if isinstance(record.get("thresholds_used"), dict) else {}
@@ -9130,12 +9171,16 @@ def get_policy_validation_comparison(*, hours: int = 168, limit: int = 12, recor
 def get_live_validation_summary(*, hours: int = 72, limit: int = 200) -> dict[str, Any]:
     result_limit = max(1, min(int(limit), 500))
     records_limit = max(result_limit, 300)
-    records = get_live_validation_records(hours=hours, limit=records_limit, sent_only=False)
+    comparison_records_limit = max(300, min(1000, records_limit * 2))
+    records = get_live_validation_records(hours=hours, limit=comparison_records_limit, sent_only=False)
+    comparison_records = records if hours >= 24 else None
+    records = records[:records_limit]
     missed = _build_missed_runner_analysis(records, hours=hours, limit=max(10, min(50, result_limit)))
     comparison = get_policy_validation_comparison(
         hours=max(hours, 24),
         limit=8,
-        record_limit=max(300, min(1000, records_limit * 2)),
+        record_limit=comparison_records_limit,
+        records=comparison_records,
     )
 
     route_counts: dict[str, int] = {}
@@ -10792,7 +10837,7 @@ async def daily_report_worker() -> None:
                         (yesterday,),
                     ).fetchone()
                 if not row:
-                    report = generate_daily_learning_report(yesterday)
+                    report = await asyncio.to_thread(generate_daily_learning_report, yesterday)
                     logger.info(
                         "[signal-learning] daily_report_generated date=%s totals=%s outcomes=%s",
                         yesterday,

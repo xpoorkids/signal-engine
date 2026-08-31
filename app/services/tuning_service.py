@@ -1989,7 +1989,8 @@ def apply_pending_rollout_verifications(
 async def rollout_verification_worker() -> None:
     while True:
         try:
-            result = apply_pending_rollout_verifications(
+            result = await asyncio.to_thread(
+                apply_pending_rollout_verifications,
                 baseline_hours=24,
                 post_hours=24,
                 limit=10,
@@ -3026,7 +3027,8 @@ def get_ops_digest(hours: int = 24) -> dict[str, Any]:
 
     health_status = str(engine_health.get("status") or "unknown")
     counts = diagnostics.get("counts_by_decision") if isinstance(diagnostics.get("counts_by_decision"), dict) else {}
-    sent_count = int(counts.get("sent") or 0)
+    action_counts = diagnostics.get("counts_by_action") if isinstance(diagnostics.get("counts_by_action"), dict) else {}
+    sent_count = int(action_counts.get("emit") or 0)
     skip_count = int(counts.get("candidate_gate_skip") or 0)
     block_count = int(counts.get("promotion_block") or 0)
     skip_pressure = float(engine_health.get("skip_pressure") or 0.0)
@@ -3409,9 +3411,12 @@ def dispatch_daily_opportunity_digest(hours: int = 6, limit: int = 10, *, force:
 
 def get_daily_readiness(hours: int = 6, limit: int = 10) -> dict[str, Any]:
     lookback = max(1, hours)
-    ops = get_ops_digest(hours=max(24, lookback))
+    ops = get_ops_digest(hours=lookback)
     opportunities = sls.get_daily_opportunity_brief(hours=lookback, limit=max(1, limit))
-    health = sls.get_engine_health_digest(hours=max(1, lookback))
+    command_center = ops.get("command_center") if isinstance(ops.get("command_center"), dict) else {}
+    health = command_center.get("engine_health") if isinstance(command_center.get("engine_health"), dict) else {}
+    if not health:
+        health = sls.get_engine_health_digest(hours=lookback)
     shadow = opportunities.get("shadow_summary") if isinstance(opportunities.get("shadow_summary"), dict) else {}
     blocker_tuning = opportunities.get("blocker_tuning") if isinstance(opportunities.get("blocker_tuning"), list) else []
     attention: list[str] = []
@@ -3447,7 +3452,7 @@ def get_daily_readiness(hours: int = 6, limit: int = 10) -> dict[str, Any]:
         "operator_links": {
             "daily_opportunities": f"/learning/ops/daily-opportunities?hours={lookback}&limit={max(1, limit)}",
             "daily_opportunities_dashboard": f"/learning/ops/daily-opportunities/dashboard?hours={lookback}&limit={max(1, limit)}",
-            "ops_digest": f"/learning/ops/digest?hours={max(24, lookback)}",
+            "ops_digest": f"/learning/ops/digest?hours={lookback}",
             "validation_summary": f"/learning/validation/summary?hours={max(72, lookback)}&limit=200",
         },
         "notes": [
@@ -3635,7 +3640,7 @@ def dispatch_policy_tiered_ops_digests() -> dict[str, Any]:
 async def ops_digest_worker() -> None:
     while True:
         try:
-            result = dispatch_policy_tiered_ops_digests()
+            result = await asyncio.to_thread(dispatch_policy_tiered_ops_digests)
             logger.info(
                 "[ops-digest] incident_level=%s dispatched=%s skipped=%s",
                 result.get("incident_level") or "normal",
