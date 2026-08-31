@@ -2,13 +2,28 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
 from fastapi import APIRouter
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient as FastAPITestClient
 
 from app import main
 from app.routes import learning as learning_route
 from app.services import signal_learning_service as sls
 from worker.events import Event
+
+
+OPERATOR_TOKEN = "test-operator-token"
+
+
+@pytest.fixture(autouse=True)
+def _configure_operator_auth(monkeypatch):
+    monkeypatch.setenv("SIGNAL_ENGINE_OPERATOR_API_TOKEN", OPERATOR_TOKEN)
+
+
+def TestClient(app, **kwargs):
+    headers = {"Authorization": f"Bearer {OPERATOR_TOKEN}"}
+    headers.update(kwargs.pop("headers", {}))
+    return FastAPITestClient(app, headers=headers, **kwargs)
 
 
 def test_learning_report_route_returns_latest(tmp_path, monkeypatch):

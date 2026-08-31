@@ -3,6 +3,7 @@ import logging
 import os
 import sqlite3
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -15,9 +16,21 @@ from app.services.x_identity_service import XIdentityService
 
 os.environ.setdefault("SIGNAL_ENGINE_PROCESS_ROLE", "engine")
 
-app = FastAPI(title="signal-engine")
 logger = logging.getLogger(__name__)
 _BACKGROUND_TASKS: dict[str, asyncio.Task] = {}
+
+
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    log_storage_configuration()
+    await start_background_workers()
+    try:
+        yield
+    finally:
+        await stop_background_workers()
+
+
+app = FastAPI(title="signal-engine", lifespan=app_lifespan)
 
 app.include_router(health.router)
 app.include_router(scan.router)
@@ -48,7 +61,6 @@ async def sqlite_error_handler(request: Request, exc: sqlite3.Error) -> JSONResp
     )
 
 
-@app.on_event("startup")
 def log_storage_configuration() -> None:
     db_path = resolve_engine_db_path()
     shared_env_set = bool(os.getenv("SIGNAL_ENGINE_DB_PATH", "").strip() or os.getenv("STATE_ENGINE_DB_PATH", "").strip())
@@ -134,7 +146,6 @@ def _snapshot_worker_enabled() -> bool:
     }
 
 
-@app.on_event("startup")
 async def start_background_workers() -> None:
     if not _storage_write_available():
         logger.warning("[startup] storage unavailable; learning background workers disabled until next restart")
@@ -167,7 +178,6 @@ async def start_background_workers() -> None:
         logger.warning("[startup] policy automation worker disabled")
 
 
-@app.on_event("shutdown")
 async def stop_background_workers() -> None:
     for name, task in list(_BACKGROUND_TASKS.items()):
         if task.done():

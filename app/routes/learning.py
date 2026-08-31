@@ -1,7 +1,9 @@
-import os
+from typing import Annotated
 
-from fastapi import APIRouter, Body, Header, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Security
 from fastapi.responses import HTMLResponse, PlainTextResponse
+
+from app.services.operator_auth_service import require_internal_write_auth, require_operator_api_auth
 
 from app.services.signal_learning_service import (
     activate_policy_rollout,
@@ -118,11 +120,8 @@ from app.services.tuning_service import (
 
 router = APIRouter()
 
-
-def _validate_internal_write_token(token: str | None) -> None:
-    expected = os.getenv("SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN", "").strip()
-    if expected and token != expected:
-        raise HTTPException(status_code=403, detail="forbidden")
+OperatorAuth = Annotated[dict[str, str], Security(require_operator_api_auth)]
+InternalWriteAuth = Annotated[dict[str, str], Security(require_internal_write_auth)]
 
 
 @router.get("/learning/report/latest")
@@ -220,7 +219,7 @@ def learning_policy_profiles(limit: int = 20, policy_name: str | None = None):
 
 
 @router.post("/learning/policy/profiles")
-def learning_policy_profiles_create(payload: dict[str, object] = Body(...)):
+def learning_policy_profiles_create(_auth: OperatorAuth, payload: dict[str, object] = Body(...)):
     try:
         return create_policy_profile(
             policy_name=str(payload.get("policy_name") or ""),
@@ -239,7 +238,7 @@ def learning_policy_rollouts(limit: int = 20, active_only: bool = False):
 
 
 @router.post("/learning/policy/rollouts")
-def learning_policy_rollouts_create(payload: dict[str, object] = Body(...)):
+def learning_policy_rollouts_create(_auth: OperatorAuth, payload: dict[str, object] = Body(...)):
     try:
         return activate_policy_rollout(
             policy_name=str(payload.get("policy_name") or ""),
@@ -273,7 +272,7 @@ def learning_policy_approvals(limit: int = 20, approval_status: str | None = Non
 
 
 @router.post("/learning/policy/approvals")
-def learning_policy_approvals_create(payload: dict[str, object] = Body(...)):
+def learning_policy_approvals_create(_auth: OperatorAuth, payload: dict[str, object] = Body(...)):
     try:
         return create_policy_approval(
             policy_name=str(payload.get("policy_name") or ""),
@@ -296,7 +295,7 @@ def learning_policy_approvals_by_id(approval_id: str):
 
 
 @router.post("/learning/policy/approvals/{approval_id}/status")
-def learning_policy_approvals_status(approval_id: str, payload: dict[str, object] = Body(...)):
+def learning_policy_approvals_status(approval_id: str, _auth: OperatorAuth, payload: dict[str, object] = Body(...)):
     try:
         return update_policy_approval_status(
             approval_id,
@@ -316,7 +315,7 @@ def learning_policy_events(limit: int = 50, event_type: str | None = None):
 
 
 @router.post("/learning/policy/guardrails/evaluate")
-def learning_policy_guardrails_evaluate(payload: dict[str, object] = Body(default={})):
+def learning_policy_guardrails_evaluate(_auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     return evaluate_policy_guardrails(
         hours=max(1, int(payload.get("hours") or 24)),
         min_samples=max(1, int(payload.get("min_samples") or 3)),
@@ -344,12 +343,12 @@ def learning_policy_automation_runs_latest():
 
 
 @router.post("/learning/policy/automation/approvals")
-def learning_policy_automation_approvals(payload: dict[str, object] = Body(default={})):
+def learning_policy_automation_approvals(_auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     return auto_create_policy_approvals(limit=int(payload.get("limit") or 20))
 
 
 @router.post("/learning/policy/automation/generate")
-def learning_policy_automation_generate(payload: dict[str, object] = Body(default={})):
+def learning_policy_automation_generate(_auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     return generate_policy_candidates(
         hours=max(1, int(payload.get("hours") or 24)),
         generation_limit=int(payload.get("generation_limit") or 6),
@@ -358,17 +357,17 @@ def learning_policy_automation_generate(payload: dict[str, object] = Body(defaul
 
 
 @router.post("/learning/policy/automation/canaries")
-def learning_policy_automation_canaries(payload: dict[str, object] = Body(default={})):
+def learning_policy_automation_canaries(_auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     return auto_schedule_policy_canaries(hours=max(1, int(payload.get("hours") or 24)))
 
 
 @router.post("/learning/policy/automation/promote")
-def learning_policy_automation_promote(payload: dict[str, object] = Body(default={})):
+def learning_policy_automation_promote(_auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     return auto_promote_policy_canaries(hours=max(1, int(payload.get("hours") or 24)))
 
 
 @router.post("/learning/policy/automation/run")
-def learning_policy_automation_run(payload: dict[str, object] = Body(default={})):
+def learning_policy_automation_run(_auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     return run_policy_automation_cycle(
         hours=max(1, int(payload.get("hours") or 24)),
         replay_limit=int(payload.get("replay_limit") or 20),
@@ -410,7 +409,7 @@ def learning_policy_shadow(
 
 
 @router.post("/learning/policy/replay/run")
-def learning_policy_replay_run(payload: dict[str, object] = Body(default={})):
+def learning_policy_replay_run(_auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     overrides = {
         "candidate_attention_min": payload.get("candidate_attention_min"),
         "candidate_creator_min": payload.get("candidate_creator_min"),
@@ -465,7 +464,7 @@ def learning_history_summary(hours: int | None = None, sample_limit: int = 10_00
 
 
 @router.post("/learning/ops/known-runners")
-def learning_known_runners(payload: dict[str, object] = Body(default={})):
+def learning_known_runners(_auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     raw_tokens = payload.get("tokens")
     if isinstance(raw_tokens, str):
         tokens = [item.strip() for item in raw_tokens.replace("\n", ",").split(",") if item.strip()]
@@ -482,10 +481,9 @@ def learning_known_runners(payload: dict[str, object] = Body(default={})):
 
 @router.post("/learning/internal/signals")
 def learning_internal_signal_ingest(
+    _auth: InternalWriteAuth,
     payload: dict[str, object] = Body(...),
-    x_signal_engine_token: str | None = Header(default=None),
 ):
-    _validate_internal_write_token(x_signal_engine_token)
     try:
         return ingest_signal_event(payload)
     except ValueError as exc:
@@ -494,10 +492,9 @@ def learning_internal_signal_ingest(
 
 @router.post("/learning/internal/decisions")
 def learning_internal_decision_ingest(
+    _auth: InternalWriteAuth,
     payload: dict[str, object] = Body(...),
-    x_signal_engine_token: str | None = Header(default=None),
 ):
-    _validate_internal_write_token(x_signal_engine_token)
     try:
         return ingest_signal_decision(payload)
     except ValueError as exc:
@@ -506,20 +503,18 @@ def learning_internal_decision_ingest(
 
 @router.post("/learning/internal/heartbeat")
 def learning_internal_heartbeat(
+    _auth: InternalWriteAuth,
     payload: dict[str, object] = Body(...),
-    x_signal_engine_token: str | None = Header(default=None),
 ):
-    _validate_internal_write_token(x_signal_engine_token)
     return ingest_runtime_heartbeat(payload)
 
 
 @router.post("/learning/admin/snapshot-jobs/prune")
 def learning_admin_prune_snapshot_jobs(
+    _auth: InternalWriteAuth,
     max_age_seconds: int | None = None,
     limit: int = 10_000,
-    x_signal_engine_token: str | None = Header(default=None),
 ):
-    _validate_internal_write_token(x_signal_engine_token)
     return prune_stale_snapshot_jobs(max_age_seconds=max_age_seconds, limit=limit)
 
 
@@ -585,7 +580,7 @@ def learning_tuning_approvals(
 
 
 @router.post("/learning/tuning/approvals")
-def learning_tuning_approvals_create(payload: dict[str, object] = Body(...)):
+def learning_tuning_approvals_create(_auth: OperatorAuth, payload: dict[str, object] = Body(...)):
     try:
         approval = create_tuning_approval(
             approval_kind=str(payload.get("approval_kind") or ""),
@@ -601,7 +596,7 @@ def learning_tuning_approvals_create(payload: dict[str, object] = Body(...)):
 
 
 @router.post("/learning/tuning/approvals/{approval_id}/status")
-def learning_tuning_approvals_status(approval_id: str, payload: dict[str, object] = Body(...)):
+def learning_tuning_approvals_status(approval_id: str, _auth: OperatorAuth, payload: dict[str, object] = Body(...)):
     try:
         approval = update_tuning_approval_status(
             approval_id,
@@ -759,7 +754,7 @@ def learning_tuning_verification_dashboard(
 
 
 @router.post("/learning/tuning/verification/apply")
-def learning_tuning_verification_apply(payload: dict[str, object] = Body(...)):
+def learning_tuning_verification_apply(_auth: OperatorAuth, payload: dict[str, object] = Body(...)):
     try:
         return apply_rollout_verification(
             approval_id=str(payload.get("approval_id") or "") or None,
@@ -773,7 +768,7 @@ def learning_tuning_verification_apply(payload: dict[str, object] = Body(...)):
 
 
 @router.post("/learning/tuning/verification/run")
-def learning_tuning_verification_run(payload: dict[str, object] = Body(default={})):
+def learning_tuning_verification_run(_auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     return apply_pending_rollout_verifications(
         baseline_hours=max(1, int(payload.get("baseline_hours") or 24)),
         post_hours=max(1, int(payload.get("post_hours") or 24)),
@@ -803,7 +798,7 @@ def learning_tuning_incidents_dashboard(limit: int = 20, active_only: bool = Fal
 
 
 @router.post("/learning/tuning/incidents/state")
-def learning_tuning_incident_state(payload: dict[str, object] = Body(...)):
+def learning_tuning_incident_state(_auth: OperatorAuth, payload: dict[str, object] = Body(...)):
     try:
         incident = update_incident_state(
             event_type=str(payload.get("event_type") or ""),
@@ -825,7 +820,11 @@ def learning_tuning_incident_state(payload: dict[str, object] = Body(...)):
 
 
 @router.post("/learning/tuning/notifications/{notification_id}/state")
-def learning_tuning_notification_state(notification_id: str, payload: dict[str, object] = Body(...)):
+def learning_tuning_notification_state(
+    notification_id: str,
+    _auth: OperatorAuth,
+    payload: dict[str, object] = Body(...),
+):
     try:
         notification = update_rollout_notification_state(
             notification_id,
@@ -847,7 +846,7 @@ def learning_command_center(hours: int = 24):
 
 
 @router.post("/learning/command-center/regime-action")
-def learning_command_center_regime_action(payload: dict[str, object] = Body(...)):
+def learning_command_center_regime_action(_auth: OperatorAuth, payload: dict[str, object] = Body(...)):
     try:
         return execute_regime_policy_action(
             regime_key=str(payload.get("regime_key") or ""),
@@ -922,7 +921,7 @@ def learning_ops_ready_for_watch_dashboard(limit: int = 25):
 
 
 @router.post("/learning/ops/observe-review/ready-for-watch/send")
-def learning_ops_ready_for_watch_send(payload: dict[str, object] = Body(default={})):
+def learning_ops_ready_for_watch_send(_auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     return dispatch_ready_for_watch_digest(
         limit=max(1, int(payload.get("limit") or 10)),
         force=bool(payload.get("force") or False),
@@ -930,7 +929,7 @@ def learning_ops_ready_for_watch_send(payload: dict[str, object] = Body(default=
 
 
 @router.post("/learning/ops/observe-review/sync")
-def learning_ops_observe_review_sync(payload: dict[str, object] = Body(default={})):
+def learning_ops_observe_review_sync(_auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     return sync_observe_review_queue(
         hours=max(1, int(payload.get("hours") or 24)),
         limit=max(1, int(payload.get("limit") or 200)),
@@ -938,12 +937,12 @@ def learning_ops_observe_review_sync(payload: dict[str, object] = Body(default={
 
 
 @router.post("/learning/ops/observe-review/recheck")
-def learning_ops_observe_review_recheck(payload: dict[str, object] = Body(default={})):
+def learning_ops_observe_review_recheck(_auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     return run_observe_rechecks(limit=max(1, int(payload.get("limit") or 50)))
 
 
 @router.post("/learning/ops/observe-review/{token}/action")
-def learning_ops_observe_review_action(token: str, payload: dict[str, object] = Body(...)):
+def learning_ops_observe_review_action(token: str, _auth: OperatorAuth, payload: dict[str, object] = Body(...)):
     try:
         return apply_observe_review_action(
             token,
@@ -969,7 +968,7 @@ def learning_ops_watch_override_autopilot_status(ready_limit: int = 25):
 
 
 @router.post("/learning/ops/watch-overrides/autopilot/run")
-def learning_ops_watch_override_autopilot_run(payload: dict[str, object] = Body(default={})):
+def learning_ops_watch_override_autopilot_run(_auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     return run_watch_override_autopilot(
         limit=int(payload["limit"]) if payload.get("limit") is not None else None,
         max_active=int(payload["max_active"]) if payload.get("max_active") is not None else None,
@@ -989,7 +988,7 @@ def learning_ops_watch_override_active(token: str):
 
 
 @router.post("/learning/ops/watch-overrides/{token}/revoke")
-def learning_ops_watch_override_revoke(token: str, payload: dict[str, object] = Body(default={})):
+def learning_ops_watch_override_revoke(token: str, _auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     try:
         return revoke_watch_override(
             token,
@@ -1022,10 +1021,9 @@ def learning_ops_wallet_cluster_profile(cluster_id: str, hours: int = 2160):
 
 @router.post("/learning/ops/wallet-clusters")
 def learning_ops_wallet_cluster_upsert(
+    _auth: InternalWriteAuth,
     payload: dict[str, object] = Body(...),
-    x_signal_engine_token: str | None = Header(default=None),
 ):
-    _validate_internal_write_token(x_signal_engine_token)
     try:
         return upsert_wallet_cluster(payload)
     except ValueError as exc:
@@ -1034,10 +1032,9 @@ def learning_ops_wallet_cluster_upsert(
 
 @router.post("/learning/ops/wallet-clusters/import")
 def learning_ops_wallet_cluster_import(
+    _auth: InternalWriteAuth,
     payload: dict[str, object] = Body(...),
-    x_signal_engine_token: str | None = Header(default=None),
 ):
-    _validate_internal_write_token(x_signal_engine_token)
     entries = payload.get("clusters") or payload.get("entries") or []
     if not isinstance(entries, list):
         raise HTTPException(status_code=400, detail="clusters_must_be_list")
@@ -1054,10 +1051,9 @@ def learning_ops_wallet_cluster_import(
 
 @router.post("/learning/ops/wallet-clusters/outcomes")
 def learning_ops_wallet_cluster_outcome(
+    _auth: InternalWriteAuth,
     payload: dict[str, object] = Body(...),
-    x_signal_engine_token: str | None = Header(default=None),
 ):
-    _validate_internal_write_token(x_signal_engine_token)
     try:
         return record_wallet_cluster_token_outcome(payload)
     except ValueError as exc:
@@ -1066,10 +1062,9 @@ def learning_ops_wallet_cluster_outcome(
 
 @router.post("/learning/internal/wallet-clusters/reputation")
 def learning_internal_wallet_cluster_reputation(
+    _auth: InternalWriteAuth,
     payload: dict[str, object] = Body(...),
-    x_signal_engine_token: str | None = Header(default=None),
 ):
-    _validate_internal_write_token(x_signal_engine_token)
     wallets = payload.get("wallets") or []
     if not isinstance(wallets, list):
         raise HTTPException(status_code=400, detail="wallets_must_be_list")
@@ -1083,7 +1078,7 @@ def learning_ops_token_review(token: str, hours: int = 168, limit: int = 25):
 
 
 @router.post("/learning/ops/daily-opportunities/send")
-def learning_ops_daily_opportunities_send(payload: dict[str, object] = Body(default={})):
+def learning_ops_daily_opportunities_send(_auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     hours = max(1, int(payload.get("hours") or 6))
     limit = max(1, int(payload.get("limit") or 10))
     force = bool(payload.get("force") or False)
@@ -1101,7 +1096,7 @@ def learning_ops_readiness_dashboard(hours: int = 6, limit: int = 10):
 
 
 @router.post("/learning/ops/digest/send")
-def learning_ops_digest_send(payload: dict[str, object] = Body(default={})):
+def learning_ops_digest_send(_auth: OperatorAuth, payload: dict[str, object] = Body(default={})):
     hours = max(1, int(payload.get("hours") or 24))
     force = bool(payload.get("force") or False)
     return dispatch_ops_digest(hours=hours, force=force)

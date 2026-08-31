@@ -3,18 +3,13 @@ import gc
 import sqlite3
 import time
 
-from fastapi import APIRouter, Body, Header, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Security
 from fastapi.responses import PlainTextResponse
 
 from app.services.db_service import resolve_engine_db_path
+from app.services.operator_auth_service import require_internal_write_auth
 
 router = APIRouter()
-
-
-def _validate_storage_admin_token(token: str | None) -> None:
-    expected = os.getenv("SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN", "").strip()
-    if expected and token != expected:
-        raise HTTPException(status_code=403, detail="forbidden")
 
 
 def _storage_write_error(db_path) -> str | None:
@@ -62,8 +57,13 @@ def _is_malformed_storage_error(error: str | None) -> bool:
     )
 
 
-@router.api_route("/", methods=["GET", "HEAD"])
-def root():
+@router.get("/", operation_id="root_get")
+def root_get():
+    return {"status": "ok", "service": "signal-engine"}
+
+
+@router.head("/", operation_id="root_head", include_in_schema=False)
+def root_head():
     return {"status": "ok", "service": "signal-engine"}
 
 
@@ -161,23 +161,11 @@ def _delete_batch(
 @router.post("/health/storage/recover")
 def storage_recover(
     payload: dict[str, object] = Body(default={}),
-    x_signal_engine_token: str | None = Header(default=None),
+    _auth: dict[str, str] = Security(require_internal_write_auth),
 ):
     db_path = resolve_engine_db_path()
     if not db_path.exists():
         raise HTTPException(status_code=404, detail="database_not_found")
-    expected = os.getenv("SIGNAL_ENGINE_INTERNAL_WRITE_TOKEN", "").strip()
-    if expected and x_signal_engine_token != expected:
-        confirm = bool(payload.get("confirm_storage_full_recovery") or False)
-        confirm_malformed_reset = bool(payload.get("confirm_malformed_storage_reset") or False)
-        write_error = _storage_write_error(db_path)
-        schema_error = _storage_schema_error(db_path)
-        disk_full_confirmed = confirm and "database or disk is full" in str(write_error or "").lower()
-        malformed_confirmed = confirm_malformed_reset and (
-            _is_malformed_storage_error(write_error) or _is_malformed_storage_error(schema_error)
-        )
-        if not (disk_full_confirmed or malformed_confirmed):
-            raise HTTPException(status_code=403, detail="forbidden")
     now = int(time.time())
     max_age_days = max(1, min(int(payload.get("max_age_days") or 21), 3650))
     batch_limit = max(100, min(int(payload.get("batch_limit") or 25000), 250000))

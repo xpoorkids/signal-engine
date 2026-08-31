@@ -1,6 +1,21 @@
-from fastapi.testclient import TestClient
+import pytest
+from fastapi.testclient import TestClient as FastAPITestClient
 
 from app import main
+
+
+OPERATOR_TOKEN = "test-operator-token"
+
+
+@pytest.fixture(autouse=True)
+def _configure_operator_auth(monkeypatch):
+    monkeypatch.setenv("SIGNAL_ENGINE_OPERATOR_API_TOKEN", OPERATOR_TOKEN)
+
+
+def TestClient(app, **kwargs):
+    headers = {"Authorization": f"Bearer {OPERATOR_TOKEN}"}
+    headers.update(kwargs.pop("headers", {}))
+    return FastAPITestClient(app, headers=headers, **kwargs)
 
 
 def test_position_routes_manual_buy_sell_history_reopen_and_recommendation(tmp_path, monkeypatch):

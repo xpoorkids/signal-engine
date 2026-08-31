@@ -115,12 +115,12 @@ def test_storage_recover_resets_confirmed_malformed_database(tmp_path, monkeypat
     )
     dry_run = client.post(
         "/health/storage/recover",
-        headers={"X-Signal-Engine-Token": "wrong"},
+        headers={"X-Signal-Engine-Token": "secret-token"},
         json={"dry_run": True, "confirm_malformed_storage_reset": True},
     )
     response = client.post(
         "/health/storage/recover",
-        headers={"X-Signal-Engine-Token": "wrong"},
+        headers={"X-Signal-Engine-Token": "secret-token"},
         json={"confirm_malformed_storage_reset": True},
     )
 

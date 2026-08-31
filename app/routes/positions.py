@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Security
 from pydantic import BaseModel
 
 from app.services.action_engine_service import ActionEngineService
 from app.services.manual_position_service import ManualPositionService
+from app.services.operator_auth_service import require_operator_api_auth
 
 
-router = APIRouter()
+router = APIRouter(dependencies=[Security(require_operator_api_auth)])
 
 
 class BuyFillRequest(BaseModel):
