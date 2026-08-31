@@ -1,8 +1,8 @@
-fastapi
-uvicorn
-pydantic
-pydantic-settings>=2.0
-requests
-python-dotenv
-websockets
-httpx
+fastapi==0.135.1
+uvicorn==0.41.0
+pydantic==2.12.5
+pydantic-settings==2.13.1
+requests==2.32.5
+python-dotenv==1.2.2
+websockets==16.0
+httpx==0.28.1

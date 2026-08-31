@@ -1,0 +1,4 @@
+{"token":"REPLAY_RISE","chain":"solana","lp_usd":120000,"vol_5m":2000,"tx_5m":8,"holders_delta_15m":2,"top10_pct":45,"rug_bad":false,"ts":"2026-08-01T12:00:00Z"}
+{"token":"REPLAY_RISE","chain":"solana","lp_usd":120000,"vol_5m":18000,"tx_5m":60,"holders_delta_15m":5,"top10_pct":38,"rug_bad":false,"ts":"2026-08-01T12:01:00Z"}
+{"token":"REPLAY_RISE","chain":"solana","lp_usd":120000,"vol_5m":60000,"tx_5m":140,"holders_delta_15m":25,"top10_pct":35,"rug_bad":false,"ts":"2026-08-01T12:02:00Z"}
+{"token":"REPLAY_RISE","chain":"solana","lp_usd":120000,"vol_5m":72000,"tx_5m":170,"holders_delta_15m":55,"top10_pct":34,"rug_bad":false,"ts":"2026-08-01T12:03:00Z"}

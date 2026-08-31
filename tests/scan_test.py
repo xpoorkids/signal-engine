@@ -14,6 +14,7 @@ NO n8n
 NO threading
 """
 
+import os
 import time
 from datetime import datetime, timezone
 from collections import defaultdict
@@ -21,7 +22,7 @@ from collections import defaultdict
 from app.watch.watch_state_manager import evolve_watch_stage
 from app.watch.stage_config import SOL_STAGE_THRESHOLDS as T
 
-DRY_RUN = False
+DRY_RUN = os.getenv("DRY_RUN", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 SIGNAL_SCRIPT = {
     "CONFIRM_OK": [

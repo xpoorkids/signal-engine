@@ -24,7 +24,7 @@ def _token_key(signals: Dict[str, Any]) -> Optional[str]:
                 return token
     return None
 
-def evolve_watch_stage(signals: Dict[str, Any]) -> StageDecision:
+def evolve_watch_stage(signals: Dict[str, Any], *, dry_run: bool = False) -> StageDecision:
     """
     Single entry point for watch stage evolution.
     Calls the classifier, evaluates transitions, and persists stage state.
@@ -36,11 +36,13 @@ def evolve_watch_stage(signals: Dict[str, Any]) -> StageDecision:
 
     chain = signals.get("chain") if isinstance(signals.get("chain"), str) else "sol"
     _STATE.get(token)
-    persist_stage_state(token, chain, decision.stage, decision.score, decision.reasons)
+    if not dry_run:
+        persist_stage_state(token, chain, decision.stage, decision.score, decision.reasons)
 
-    _STATE[token] = {
-        "stage": decision.stage,
-        "score": decision.score,
-        "entered_at": datetime.now(timezone.utc),
-    }
+    if not dry_run:
+        _STATE[token] = {
+            "stage": decision.stage,
+            "score": decision.score,
+            "entered_at": datetime.now(timezone.utc),
+        }
     return decision

@@ -16,11 +16,15 @@ import json
 import os
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 
 from app.watch.watch_state_manager import evolve_watch_stage
 from app.watch.stage_config import SOL_STAGE_THRESHOLDS as T
 
-WATCH_LOG_PATH = "app/data/watch.log"  # adjust if needed
+WATCH_LOG_PATH = os.getenv(
+    "SIGNAL_ENGINE_REPLAY_PATH",
+    str(Path(__file__).parent / "fixtures" / "watch_replay.jsonl"),
+)
 DRY_RUN = True
 
 
@@ -68,9 +72,7 @@ def build_signals_from_event(e: dict) -> dict:
 def main() -> None:
     events = load_events(WATCH_LOG_PATH)
     if not events:
-        print("\n=== REPLAY TEST ===")
-        print(" SKIP (watch.log missing or empty)")
-        return
+        raise AssertionError(f"Replay fixture missing or empty: {WATCH_LOG_PATH}")
 
     by_token = defaultdict(list)
     for e in events:
@@ -87,6 +89,8 @@ def main() -> None:
     prev_stage: dict[str, str | None] = {}
     last_promo_tick: dict[str, int] = {}
     cooldown_ticks = int(T["near_pass_confirmation"]["promotion_cooldown_ticks"])
+    processed_events = 0
+    transition_count = 0
 
     print("\n=== REPLAY TEST ===")
 
@@ -97,6 +101,7 @@ def main() -> None:
         for idx, r in enumerate(rows, start=1):
             signals = build_signals_from_event(r)
             result = evolve_watch_stage(signals, dry_run=DRY_RUN)
+            processed_events += 1
 
             if prev_stage[token] is None:
                 prev_stage[token] = result.stage
@@ -108,6 +113,7 @@ def main() -> None:
             from_stage = prev_stage[token]
             to_stage = result.stage
             ts = signals["ts"]
+            transition_count += 1
 
             print(
                 f"[REPLAY] {token:<12} {from_stage:<10} {to_stage:<10} {ts.isoformat()}"
@@ -131,6 +137,10 @@ def main() -> None:
 
     if cooldown_violations:
         errors.append(f"Cooldown violations: {cooldown_violations}")
+    if processed_events < 4:
+        errors.append(f"Replay processed too few events: {processed_events}")
+    if transition_count < 1:
+        errors.append("Replay produced no stage transitions")
 
     print("\n=== RESULT ===")
     if errors:
