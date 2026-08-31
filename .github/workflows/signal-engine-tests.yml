@@ -11,10 +11,10 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -31,7 +31,7 @@ jobs:
         env:
           DRY_RUN: "1"
         run: |
-          pytest -q
+          python -m pytest -q
 
       - name: Run deterministic scan test
         env:
